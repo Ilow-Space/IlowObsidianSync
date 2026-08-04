@@ -1,0 +1,9 @@
+{
+  "id": "obsidian-crdt-sync",
+  "name": "Obsidian CRDT Sync",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "An elegant serverless peer-to-peer sync plugin for Obsidian powered by Yjs, E2EE, and Postgres/PostgREST.",
+  "author": "Jules",
+  "isDesktopOnly": false
+}
