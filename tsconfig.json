@@ -1,0 +1,27 @@
+﻿{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2021", "DOM"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "outDir": "./dist",
+    "baseUrl": ".",
+    "types": [
+      "node",
+      "@wdio/globals/types",
+      "@wdio/mocha-framework",
+      "wdio-obsidian-service"
+    ],
+    "paths": {
+      "@domain/*": ["src/1_Domain/*"],
+      "@application/*": ["src/2_Application/*"],
+      "@infrastructure/*": ["src/3_Infrastructure/*"],
+      "@presentation/*": ["src/4_Presentation/*"]
+    }
+  },
+  "include": ["src/**/*", "test/**/*", "wdio.conf.mts"]
+}

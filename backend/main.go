@@ -1,0 +1,848 @@
+package main
+
+import (
+	"compress/gzip"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"regexp"
+	"runtime"
+	"runtime/debug"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/joho/godotenv"
+	"github.com/lib/pq"
+)
+
+var (
+	port        string
+	dbConnStr   string
+	adminAPIKey string
+	channel     = "vault_updates_channel"
+	db          *sql.DB
+)
+
+var (
+	startTime        = time.Now()
+	dataTransferred  uint64
+	activeWebSockets int64
+	reqsLastSecond   uint64
+	reqsLastHour     uint64
+	currentRPS       float64
+	currentRPM       float64
+	telemetryMux     sync.Mutex
+)
+
+type ServerTelemetry struct {
+	RPS                  float64 `json:"rps"`
+	RPMAvgHour           float64 `json:"rpmAvgHour"`
+	DataTransferredBytes uint64  `json:"dataTransferredBytes"`
+	ActiveWebSockets     int64   `json:"activeWebSockets"`
+	UptimeSeconds        int64   `json:"uptimeSeconds"`
+	MemoryAllocMB        float64 `json:"memoryAllocMb"`
+	DBConnections        int     `json:"dbConnections"`
+	SystemHealth         string  `json:"systemHealth"`
+}
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+type Client struct {
+	conn          *websocket.Conn
+	subscriptions map[string]bool
+	mu            sync.RWMutex
+}
+
+type Hub struct {
+	clients map[*Client]bool
+	mu      sync.RWMutex
+}
+
+var globalHub = Hub{
+	clients: make(map[*Client]bool),
+}
+
+type SubscribeMessage struct {
+	Action  string   `json:"action"`
+	Filter  string   `json:"filter"`
+	Filters []string `json:"filters"`
+}
+
+type PgPayload struct {
+	Type   string `json:"type"`
+	Table  string `json:"table"`
+	Record struct {
+		DocumentID string `json:"document_id"`
+		ID         int    `json:"id"`
+	} `json:"record"`
+}
+
+type UpdatePayload struct {
+	DocumentID      string  `json:"document_id"`
+	EncryptedUpdate string  `json:"encrypted_update"`
+	EncryptedPath   *string `json:"encrypted_path,omitempty"`
+}
+
+type CompactPayload struct {
+	PState         string  `json:"p_state"`
+	PMaxID         int     `json:"p_max_id"`
+	PIsDeleted     bool    `json:"p_is_deleted"`
+	PEncryptedPath *string `json:"p_encrypted_path,omitempty"`
+}
+
+func startTelemetryTracker() {
+	secTicker := time.NewTicker(1 * time.Second)
+	hourTicker := time.NewTicker(1 * time.Hour)
+	
+	idleSeconds := 0         // NEW: Tracks consecutive seconds with zero traffic
+	isOptimizing := false    // NEW: Mutex flag to prevent overlapping maintenance runs
+
+	for {
+		select {
+		case <-secTicker.C:
+			rps := atomic.SwapUint64(&reqsLastSecond, 0)
+			
+			telemetryMux.Lock()
+			currentRPS = float64(rps)
+			telemetryMux.Unlock()
+
+			// --- IDLE DETECTION LOGIC ---
+			if rps == 0 {
+				idleSeconds++
+			} else {
+				idleSeconds = 0 // Reset the counter the millisecond a user syncs
+			}
+
+			// Trigger maintenance exactly once after 5 minutes (300 seconds) of total API silence
+			if idleSeconds == 300 && !isOptimizing {
+				isOptimizing = true
+				go func() {
+					runIdleOptimizations()
+					isOptimizing = false
+				}()
+			}
+
+		case <-hourTicker.C:
+			rpm := atomic.SwapUint64(&reqsLastHour, 0)
+			telemetryMux.Lock()
+			currentRPM = float64(rpm) / 60.0
+			telemetryMux.Unlock()
+		}
+	}
+}
+
+func runIdleOptimizations() {
+	log.Println("[Self-Optimization] Server has been completely idle for 5 minutes. Initiating maintenance tasks...")
+
+	// 1. Force Go Runtime to surrender unused RAM back to the Operating System
+	var memBefore runtime.MemStats
+	runtime.ReadMemStats(&memBefore)
+	
+	debug.FreeOSMemory() // Aggressively invokes GC and releases memory pages to the OS
+	
+	var memAfter runtime.MemStats
+	runtime.ReadMemStats(&memAfter)
+	
+	reclaimedMB := float64(memBefore.Alloc - memAfter.Alloc) / 1024.0 / 1024.0
+	if reclaimedMB > 0 {
+		log.Printf("[Self-Optimization] Go Garbage Collector reclaimed %.2f MB of RAM.\n", reclaimedMB)
+	}
+
+	// 2. Postgres Physical Defragmentation
+	// This reclaims disk space from dead tuples left behind by CRDT compactions and updates query planner stats.
+	// Note: VACUUM ANALYZE is non-blocking, so if a user suddenly connects, the database won't lock up.
+	if db != nil {
+		start := time.Now()
+		_, err := db.Exec("VACUUM ANALYZE vault_snapshots, vault_updates;")
+		if err != nil {
+			log.Printf("[Self-Optimization] Postgres VACUUM failed: %v\n", err)
+		} else {
+			log.Printf("[Self-Optimization] Postgres defragmented successfully in %v.\n", time.Since(start))
+		}
+	}
+
+	log.Println("[Self-Optimization] Maintenance complete. Server is operating at peak efficiency.")
+}
+
+func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found, relying on system environment variables")
+	}
+
+	port = getEnv("PORT", "3001")
+	dbConnStr = getEnv("DATABASE_URL", "postgres://postgres:your_password@localhost:5432/your_db?sslmode=disable")
+	adminAPIKey = getEnv("ADMIN_API_KEY", "super-secret-admin-token")
+
+	var err error
+	db, err = sql.Open("postgres", dbConnStr)
+	if err != nil {
+		log.Fatalf("Failed to open database: %v", err)
+	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	if err := db.Ping(); err != nil {
+		log.Fatalf("Failed to ping database: %v", err)
+	}
+	log.Println("Database connection established successfully.")
+
+	runMigrations()
+
+	listener := pq.NewListener(dbConnStr, 10*time.Second, time.Minute, func(ev pq.ListenerEventType, err error) {
+		if err != nil {
+			log.Println("Postgres listener error:", err)
+		}
+	})
+
+	err = listener.Listen(channel)
+	if err != nil {
+		log.Fatalf("Could not listen to channel %s: %v", channel, err)
+	}
+	log.Printf("Connected to PostgreSQL. Listening on channel: %s\n", channel)
+
+	go handleDatabaseNotifications(listener)
+	go startTelemetryTracker()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", handleWebSocket)
+	mux.HandleFunc("GET /api/telemetry", handleGetTelemetry)
+	mux.HandleFunc("GET /api/vault/manifest", handleGetManifest)
+	mux.HandleFunc("GET /api/vault/latest_ids", handleGetBulkLatestUpdateIDs) // NEW BULK ENDPOINT
+	mux.HandleFunc("GET /api/snapshots/{id}", handleGetSnapshot)
+	mux.HandleFunc("GET /api/snapshots/{id}/updates", handleGetUpdates)
+	mux.HandleFunc("GET /api/snapshots/{id}/latest_id", handleGetLatestUpdateID)
+	mux.HandleFunc("POST /api/updates", handlePostUpdate)
+	mux.HandleFunc("POST /api/snapshots/{id}/compact", handlePostCompact)
+	mux.HandleFunc("DELETE /api/snapshots/{id}", handleDeleteSnapshot)
+	mux.HandleFunc("POST /api/admin/truncate", handlePostTruncate)
+
+	log.Printf("Realtime WebSocket & REST server running on http://localhost:%s\n", port)
+	if err := http.ListenAndServe(":"+port, corsMiddleware(mux)); err != nil {
+		log.Fatal("ListenAndServe:", err)
+	}
+}
+
+type gzipResponseWriter struct {
+	io.Writer
+	http.ResponseWriter
+}
+
+func (g gzipResponseWriter) Write(b []byte) (int, error) {
+	return g.Writer.Write(b)
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddUint64(&reqsLastSecond, 1)
+		atomic.AddUint64(&reqsLastHour, 1)
+		if r.ContentLength > 0 {
+			atomic.AddUint64(&dataTransferred, uint64(r.ContentLength))
+		}
+
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") && r.Header.Get("Upgrade") != "websocket" {
+			w.Header().Set("Content-Encoding", "gzip")
+			gz := gzip.NewWriter(w)
+			defer gz.Close()
+			gzw := gzipResponseWriter{Writer: gz, ResponseWriter: w}
+			next.ServeHTTP(gzw, r)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func runMigrations() {
+	migrations := []string{
+		`CREATE TABLE IF NOT EXISTS vault_snapshots (
+			document_id TEXT PRIMARY KEY,
+			encrypted_state BYTEA,
+			encrypted_path BYTEA,
+			is_deleted BOOLEAN DEFAULT false,
+			max_compacted_id INT DEFAULT 0,
+			updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`ALTER TABLE vault_snapshots ADD COLUMN IF NOT EXISTS max_compacted_id INT DEFAULT 0;`,
+		`CREATE TABLE IF NOT EXISTS vault_updates (
+			id SERIAL PRIMARY KEY,
+			document_id TEXT NOT NULL REFERENCES vault_snapshots(document_id) ON DELETE CASCADE,
+			encrypted_update BYTEA,
+			created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_vault_updates_doc_id ON vault_updates(document_id);`,
+		`CREATE OR REPLACE FUNCTION notify_vault_update()
+		RETURNS trigger AS $$
+		BEGIN
+		  PERFORM pg_notify('vault_updates_channel', json_build_object(
+			'type', 'INSERT',
+			'table', 'vault_updates',
+			'record', json_build_object('document_id', NEW.document_id, 'id', NEW.id)
+		  )::text);
+		  RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql;`,
+		`DROP TRIGGER IF EXISTS vault_update_trigger ON vault_updates;`,
+		`CREATE TRIGGER vault_update_trigger
+		AFTER INSERT ON vault_updates
+		FOR EACH ROW EXECUTE FUNCTION notify_vault_update();`,
+	}
+
+	for idx, query := range migrations {
+		_, err := db.Exec(query)
+		if err != nil {
+			log.Fatalf("Failed to execute migration step %d: %v", idx+1, err)
+		}
+	}
+}
+
+func hexToBytea(hexStr string) ([]byte, error) {
+	if len(hexStr) >= 2 && hexStr[:2] == "\\x" {
+		hexStr = hexStr[2:]
+	}
+	return hex.DecodeString(hexStr)
+}
+
+func byteaToHex(b []byte) string {
+	if b == nil {
+		return ""
+	}
+	return "\\x" + hex.EncodeToString(b)
+}
+
+func handleGetTelemetry(w http.ResponseWriter, r *http.Request) {
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+
+	telemetryMux.Lock()
+	rps := currentRPS
+	rpm := currentRPM
+	telemetryMux.Unlock()
+
+	openConns := 0
+	if db != nil {
+		openConns = db.Stats().OpenConnections
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(ServerTelemetry{
+		RPS:                  rps,
+		RPMAvgHour:           rpm,
+		DataTransferredBytes: atomic.LoadUint64(&dataTransferred),
+		ActiveWebSockets:     atomic.LoadInt64(&activeWebSockets),
+		UptimeSeconds:        int64(time.Since(startTime).Seconds()),
+		MemoryAllocMB:        float64(memStats.Alloc) / 1024 / 1024,
+		DBConnections:        openConns,
+		SystemHealth:         "healthy",
+	})
+}
+
+// BULK OPTIMIZATION
+func handleGetBulkLatestUpdateIDs(w http.ResponseWriter, r *http.Request) {
+	rows, err := db.Query("SELECT document_id, MAX(id) as max_id FROM vault_updates GROUP BY document_id")
+	if err != nil {
+		log.Printf("Error fetching bulk latest IDs: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	result := make(map[string]int)
+	for rows.Next() {
+		var docID string
+		var maxID int
+		if err := rows.Scan(&docID, &maxID); err != nil {
+			continue
+		}
+		result[docID] = maxID
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+func handleGetSnapshot(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "Missing document ID", http.StatusBadRequest)
+		return
+	}
+
+	var encState []byte
+	var encPath []byte
+	var isDeleted bool
+	var maxCompactedID int
+	var updatedAt time.Time
+
+	err := db.QueryRow("SELECT encrypted_state, encrypted_path, is_deleted, max_compacted_id, updated_at FROM vault_snapshots WHERE document_id = $1", id).
+		Scan(&encState, &encPath, &isDeleted, &maxCompactedID, &updatedAt)
+
+	if err == sql.ErrNoRows {
+		http.Error(w, "Snapshot not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	type SnapshotRow struct {
+		DocumentID     string `json:"document_id"`
+		EncryptedState string `json:"encrypted_state,omitempty"`
+		EncryptedPath  string `json:"encrypted_path,omitempty"`
+		IsDeleted      bool   `json:"is_deleted"`
+		MaxCompactedID int    `json:"max_compacted_id"`
+		UpdatedAt      string `json:"updated_at"`
+	}
+
+	row := SnapshotRow{
+		DocumentID:     id,
+		EncryptedState: byteaToHex(encState),
+		EncryptedPath:  byteaToHex(encPath),
+		IsDeleted:      isDeleted,
+		MaxCompactedID: maxCompactedID,
+		UpdatedAt:      updatedAt.Format(time.RFC3339),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode([]SnapshotRow{row})
+}
+
+func handleGetUpdates(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "Missing document ID", http.StatusBadRequest)
+		return
+	}
+
+	sinceStr := r.URL.Query().Get("since")
+	since := 0
+	if sinceStr != "" {
+		var err error
+		since, err = strconv.Atoi(sinceStr)
+		if err != nil {
+			http.Error(w, "Invalid since parameter", http.StatusBadRequest)
+			return
+		}
+	}
+
+	rows, err := db.Query("SELECT id, document_id, encrypted_update, created_at FROM vault_updates WHERE document_id = $1 AND id > $2 ORDER BY id ASC", id, since)
+	if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type UpdateRow struct {
+		ID              int    `json:"id"`
+		DocumentID      string `json:"document_id"`
+		EncryptedUpdate string `json:"encrypted_update"`
+		CreatedAt       string `json:"created_at"`
+	}
+
+	var updates []UpdateRow
+	for rows.Next() {
+		var uID int
+		var docID string
+		var encUpdate []byte
+		var createdAt time.Time
+
+		if err := rows.Scan(&uID, &docID, &encUpdate, &createdAt); err != nil {
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		updates = append(updates, UpdateRow{
+			ID:              uID,
+			DocumentID:      docID,
+			EncryptedUpdate: byteaToHex(encUpdate),
+			CreatedAt:       createdAt.Format(time.RFC3339),
+		})
+	}
+
+	if updates == nil {
+		updates = []UpdateRow{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(updates)
+}
+
+func handleGetLatestUpdateID(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "Missing document ID", http.StatusBadRequest)
+		return
+	}
+
+	var lastID int
+	err := db.QueryRow("SELECT id FROM vault_updates WHERE document_id = $1 ORDER BY id DESC LIMIT 1", id).Scan(&lastID)
+	if err == sql.ErrNoRows {
+		lastID = 0
+	} else if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"id": lastID})
+}
+
+func handlePostUpdate(w http.ResponseWriter, r *http.Request) {
+	var payload UpdatePayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	updateBytes, err := hexToBytea(payload.EncryptedUpdate)
+	if err != nil {
+		http.Error(w, "Invalid encrypted_update hex format", http.StatusBadRequest)
+		return
+	}
+
+	var pathBytes []byte
+	if payload.EncryptedPath != nil {
+		pathBytes, err = hexToBytea(*payload.EncryptedPath)
+		if err != nil {
+			http.Error(w, "Invalid encrypted_path hex format", http.StatusBadRequest)
+			return
+		}
+	}
+
+	if len(pathBytes) > 0 {
+		_, err = db.Exec(`
+			INSERT INTO vault_snapshots (document_id, encrypted_state, encrypted_path, is_deleted, updated_at)
+			VALUES ($1, NULL, $2, false, NOW())
+			ON CONFLICT (document_id) DO UPDATE
+			SET encrypted_path = EXCLUDED.encrypted_path, is_deleted = false, updated_at = NOW();
+		`, payload.DocumentID, pathBytes)
+	} else {
+		_, err = db.Exec(`
+			INSERT INTO vault_snapshots (document_id, encrypted_state, is_deleted, updated_at)
+			VALUES ($1, NULL, false, NOW())
+			ON CONFLICT (document_id) DO UPDATE
+			SET is_deleted = false, updated_at = NOW();
+		`, payload.DocumentID)
+	}
+
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	_, err = db.Exec(`
+		INSERT INTO vault_updates (document_id, encrypted_update, created_at)
+		VALUES ($1, $2, NOW());
+	`, payload.DocumentID, updateBytes)
+
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"status": "created"})
+}
+
+func handlePostCompact(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "Missing document ID", http.StatusBadRequest)
+		return
+	}
+
+	var payload CompactPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	stateBytes, err := hexToBytea(payload.PState)
+	if err != nil {
+		http.Error(w, "Invalid p_state hex format", http.StatusBadRequest)
+		return
+	}
+
+	var pathBytes []byte
+	if payload.PEncryptedPath != nil {
+		pathBytes, err = hexToBytea(*payload.PEncryptedPath)
+		if err != nil {
+			http.Error(w, "Invalid p_encrypted_path hex format", http.StatusBadRequest)
+			return
+		}
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	if len(pathBytes) > 0 {
+		_, err = tx.Exec(`
+			INSERT INTO vault_snapshots (document_id, encrypted_state, encrypted_path, is_deleted, max_compacted_id, updated_at)
+			VALUES ($1, $2, $3, $4, $5, NOW())
+			ON CONFLICT (document_id) DO UPDATE
+			SET encrypted_state = EXCLUDED.encrypted_state,
+				encrypted_path = EXCLUDED.encrypted_path,
+				is_deleted = EXCLUDED.is_deleted,
+				max_compacted_id = EXCLUDED.max_compacted_id,
+				updated_at = NOW();
+		`, id, stateBytes, pathBytes, payload.PIsDeleted, payload.PMaxID)
+	} else {
+		_, err = tx.Exec(`
+			INSERT INTO vault_snapshots (document_id, encrypted_state, is_deleted, max_compacted_id, updated_at)
+			VALUES ($1, $2, $3, $4, NOW())
+			ON CONFLICT (document_id) DO UPDATE
+			SET encrypted_state = EXCLUDED.encrypted_state,
+				is_deleted = EXCLUDED.is_deleted,
+				max_compacted_id = EXCLUDED.max_compacted_id,
+				updated_at = NOW();
+		`, id, stateBytes, payload.PIsDeleted, payload.PMaxID)
+	}
+
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	_, err = tx.Exec("DELETE FROM vault_updates WHERE document_id = $1 AND id <= $2", id, payload.PMaxID)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "compacted"})
+}
+
+func handleGetManifest(w http.ResponseWriter, r *http.Request) {
+	rows, err := db.Query("SELECT document_id, encrypted_path, is_deleted, updated_at FROM vault_snapshots")
+	if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	type ManifestRow struct {
+		DocumentID    string `json:"document_id"`
+		EncryptedPath string `json:"encrypted_path,omitempty"`
+		IsDeleted     bool   `json:"is_deleted"`
+		UpdatedAt     string `json:"updated_at"`
+	}
+
+	var manifest []ManifestRow
+	for rows.Next() {
+		var docID string
+		var encPath []byte
+		var isDeleted bool
+		var updatedAt time.Time
+
+		if err := rows.Scan(&docID, &encPath, &isDeleted, &updatedAt); err != nil {
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		manifest = append(manifest, ManifestRow{
+			DocumentID:    docID,
+			EncryptedPath: byteaToHex(encPath),
+			IsDeleted:     isDeleted,
+			UpdatedAt:     updatedAt.Format(time.RFC3339),
+		})
+	}
+
+	if manifest == nil {
+		manifest = []ManifestRow{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(manifest)
+}
+
+func handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "Missing document ID", http.StatusBadRequest)
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec("UPDATE vault_snapshots SET is_deleted = true, updated_at = NOW() WHERE document_id = $1", id)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	_, err = tx.Exec("DELETE FROM vault_updates WHERE document_id = $1", id)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	_, err = tx.Exec(`
+		SELECT pg_notify('vault_updates_channel', json_build_object(
+			'type', 'DELETE',
+			'table', 'vault_snapshots',
+			'record', json_build_object('document_id', $1::text, 'id', 0)
+		)::text);
+	`, id)
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+}
+
+func handlePostTruncate(w http.ResponseWriter, r *http.Request) {
+	authHeader := r.Header.Get("Authorization")
+	expectedToken := "Bearer " + adminAPIKey
+
+	if authHeader != expectedToken {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	_, err := db.Exec("TRUNCATE TABLE vault_updates, vault_snapshots CASCADE;")
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "truncated"})
+}
+
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+
+	client := &Client{
+		conn:          conn,
+		subscriptions: make(map[string]bool),
+	}
+
+	globalHub.mu.Lock()
+	globalHub.clients[client] = true
+	globalHub.mu.Unlock()
+
+	atomic.AddInt64(&activeWebSockets, 1)
+
+	defer func() {
+		globalHub.mu.Lock()
+		delete(globalHub.clients, client)
+		globalHub.mu.Unlock()
+
+		atomic.AddInt64(&activeWebSockets, -1)
+		conn.Close()
+	}()
+
+	filterRegex := regexp.MustCompile(`document_id=eq\.(.+)`)
+
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+
+		var subMsg SubscribeMessage
+		if err := json.Unmarshal(msg, &subMsg); err == nil {
+			if subMsg.Action == "subscribe" && subMsg.Filter != "" {
+				matches := filterRegex.FindStringSubmatch(subMsg.Filter)
+				if len(matches) > 1 {
+					docID := matches[1]
+					client.mu.Lock()
+					client.subscriptions[docID] = true
+					client.mu.Unlock()
+				}
+			} else if subMsg.Action == "subscribe_bulk" && len(subMsg.Filters) > 0 {
+				client.mu.Lock()
+				for _, filterStr := range subMsg.Filters {
+					matches := filterRegex.FindStringSubmatch(filterStr)
+					if len(matches) > 1 {
+						docID := matches[1]
+						client.subscriptions[docID] = true
+					}
+				}
+				client.mu.Unlock()
+			}
+		}
+	}
+}
+
+func handleDatabaseNotifications(l *pq.Listener) {
+	for {
+		select {
+		case notification := <-l.Notify:
+			if notification == nil {
+				continue
+			}
+
+			var payload PgPayload
+			if err := json.Unmarshal([]byte(notification.Extra), &payload); err != nil {
+				continue
+			}
+
+			docID := payload.Record.DocumentID
+			if docID == "" {
+				continue
+			}
+
+			globalHub.mu.RLock()
+			for client := range globalHub.clients {
+				client.mu.RLock()
+				isSubscribed := client.subscriptions[docID] || client.subscriptions["manifest"]
+				client.mu.RUnlock()
+
+				if isSubscribed {
+					client.conn.WriteMessage(websocket.TextMessage, []byte(notification.Extra))
+				}
+			}
+			globalHub.mu.RUnlock()
+
+		case <-time.After(90 * time.Second):
+			go l.Ping()
+		}
+	}
+}
+
+func getEnv(key, fallback string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return fallback
+}

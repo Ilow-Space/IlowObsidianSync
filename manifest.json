@@ -1,0 +1,9 @@
+{
+  "id": "ilow-sync",
+  "name": "Ilow Sync",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "An elegant peer-to-peer sync plugin for Obsidian powered by Loro CRDT, WebCrypto E2EE, and PostgREST.",
+  "author": "Exfur",
+  "isDesktopOnly": false
+}

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+main.js
+styles.css
+*.log
+node_modules/
+.obsidian-cache
+.vite
+
+project_context.txt
+input.txt
