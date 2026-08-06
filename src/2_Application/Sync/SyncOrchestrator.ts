@@ -49,6 +49,18 @@ export class SyncOrchestrator {
         this.pushUseCase = new PushLocalChangesUseCase(remoteStore, crypto, crdtEngine, noteRepo);
     }
 
+    public getRemoteStore(): IRemoteStore {
+        return this.remoteStore;
+    }
+
+    public getActiveKey(): CryptoKey | null {
+        return this.activeKey;
+    }
+
+    public getCrypto(): ICryptography {
+        return this.crypto;
+    }
+
     public setIndexManager(im: IndexManager) {
         this.indexManager = im;
     }
@@ -157,7 +169,7 @@ export class SyncOrchestrator {
             this.addActiveTask(path);
             const start = performance.now();
             try {
-                await this.pushUseCase.execute(documentId, bufferedContent, this.activeKey);
+                await this.pushUseCase.execute(documentId, bufferedContent, this.activeKey, path);
                 this.lastPingMs = Math.round(performance.now() - start);
             } finally {
                 this.removeActiveTask(path);
@@ -169,7 +181,7 @@ export class SyncOrchestrator {
                 this.addActiveTask(path);
                 const start = performance.now();
                 try {
-                    await this.pushUseCase.execute(documentId, content, this.activeKey);
+                    await this.pushUseCase.execute(documentId, content, this.activeKey, path);
                     this.lastPingMs = Math.round(performance.now() - start);
                 } finally {
                     this.removeActiveTask(path);
@@ -207,14 +219,14 @@ export class SyncOrchestrator {
                 const start = performance.now();
                 try {
                     this.addActiveTask(path);
-                    await this.pushUseCase.execute(documentId, latestContent, this.activeKey);
+                    await this.pushUseCase.execute(documentId, latestContent, this.activeKey, path);
                     this.lastPingMs = Math.round(performance.now() - start);
 
                     const currentCount = (this.fileUpdateCounters.get(documentId) || 0) + 1;
                     this.fileUpdateCounters.set(documentId, currentCount);
 
                     if (currentCount >= 50) {
-                        await this.pushUseCase.forceCompact(documentId, this.activeKey);
+                        await this.pushUseCase.forceCompact(documentId, this.activeKey, path);
                         this.fileUpdateCounters.set(documentId, 0);
                     }
                 } catch (err) {
@@ -238,7 +250,7 @@ export class SyncOrchestrator {
         this.addActiveTask(path);
         try {
             await this.pullDocument(documentId, path);
-            await this.pushUseCase.forceCompact(documentId, this.activeKey);
+            await this.pushUseCase.forceCompact(documentId, this.activeKey, path);
             this.fileUpdateCounters.set(documentId, 0);
         } finally {
             this.removeActiveTask(path);
@@ -295,13 +307,13 @@ export class SyncOrchestrator {
     }
 }
 
-    public async pushDocumentUpdate(documentId: string, updateBinary: Uint8Array): Promise<void> {
+    public async pushDocumentUpdate(documentId: string, updateBinary: Uint8Array, path?: string | null): Promise<void> {
         if (!this.activeKey) return;
         
         this.addActiveTask('System Index');
         const start = performance.now();
         try {
-            await this.pushUseCase.pushRawUpdate(documentId, updateBinary, this.activeKey);
+            await this.pushUseCase.pushRawUpdate(documentId, updateBinary, this.activeKey, path);
             this.lastPingMs = Math.round(performance.now() - start);
         } finally {
             this.removeActiveTask('System Index');

@@ -58,6 +58,20 @@ export class SettingsTab extends PluginSettingTab {
                     })
             );
 
+        // Admin API Token
+        new Setting(containerEl)
+            .setName('Admin API Token')
+            .setDesc('Enter your secure Admin API Token configured on your unified Go backend server to enable database purge/maintenance operations.')
+            .addText((text) =>
+                text
+                    .setPlaceholder('Enter admin token')
+                    .setValue(this.plugin.settings.adminToken || '')
+                    .onChange(async (value) => {
+                        this.plugin.settings.adminToken = value;
+                        await this.plugin.saveSettings();
+                    })
+            );
+
         // Crypto Salt
         new Setting(containerEl)
             .setName('Cryptography Salt')
@@ -218,6 +232,67 @@ export class SettingsTab extends PluginSettingTab {
                             }
                         });
                         modal.open();
+                    })
+            );
+
+        containerEl.createEl('h3', { text: 'Maintenance & Danger Zone' });
+
+        // Hard Reset Local State
+        new Setting(containerEl)
+            .setName('Hard Reset Local State')
+            .setDesc('Wipe local IndexedDB database entirely and trigger a clean re-download of all file snapshots and updates from the remote server.')
+            .addButton((btn) =>
+                btn
+                    .setButtonText('Hard Reset Local State')
+                    .setWarning()
+                    .onClick(async () => {
+                        if (confirm('Are you sure you want to hard reset local state? This will wipe your local CRDT database cache and re-download all documents from the server.')) {
+                            try {
+                                if (this.plugin.getSyncOrchestrator()) {
+                                    this.plugin.getSyncOrchestrator()?.stopAll();
+                                }
+                                await window.indexedDB.deleteDatabase('obsidian-crdt-sync-db');
+                                new Notice('Local state hard reset successful! Initiating fresh re-sync...');
+
+                                if (this.plugin.isKeyDerived && this.plugin.getSyncOrchestrator()) {
+                                    await this.plugin.indexManager?.initialize();
+                                    await this.plugin.indexManager?.syncIndex(false);
+                                    new Notice('Local re-sync completed successfully!');
+                                }
+                            } catch (err: any) {
+                                new Notice(`Hard reset failed: ${err.message}`);
+                            }
+                        }
+                    })
+            );
+
+        // Purge Server Data
+        new Setting(containerEl)
+            .setName('Purge Server Data')
+            .setDesc('Securely calls the unified Go backend to run a full TRUNCATE on the remote database. (Requires Admin API Token).')
+            .addButton((btn) =>
+                btn
+                    .setButtonText('Purge Server Data')
+                    .setWarning()
+                    .onClick(async () => {
+                        const token = this.plugin.settings.adminToken;
+                        if (!token) {
+                            new Notice('Please configure your Admin API Token first!');
+                            return;
+                        }
+                        if (confirm('WARNING: Are you absolutely sure you want to purge all data on the remote server? This action will permanently delete all snapshots and updates and cannot be undone!')) {
+                            try {
+                                const store = this.plugin.getRemoteStore();
+                                if (!store) {
+                                    new Notice('Connection info incomplete');
+                                    return;
+                                }
+                                await store.truncateServer(token);
+                                new Notice('Remote server data successfully purged! The server is now at a clean slate.');
+                            } catch (err: any) {
+                                new Notice(`Purge failed: ${err.message}`);
+                            }
+                        }
                     })
             );
     }

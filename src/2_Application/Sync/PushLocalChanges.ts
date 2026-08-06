@@ -23,7 +23,7 @@ export class PushLocalChangesUseCase {
         private noteRepo: INoteRepository
     ) {}
 
-    public async execute(documentId: string, localContent: string, key: CryptoKey): Promise<void> {
+    public async execute(documentId: string, localContent: string, key: CryptoKey, path?: string | null): Promise<void> {
         // 1. Inform Yjs of local text changes
         const updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent);
 
@@ -31,19 +31,33 @@ export class PushLocalChangesUseCase {
         if (updateBinary && updateBinary.length > 0) {
             const compressedBinary = gzipSync(updateBinary);
             const encryptedBlob = await this.crypto.encrypt(compressedBinary, key);
-            await this.remoteStore.pushUpdate(documentId, encryptedBlob);
+
+            let encryptedPath = null;
+            if (path) {
+                const encoder = new TextEncoder();
+                encryptedPath = await this.crypto.encrypt(encoder.encode(path), key);
+            }
+
+            await this.remoteStore.pushUpdate(documentId, encryptedBlob, encryptedPath);
         }
     }
 
-    public async pushRawUpdate(documentId: string, updateBinary: Uint8Array, key: CryptoKey): Promise<void> {
-        if (updateBinary && updateBinary.length > 0) {
-            const compressedBinary = gzipSync(updateBinary);
+    public async pushRawUpdate(documentId: string, updateBinary: Uint8Array, key: CryptoKey, path?: string | null): Promise<void> {
+        if ((updateBinary && updateBinary.length > 0) || path) {
+            const compressedBinary = (updateBinary && updateBinary.length > 0) ? gzipSync(updateBinary) : new Uint8Array();
             const encryptedBlob = await this.crypto.encrypt(compressedBinary, key);
-            await this.remoteStore.pushUpdate(documentId, encryptedBlob);
+
+            let encryptedPath = null;
+            if (path) {
+                const encoder = new TextEncoder();
+                encryptedPath = await this.crypto.encrypt(encoder.encode(path), key);
+            }
+
+            await this.remoteStore.pushUpdate(documentId, encryptedBlob, encryptedPath);
         }
     }
 
-    public async forceCompact(documentId: string, key: CryptoKey): Promise<void> {
+    public async forceCompact(documentId: string, key: CryptoKey, path?: string | null): Promise<void> {
         // Fetches all remote updates, applies them locally to build the most up-to-date state
         // Then writes it to the snapshot and clears all remote updates up to the last fetched update ID.
         const doc = await this.crdtEngine.getOrCreateDoc(documentId);
@@ -84,8 +98,13 @@ export class PushLocalChangesUseCase {
         const compressedNewState = gzipSync(fullStateUpdate);
         const encryptedNewState = await this.crypto.encrypt(compressedNewState, key);
 
-        // RPC Call to atomically update snapshot and delete corresponding updates
-        await this.remoteStore.compactSnapshot(documentId, encryptedNewState, maxId, false);
+        let encryptedPath = null;
+        if (path) {
+            const encoder = new TextEncoder();
+            encryptedPath = await this.crypto.encrypt(encoder.encode(path), key);
+        }
+
+        // Atomically update snapshot and delete corresponding updates
+        await this.remoteStore.compactSnapshot(documentId, encryptedNewState, maxId, false, encryptedPath);
     }
 }
-

@@ -13,12 +13,14 @@ interface PluginSettings {
     serverUrl: string;
     headers: Record<string, string>;
     salt: string;
+    adminToken: string;
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
     serverUrl: '',
     headers: {},
-    salt: ''
+    salt: '',
+    adminToken: ''
 };
 
 export default class MyPlugin extends Plugin {
@@ -222,32 +224,32 @@ export default class MyPlugin extends Plugin {
     }
 
     private async runBackgroundBootstrap() {
-    if (!this.indexManager || !this.syncOrchestrator || !this.remoteStore) return;
-    
-    this.updateStatusBar('syncing', 'Bootstrapping index...');
-    try {
-        await this.indexManager.initialize();
-        await this.indexManager.syncIndex(true);
+        if (!this.indexManager || !this.syncOrchestrator || !this.remoteStore) return;
         
-        // ⚡ FIX: Subscribe global root index to real-time updates
-        const INDEX_DOC_ID = 'root-index';
-        this.remoteStore.subscribeToUpdates(INDEX_DOC_ID, () => {
-            this.indexManager?.syncIndex(true).catch(console.error);
-        });
+        this.updateStatusBar('syncing', 'Bootstrapping index...');
+        try {
+            await this.indexManager.initialize();
+            await this.indexManager.syncIndex(true);
 
-        await this.indexManager.runCompletenessCheck();
-        
-        const activeFile = this.app.workspace.getActiveFile();
-        if (activeFile && activeFile.extension === 'md') {
-            await this.syncOrchestrator.handleFileOpen(activeFile.path);
+            // Subscribe to real-time global manifest/index updates
+            const MANIFEST_DOC_ID = 'manifest';
+            this.remoteStore.subscribeToUpdates(MANIFEST_DOC_ID, () => {
+                this.indexManager?.syncIndex(true).catch(console.error);
+            });
+
+            await this.indexManager.runCompletenessCheck();
+
+            const activeFile = this.app.workspace.getActiveFile();
+            if (activeFile && activeFile.extension === 'md') {
+                await this.syncOrchestrator.handleFileOpen(activeFile.path);
+            }
+
+            this.updateStatusBar('synced', 'Fully synced');
+        } catch (err) {
+            this.updateStatusBar('error', 'Bootstrap failed');
+            console.error('Background bootstrap failed:', err);
         }
-        
-        this.updateStatusBar('synced', 'Fully synced');
-    } catch (err) {
-        this.updateStatusBar('error', 'Bootstrap failed');
-        console.error('Background bootstrap failed:', err);
     }
-}
 
     public async unloadKey(): Promise<void> {
         this.derivedKey = null;

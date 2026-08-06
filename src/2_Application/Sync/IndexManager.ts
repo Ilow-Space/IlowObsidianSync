@@ -2,16 +2,12 @@
 import { App, TFile, TFolder, TAbstractFile } from 'obsidian';
 import { YjsEngine } from '@infrastructure/Crdt/YjsEngine';
 import { SyncOrchestrator } from './SyncOrchestrator';
-import { DocumentMetadata } from '@domain/Entities/Models';
-import * as Y from 'yjs';
+import { CryptoUtils } from '@infrastructure/Crypto/CryptoUtils';
+import { EncryptedBlob } from '@domain/ValueObjects/CryptoTypes';
 
 export class IndexManager {
-    private static INDEX_DOC_ID = 'root-index';
     private uuidToPath = new Map<string, string>();
     private pathToUuid = new Map<string, string>();
-    
-    // Debouncer to prevent massive network spikes on atomic saves or bulk imports
-    private indexUpdateTimer: any = null;
 
     constructor(
         private app: App,
@@ -27,188 +23,123 @@ export class IndexManager {
         this.uuidToPath.clear();
         this.pathToUuid.clear();
         
-        const doc = await this.crdtEngine.getOrCreateDoc(IndexManager.INDEX_DOC_ID);
-        const map = doc.getMap<DocumentMetadata>('metadata');
-        
-        for (const [uuid, meta] of map.entries()) {
-            if (!meta.isDeleted) {
-                this.uuidToPath.set(uuid, meta.path);
-                this.pathToUuid.set(meta.path, uuid);
+        const files = this.app.vault.getMarkdownFiles();
+        for (const file of files) {
+            const cache = this.app.metadataCache.getFileCache(file);
+            const uuid = cache?.frontmatter?.['crdt-sync-id'];
+            if (uuid) {
+                this.uuidToPath.set(uuid, file.path);
+                this.pathToUuid.set(file.path, uuid);
             }
         }
+        console.log(`[IndexManager] Initialized: ${this.uuidToPath.size} files mapped.`);
     }
 
     public async syncIndex(isSilent: boolean = false): Promise<void> {
         try {
-            await this.syncOrchestrator.pullDocument(IndexManager.INDEX_DOC_ID, null, isSilent);
-            
-            // Lock local modification handlers during index change application
-            this.syncOrchestrator.acquireRemoteLock();
-            try {
-                await this.applyRemoteIndexChanges();
-                await this.scanLocalFilesForNew();
-            } finally {
-                this.syncOrchestrator.releaseRemoteLock();
-            }
-        } catch (err) {
-            console.warn('Failed to sync global index:', err);
-        }
-    }
+            const key = this.syncOrchestrator.getActiveKey();
+            if (!key) return;
 
-    private async applyRemoteIndexChanges(): Promise<void> {
-        const doc = await this.crdtEngine.getOrCreateDoc(IndexManager.INDEX_DOC_ID);
-        const map = doc.getMap<DocumentMetadata>('metadata');
+            const remoteStore = this.syncOrchestrator.getRemoteStore();
+            const crypto = this.syncOrchestrator.getCrypto();
 
-        const processedUuids = new Set<string>();
+            // 1. Fetch remote manifest
+            const manifest = await remoteStore.fetchManifest();
 
-        // Step 1: Process Renames/Moves
-        for (const [uuid, meta] of map.entries()) {
-            const localPath = this.uuidToPath.get(uuid);
-            if (!meta.isDeleted && localPath && localPath !== meta.path) {
-                const file = this.app.vault.getAbstractFileByPath(localPath);
-                if (file) {
-                    await this.ensureFolderExists(meta.path);
-                    try {
-                        await this.app.vault.rename(file, meta.path);
-                    } catch (e) {
-                        console.error(`Failed to move item ${localPath} to ${meta.path}`, e);
-                    }
-                }
+            // 2. Process each manifest record
+            for (const item of manifest) {
+                const docId = item.document_id;
                 
-                this.uuidToPath.set(uuid, meta.path);
-                this.pathToUuid.delete(localPath);
-                this.pathToUuid.set(meta.path, uuid);
-                processedUuids.add(uuid);
-            }
-        }
+                if (!item.encrypted_path) continue;
 
-        // Step 2: Process Deletions and New Remote Files/Folders
-        for (const [uuid, meta] of map.entries()) {
-            if (processedUuids.has(uuid)) continue;
-            const localPath = this.uuidToPath.get(uuid);
+                // Decrypt the file path
+                let decryptedPath: string;
+                try {
+                    const rawJson = CryptoUtils.hexToString(item.encrypted_path);
+                    const blob = JSON.parse(rawJson) as EncryptedBlob;
+                    const decryptedBytes = await crypto.decrypt(blob, key);
+                    decryptedPath = new TextDecoder().decode(decryptedBytes);
+                } catch (decErr) {
+                    console.error(`Failed to decrypt path for document ${docId}:`, decErr);
+                    continue;
+                }
 
-            if (meta.isDeleted) {
-                const targetPath = localPath || meta.path; 
-                const file = this.app.vault.getAbstractFileByPath(targetPath);
-                if (file) {
-                    try {
-                        // Attempt to move to system trash
-                        await this.app.vault.trash(file, true);
-                    } catch (e) {
-                        console.warn(`Failed to system trash ${targetPath}, attempting permanent deletion`, e);
+                if (item.is_deleted) {
+                    // Handle deletion
+                    const file = this.app.vault.getAbstractFileByPath(decryptedPath);
+                    if (file) {
+                        console.log(`[IndexManager] Deleting locally trashed file: ${decryptedPath}`);
                         try {
-                            // Fallback to permanent deletion if .trash is broken
-                            await this.app.vault.trash(file, false);
-                        } catch (e2) {
-                            console.error(`Failed to delete ${targetPath}`, e2);
+                            await this.app.vault.trash(file, true);
+                        } catch (e) {
+                            try {
+                                await this.app.vault.trash(file, false);
+                            } catch (e2) {
+                                console.error(`Failed to delete file ${decryptedPath}:`, e2);
+                            }
                         }
                     }
-                }
-                
-                this.uuidToPath.delete(uuid);
-                if (localPath) this.pathToUuid.delete(localPath);
-                else this.pathToUuid.delete(meta.path);
-            } else if (!localPath) {
-                const file = this.app.vault.getAbstractFileByPath(meta.path);
-                if (!file) {
-                    if (meta.isFolder) {
-                        await this.app.vault.createFolder(meta.path);
-                    } else {
-                        await this.ensureFolderExists(meta.path);
-                        await this.app.vault.create(meta.path, '');
+                    this.uuidToPath.delete(docId);
+                    this.pathToUuid.delete(decryptedPath);
+                } else {
+                    // Handle active file mapping and creation/sync
+                    let file = this.app.vault.getAbstractFileByPath(decryptedPath);
+
+                    if (!file) {
+                        // Recursively create directory structure if subfolders are present
+                        await this.ensureFolderExists(decryptedPath);
+
+                        console.log(`[IndexManager] Creating missing remote file: ${decryptedPath}`);
+                        file = await this.app.vault.create(decryptedPath, '');
+                    }
+
+                    if (file instanceof TFile) {
+                        // Ensure frontmatter UUID is written
+                        const cache = this.app.metadataCache.getFileCache(file);
+                        const localUuid = cache?.frontmatter?.['crdt-sync-id'];
+
+                        if (localUuid !== docId) {
+                            await this.app.fileManager.processFrontMatter(file, (fm) => {
+                                fm['crdt-sync-id'] = docId;
+                            });
+                        }
+
+                        // Register in memory mapping
+                        this.uuidToPath.set(docId, decryptedPath);
+                        this.pathToUuid.set(decryptedPath, docId);
+
+                        // Pull document changes silenty
+                        this.syncOrchestrator.pullDocument(docId, decryptedPath, true).catch(console.error);
                     }
                 }
-                this.uuidToPath.set(uuid, meta.path);
-                this.pathToUuid.set(meta.path, uuid);
-
-                if (!meta.isFolder) {
-                    this.syncOrchestrator.pullDocument(uuid, meta.path, true).catch(console.error);
-                }
             }
-        }
 
-        // Step 3: Purge leftover empty directories after all files have moved
-        await this.pruneEmptyDirectories();
-    }
-
-    private async scanLocalFilesForNew(): Promise<void> {
-    const doc = await this.crdtEngine.getOrCreateDoc(IndexManager.INDEX_DOC_ID);
-    const map = doc.getMap<DocumentMetadata>('metadata');
-
-    // Build a set of paths that are explicitly marked as deleted in the CRDT index
-    const deletedPaths = new Set<string>();
-    for (const meta of map.values()) {
-        if (meta.isDeleted) {
-            deletedPaths.add(meta.path);
+            // 3. Scan local files for any newly created untracked notes
+            await this.scanLocalFilesForNew();
+        } catch (err) {
+            console.warn('Failed to sync decentralized manifest index:', err);
         }
     }
 
-    const files = this.app.vault.getMarkdownFiles();
-    for (const file of files) {
-        // ⚡ FIX: Ignore files that are already tracked OR are marked as deleted tombstones
-        if (!this.pathToUuid.has(file.path) && !deletedPaths.has(file.path)) {
-            try {
+    public async scanLocalFilesForNew(): Promise<void> {
+        const files = this.app.vault.getMarkdownFiles();
+        for (const file of files) {
+            const cache = this.app.metadataCache.getFileCache(file);
+            const uuid = cache?.frontmatter?.['crdt-sync-id'];
+            if (!uuid) {
+                console.log(`[IndexManager] Found untracked note, auto-generating UUID: ${file.path}`);
                 await this.handleFileCreate(file.path);
-                const content = await this.app.vault.read(file);
-                await this.syncOrchestrator.handleLocalChange(file.path, content);
-            } catch (err) {
-                console.error(`Failed to scan/index new file ${file.path}:`, err);
-            }
-        }
-    }
-}
-
-    private async pruneEmptyDirectories(folder?: TFolder): Promise<void> {
-        const target = folder || this.app.vault.getRoot();
-        
-        // Recursively check children first (bottom-up approach)
-        for (const child of target.children.slice()) {
-            if (child instanceof TFolder) {
-                await this.pruneEmptyDirectories(child);
-            }
-        }
-        
-        // After children are processed, check if this folder is now completely empty
-        if (target !== this.app.vault.getRoot() && target.children.length === 0) {
-            try {
-                await this.app.vault.trash(target, true);
-            } catch (err) {
-                // Ignore errors (e.g., hidden system files might be inside preventing deletion)
+            } else {
+                // Ensure local tracking maps are up to date
+                this.uuidToPath.set(uuid, file.path);
+                this.pathToUuid.set(file.path, uuid);
             }
         }
     }
 
     public async runCompletenessCheck(): Promise<void> {
-        console.log('Running CRDT Vault Completeness Check...');
-        const doc = await this.crdtEngine.getOrCreateDoc(IndexManager.INDEX_DOC_ID);
-        const map = doc.getMap<DocumentMetadata>('metadata');
-
-        // 1. Restore files/folders that exist in the index but are missing from the local disk
-        for (const [uuid, meta] of map.entries()) {
-            if (!meta.isDeleted) {
-                const fileExists = this.app.vault.getAbstractFileByPath(meta.path);
-                if (!fileExists) {
-                    console.log(`[Reconciliation] Restoring missing item from remote: ${meta.path}`);
-                    if (meta.isFolder) {
-                        await this.app.vault.createFolder(meta.path);
-                    } else {
-                        await this.ensureFolderExists(meta.path);
-                        await this.app.vault.create(meta.path, '');
-                        // Pull the actual content silently
-                        this.syncOrchestrator.pullDocument(uuid, meta.path, true).catch(console.error);
-                    }
-                    
-                    this.uuidToPath.set(uuid, meta.path);
-                    this.pathToUuid.set(meta.path, uuid);
-                }
-            }
-        }
-
-        // 2. Index local files that are missing from the CRDT metadata
-        await this.scanLocalFilesForNew();
-
-        // 3. Clean up ghost directories
-        await this.pruneEmptyDirectories();
+        // A periodic manifest sync and local scan guarantees completeness
+        await this.syncIndex(true);
     }
 
     private async ensureFolderExists(path: string): Promise<void> {
@@ -222,65 +153,25 @@ export class IndexManager {
         }
     }
 
-    /**
-     * ⚡ The Debouncer: Buffers frantic file lifecycle events and pushes 
-     * the System Index to the network only once things calm down.
-     */
-    private pushIndexDebounced(): void {
-        if (this.indexUpdateTimer) {
-            clearTimeout(this.indexUpdateTimer);
-        }
-        
-        this.indexUpdateTimer = setTimeout(async () => {
-            this.indexUpdateTimer = null;
-            try {
-                const doc = await this.crdtEngine.getOrCreateDoc(IndexManager.INDEX_DOC_ID);
-                const updateBinary = Y.encodeStateAsUpdate(doc);
-                
-                await this.crdtEngine.localStore.saveDocumentState(IndexManager.INDEX_DOC_ID, updateBinary);
-                await this.syncOrchestrator.pushDocumentUpdate(IndexManager.INDEX_DOC_ID, updateBinary);
-            } catch (err) {
-                console.error('Failed to push debounced index update:', err);
-            }
-        }, 1500);
-    }
-
     public async handleFileCreate(path: string): Promise<void> {
         if (this.pathToUuid.has(path)) return;
-        const uuid = this.generateUuid();
-        this.pathToUuid.set(path, uuid);
-        this.uuidToPath.set(uuid, path);
-
-        const doc = await this.crdtEngine.getOrCreateDoc(IndexManager.INDEX_DOC_ID);
-        const map = doc.getMap<DocumentMetadata>('metadata');
         
-        doc.transact(() => {
-            map.set(uuid, { path, isDeleted: false, mtime: Date.now(), isFolder: false });
-        });
-
-        this.pushIndexDebounced();
-    
         const file = this.app.vault.getAbstractFileByPath(path);
-        if (file && file instanceof TFile) {
-            const content = await this.app.vault.read(file);
-            await this.syncOrchestrator.handleLocalChange(path, content);
-        }
-    }
-    
-    public async handleFolderCreate(path: string): Promise<void> {
-        if (this.pathToUuid.has(path)) return;
+        if (!(file instanceof TFile)) return;
+
         const uuid = this.generateUuid();
         this.pathToUuid.set(path, uuid);
         this.uuidToPath.set(uuid, path);
 
-        const doc = await this.crdtEngine.getOrCreateDoc(IndexManager.INDEX_DOC_ID);
-        const map = doc.getMap<DocumentMetadata>('metadata');
-        
-        doc.transact(() => {
-            map.set(uuid, { path, isDeleted: false, mtime: Date.now(), isFolder: true });
+        // Safely insert UUID into markdown YAML frontmatter
+        await this.app.fileManager.processFrontMatter(file, (fm) => {
+            fm['crdt-sync-id'] = uuid;
         });
 
-        this.pushIndexDebounced();
+        // Initialize document CRDT state & trigger push to remote
+        const content = await this.app.vault.read(file);
+        await this.crdtEngine.getOrCreateDoc(uuid, content);
+        await this.syncOrchestrator.handleLocalChange(path, content);
     }
 
     public async handleFileRename(oldPath: string, newPath: string): Promise<void> {
@@ -291,38 +182,9 @@ export class IndexManager {
         this.pathToUuid.set(newPath, uuid);
         this.uuidToPath.set(uuid, newPath);
 
-        const doc = await this.crdtEngine.getOrCreateDoc(IndexManager.INDEX_DOC_ID);
-        const map = doc.getMap<DocumentMetadata>('metadata');
-        
-        doc.transact(() => {
-            const existing = map.get(uuid);
-            if (existing) {
-                map.set(uuid, { ...existing, path: newPath, mtime: Date.now() });
-            }
-        });
-
-        this.pushIndexDebounced();
-    }
-    
-    public async handleFolderRename(oldPath: string, newPath: string): Promise<void> {
-        const uuid = this.pathToUuid.get(oldPath);
-        if (!uuid) return;
-
-        this.pathToUuid.delete(oldPath);
-        this.pathToUuid.set(newPath, uuid);
-        this.uuidToPath.set(uuid, newPath);
-
-        const doc = await this.crdtEngine.getOrCreateDoc(IndexManager.INDEX_DOC_ID);
-        const map = doc.getMap<DocumentMetadata>('metadata');
-        
-        doc.transact(() => {
-            const existing = map.get(uuid);
-            if (existing) {
-                map.set(uuid, { ...existing, path: newPath, mtime: Date.now() });
-            }
-        });
-
-        this.pushIndexDebounced();
+        // Immediately update remote server with the new encrypted path
+        const emptyUpdate = new Uint8Array();
+        await this.syncOrchestrator.pushDocumentUpdate(uuid, emptyUpdate, newPath);
     }
 
     public async handleFileDelete(path: string): Promise<void> {
@@ -332,22 +194,20 @@ export class IndexManager {
         this.pathToUuid.delete(path);
         this.uuidToPath.delete(uuid);
 
-        const doc = await this.crdtEngine.getOrCreateDoc(IndexManager.INDEX_DOC_ID);
-        const map = doc.getMap<DocumentMetadata>('metadata');
-        
-        doc.transact(() => {
-            const existing = map.get(uuid);
-            if (existing) {
-                map.set(uuid, { ...existing, isDeleted: true, mtime: Date.now() });
-            }
-        });
-
-        this.pushIndexDebounced();
+        try {
+            const remoteStore = this.syncOrchestrator.getRemoteStore();
+            await remoteStore.deleteSnapshot(uuid);
+            console.log(`[IndexManager] Marked file as deleted remotely: ${path} (${uuid})`);
+        } catch (err) {
+            console.error(`Failed to mark deletion remote-side for ${path}:`, err);
+        }
     }
+
+    // Unused folder lifecycle stubs (folders are managed on-demand statelessly)
+    public async handleFolderCreate(path: string): Promise<void> {}
+    public async handleFolderRename(oldPath: string, newPath: string): Promise<void> {}
 
     public getUuidForPath(path: string): string | undefined {
         return this.pathToUuid.get(path);
     }
 }
-
-
