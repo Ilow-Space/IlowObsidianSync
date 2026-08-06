@@ -1,3 +1,4 @@
+﻿
 import { defineConfig } from 'vite';
 import path from 'path';
 
@@ -5,6 +6,12 @@ export default defineConfig(({ mode }) => {
   const isDev = mode === 'development';
 
   return {
+    css: {
+      postcss: {
+        plugins: [],
+      },
+    },
+
     build: {
       outDir: 'dist',
       emptyOutDir: true,
@@ -51,3 +58,4 @@ export default defineConfig(({ mode }) => {
     },
   };
 });
+

@@ -51,6 +51,12 @@ export default class MyPlugin extends Plugin {
             await this.saveSettings();
         }
 
+        this.noteRepo.onNoteChange(async (path, content) => {
+            if (this.syncOrchestrator) {
+                await this.syncOrchestrator.handleLocalChange(path, content);
+            }
+        });
+
         // Register Sidebar View
         this.registerView(
             SYNC_SIDEBAR_VIEW_TYPE,
@@ -103,15 +109,6 @@ export default class MyPlugin extends Plugin {
         );
 
         this.registerEvent(
-            this.app.vault.on('modify', async (file) => {
-                if (file instanceof TFile && file.extension === 'md' && this.syncOrchestrator) {
-                    const content = await this.app.vault.read(file);
-                    await this.syncOrchestrator.handleLocalChange(file.path, content);
-                }
-            })
-        );
-
-        this.registerEvent(
             this.app.vault.on('create', async (file: TAbstractFile) => {
                 if (file instanceof TFile && file.extension === 'md' && this.indexManager) {
                     await this.indexManager.handleFileCreate(file.path);
@@ -152,12 +149,12 @@ export default class MyPlugin extends Plugin {
         );
 
         this.registerInterval(
-                window.setInterval(async () => {
-                    if (this.isKeyDerived && this.indexManager) {
-                        await this.indexManager.syncIndex(true); // ⚡ Pass true here
-                    }
-                }, 10000) 
-            );
+            window.setInterval(async () => {
+                if (this.isKeyDerived && this.indexManager) {
+                    await this.indexManager.syncIndex(true); // ⚡ Pass true here
+                }
+            }, 10000) 
+        );
     }
 
     async onunload() {
@@ -237,15 +234,17 @@ export default class MyPlugin extends Plugin {
         this.updateStatusBar('syncing', 'Bootstrapping index...');
         try {
             await this.indexManager.initialize();
-            await this.indexManager.syncIndex();
+            await this.indexManager.syncIndex(true);
             
-            // NEW: Keep the index synchronized periodically
+            // ⚡ Run the reconciliation check right after initial index sync
+            await this.indexManager.runCompletenessCheck();
+            
             this.registerInterval(
                 window.setInterval(async () => {
                     if (this.isKeyDerived && this.indexManager) {
-                        await this.indexManager.syncIndex();
+                        await this.indexManager.syncIndex(true);
                     }
-                }, 10000) // Poll the system index every 10 seconds
+                }, 10000)
             );
         
             const activeFile = this.app.workspace.getActiveFile();

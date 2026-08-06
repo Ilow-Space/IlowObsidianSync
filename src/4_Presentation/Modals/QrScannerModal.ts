@@ -1,4 +1,5 @@
-﻿import { Modal, App, Setting, Notice } from 'obsidian';
+﻿
+import { Modal, App, Setting, Notice } from 'obsidian';
 import { Html5Qrcode } from 'html5-qrcode';
 
 export class QrScannerModal extends Modal {
@@ -57,7 +58,7 @@ export class QrScannerModal extends Modal {
         contentEl.createEl('h4', { text: 'Or Scan via Camera' });
         contentEl.createEl('p', { text: 'Align the QR Code within the camera frame below.' });
 
-        const readerDiv = contentEl.createDiv({ id: 'crdt-sync-reader' });
+        const readerDiv = contentEl.createDiv({ attr: { id: 'crdt-sync-reader' } });
 
         setTimeout(() => {
             try {

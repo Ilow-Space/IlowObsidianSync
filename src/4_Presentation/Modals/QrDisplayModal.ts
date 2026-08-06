@@ -1,4 +1,4 @@
-import { Modal, App, Notice, Setting } from 'obsidian';
+﻿import { Modal, App, Notice, Setting } from 'obsidian';
 import * as QRCode from 'qrcode';
 
 export class QrDisplayModal extends Modal {
@@ -21,7 +21,7 @@ export class QrDisplayModal extends Modal {
         const canvas = container.createEl('canvas');
         canvas.title = 'Click to copy connection string';
 
-        QRCode.toCanvas(canvas, this.payload, { width: 256 }, (error) => {
+        QRCode.toCanvas(canvas, this.payload, { width: 256 }, (error: Error | null | undefined) => {
             if (error) {
                 console.error('Failed to generate QR Code:', error);
                 container.createEl('p', { text: 'Failed to generate QR Code. Please check the console.' });
@@ -69,3 +69,4 @@ export class QrDisplayModal extends Modal {
         contentEl.empty();
     }
 }
+

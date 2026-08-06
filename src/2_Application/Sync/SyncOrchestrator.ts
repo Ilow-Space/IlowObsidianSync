@@ -1,4 +1,5 @@
-﻿import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
+﻿
+import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
 import { ICryptography } from '@domain/Interfaces/ICryptography';
 import { YjsEngine } from '@infrastructure/Crdt/YjsEngine';
 import { INoteRepository } from '@domain/Interfaces/INoteRepository';
@@ -29,6 +30,7 @@ export class SyncOrchestrator {
     private isApplyingRemoteChanges = false;
     private localChangeDebounceTimers = new Map<string, any>();
     private pendingContents = new Map<string, string>();
+    private remoteWriteHashes = new Map<string, string>();
 
     constructor(
         private remoteStore: IRemoteStore,
@@ -37,7 +39,13 @@ export class SyncOrchestrator {
         private noteRepo: INoteRepository,
         private statusCallback: (status: SyncStatus, msg: string) => void
     ) {
-        this.pullUseCase = new PullRemoteChangesUseCase(remoteStore, crypto, crdtEngine, noteRepo);
+        this.pullUseCase = new PullRemoteChangesUseCase(
+            remoteStore, 
+            crypto, 
+            crdtEngine, 
+            noteRepo, 
+            (path, content) => this.registerRemoteWrite(path, content)
+        );
         this.pushUseCase = new PushLocalChangesUseCase(remoteStore, crypto, crdtEngine, noteRepo);
     }
 
@@ -86,6 +94,15 @@ export class SyncOrchestrator {
                 this.statusCallback('synced', 'Fully synced');
             }, 1000);
         }
+    }
+
+    public registerRemoteWrite(path: string, content: string) {
+        this.remoteWriteHashes.set(path, content);
+        setTimeout(() => {
+            if (this.remoteWriteHashes.get(path) === content) {
+                this.remoteWriteHashes.delete(path);
+            }
+        }, 2000);
     }
 
     public async handleFileOpen(path: string): Promise<void> {
@@ -156,6 +173,11 @@ export class SyncOrchestrator {
     public async handleLocalChange(path: string, content: string): Promise<void> {
         if (!this.activeKey || !this.indexManager) return;
         
+        if (this.remoteWriteHashes.get(path) === content) {
+            this.remoteWriteHashes.delete(path);
+            return;
+        }
+
         const documentId = this.indexManager.getUuidForPath(path);
         if (!documentId) return;
 
@@ -267,7 +289,7 @@ export class SyncOrchestrator {
 
         const poll = async () => {
             if (this.activeDocumentId === documentId && this.activeKey) {
-                await this.pullDocument(documentId, path);
+                await this.pullDocument(documentId, path, true);
                 currentInterval = Math.min(currentInterval * 1.5, 60000);
                 const timer = setTimeout(poll, currentInterval);
                 this.activeIntervals.set(documentId, timer);
@@ -301,4 +323,13 @@ export class SyncOrchestrator {
         this.activeTasks.clear();
         this.triggerStatusUpdate();
     }
+
+    public acquireRemoteLock() {
+        this.isApplyingRemoteChanges = true;
+    }
+
+    public releaseRemoteLock() {
+        this.isApplyingRemoteChanges = false;
+    }
 }
+

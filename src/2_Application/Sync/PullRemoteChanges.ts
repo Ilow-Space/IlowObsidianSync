@@ -1,4 +1,5 @@
-﻿import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
+﻿
+import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
 import { ICryptography } from '@domain/Interfaces/ICryptography';
 import { YjsEngine } from '@infrastructure/Crdt/YjsEngine';
 import { INoteRepository } from '@domain/Interfaces/INoteRepository';
@@ -9,7 +10,8 @@ export class PullRemoteChangesUseCase {
         private remoteStore: IRemoteStore,
         private crypto: ICryptography,
         private crdtEngine: YjsEngine,
-        private noteRepo: INoteRepository
+        private noteRepo: INoteRepository,
+        private registerRemoteWrite?: (path: string, content: string) => void
     ) {}
 
     public async execute(
@@ -63,6 +65,9 @@ export class PullRemoteChangesUseCase {
                         // Acquire write lock to prevent triggering a local modify event / infinite loop
                         acquireLock();
                         try {
+                            if (this.registerRemoteWrite) {
+                                this.registerRemoteWrite(path, updatedContent);
+                            }
                             await this.noteRepo.writeNote(path, updatedContent);
                         } finally {
                             releaseLock();
