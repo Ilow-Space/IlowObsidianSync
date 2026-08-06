@@ -163,6 +163,10 @@ export class SyncOrchestrator {
 
         this.pendingContents.set(documentId, content);
 
+        if (this.activeDocumentId === documentId && this.activePath === path) {
+            this.startPolling(documentId, path);
+        }
+
         if (this.localChangeDebounceTimers.has(documentId)) {
             clearTimeout(this.localChangeDebounceTimers.get(documentId));
         }
@@ -213,12 +217,14 @@ export class SyncOrchestrator {
         }
     }
 
-    public async pullDocument(documentId: string, path: string | null = null): Promise<void> {
+    public async pullDocument(documentId: string, path: string | null = null, isSilent: boolean = false): Promise<void> {
         if (!this.activeKey) return;
         if (this.localChangeDebounceTimers.has(documentId) || this.isApplyingRemoteChanges) return;
 
         const taskName = path || 'System Index';
-        this.addActiveTask(taskName);
+        
+        // Only add to the UI queue if it's not a silent background task
+        if (!isSilent) this.addActiveTask(taskName);
 
         const start = performance.now();
         try {
@@ -236,7 +242,8 @@ export class SyncOrchestrator {
         } catch (err) {
             console.error(`Sync pull failed for ${documentId}:`, err);
         } finally {
-            this.removeActiveTask(taskName);
+            // Clean up correctly
+            if (!isSilent) this.removeActiveTask(taskName);
         }
     }
 
@@ -256,18 +263,24 @@ export class SyncOrchestrator {
     private startPolling(documentId: string, path: string) {
         this.stopPolling(documentId);
 
-        const interval = setInterval(async () => {
+        let currentInterval = 3000;
+
+        const poll = async () => {
             if (this.activeDocumentId === documentId && this.activeKey) {
                 await this.pullDocument(documentId, path);
+                currentInterval = Math.min(currentInterval * 1.5, 60000);
+                const timer = setTimeout(poll, currentInterval);
+                this.activeIntervals.set(documentId, timer);
             }
-        }, 5000);
+        };
 
-        this.activeIntervals.set(documentId, interval);
+        const timer = setTimeout(poll, currentInterval);
+        this.activeIntervals.set(documentId, timer);
     }
 
     private stopPolling(documentId: string) {
         if (this.activeIntervals.has(documentId)) {
-            clearInterval(this.activeIntervals.get(documentId));
+            clearTimeout(this.activeIntervals.get(documentId));
             this.activeIntervals.delete(documentId);
         }
     }

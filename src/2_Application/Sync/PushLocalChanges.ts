@@ -1,4 +1,5 @@
-﻿import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
+﻿
+import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
 import { ICryptography } from '@domain/Interfaces/ICryptography';
 import { YjsEngine } from '@infrastructure/Crdt/YjsEngine';
 import { INoteRepository } from '@domain/Interfaces/INoteRepository';
@@ -42,7 +43,10 @@ export class PushLocalChangesUseCase {
             try {
                 const decryptedSnapshot = await this.crypto.decrypt(encryptedSnapshot, key);
                 await this.crdtEngine.applyUpdates(documentId, [decryptedSnapshot]);
-            } catch (err) {}
+            } catch (err) {
+                console.error('Decryption of snapshot failed during compaction:', err);
+                throw new Error('Failed to decrypt snapshot during compaction. Aborting.');
+            }
         }
 
         const remoteUpdates = await this.remoteStore.fetchUpdatesSince(documentId, 0);
@@ -53,7 +57,10 @@ export class PushLocalChangesUseCase {
                 try {
                     const decrypted = await this.crypto.decrypt(update.encryptedUpdate, key);
                     decryptedUpdates.push(decrypted);
-                } catch (err) {}
+                } catch (err) {
+                    console.error(`Decryption of update ${update.id} failed during compaction:`, err);
+                    throw new Error(`Failed to decrypt update ${update.id} during compaction. Aborting.`);
+                }
                 maxId = Math.max(maxId, update.id);
             }
             if (decryptedUpdates.length > 0) {

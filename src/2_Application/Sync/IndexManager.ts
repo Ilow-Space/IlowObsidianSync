@@ -1,4 +1,5 @@
-﻿import { App, TFile, TAbstractFile } from 'obsidian';
+﻿
+import { App, TFile, TAbstractFile } from 'obsidian';
 import { YjsEngine } from '@infrastructure/Crdt/YjsEngine';
 import { SyncOrchestrator } from './SyncOrchestrator';
 import { DocumentMetadata } from '@domain/Entities/Models';
@@ -37,9 +38,9 @@ export class IndexManager {
         }
     }
 
-    public async syncIndex(): Promise<void> {
+    public async syncIndex(isSilent = false): Promise<void> {
         try {
-            await this.syncOrchestrator.pullDocument(IndexManager.INDEX_DOC_ID, null);
+            await this.syncOrchestrator.pullDocument(IndexManager.INDEX_DOC_ID, null, isSilent);
             await this.applyRemoteIndexChanges();
             await this.scanLocalFilesForNew();
         } catch (err) {
@@ -80,30 +81,7 @@ export class IndexManager {
                 this.pathToUuid.set(meta.path, uuid);
                 
                 this.syncOrchestrator.pullDocument(uuid, meta.path).catch(console.error);
-            } else {
-                this.healExistingDocument(uuid, meta.path).catch(console.error);
             }
-        }
-    }
-
-    private async healExistingDocument(uuid: string, path: string): Promise<void> {
-        try {
-            const localContent = await this.app.vault.adapter.read(path);
-            await this.syncOrchestrator.pullDocument(uuid, path);
-            
-            const doc = await this.crdtEngine.getOrCreateDoc(uuid);
-            const remoteContent = doc.getText('markdown').toString();
-
-            const isLocalEmpty = localContent.trim().length === 0;
-            const isRemoteEmpty = remoteContent.trim().length === 0;
-
-            if (isLocalEmpty && !isRemoteEmpty) {
-                await this.app.vault.adapter.write(path, remoteContent);
-            } else if (!isLocalEmpty && isRemoteEmpty) {
-                await this.syncOrchestrator.handleLocalChange(path, localContent);
-            }
-        } catch (err) {
-            console.error(`Self-healing failed for ${path}:`, err);
         }
     }
 
@@ -173,6 +151,7 @@ export class IndexManager {
             await this.syncOrchestrator.handleLocalChange(path, content);
         }
     }
+    
     public async handleFileRename(oldPath: string, newPath: string): Promise<void> {
         const uuid = this.pathToUuid.get(oldPath);
         if (!uuid) return;
@@ -186,6 +165,25 @@ export class IndexManager {
         
         doc.transact(() => {
             map.set(uuid, { path: newPath, isDeleted: false, mtime: Date.now() });
+        });
+
+        this.pushIndexDebounced();
+    }
+
+    public async handleBulkFileRename(renames: {oldPath: string, newPath: string}[]): Promise<void> {
+        const doc = await this.crdtEngine.getOrCreateDoc(IndexManager.INDEX_DOC_ID);
+        const map = doc.getMap<DocumentMetadata>('metadata');
+        
+        doc.transact(() => {
+            for (const { oldPath, newPath } of renames) {
+                const uuid = this.pathToUuid.get(oldPath);
+                if (uuid) {
+                    this.pathToUuid.delete(oldPath);
+                    this.pathToUuid.set(newPath, uuid);
+                    this.uuidToPath.set(uuid, newPath);
+                    map.set(uuid, { path: newPath, isDeleted: false, mtime: Date.now() });
+                }
+            }
         });
 
         this.pushIndexDebounced();
@@ -215,3 +213,4 @@ export class IndexManager {
         return this.pathToUuid.get(path);
     }
 }
+

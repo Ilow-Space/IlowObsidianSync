@@ -22,7 +22,7 @@ export class PostgresRemoteStore implements IRemoteStore {
                 url: `${this.serverUrl}/vault_snapshots?limit=1`,
                 method: 'GET',
                 headers: this.headers,
-                throwOnError: false
+                throw: false
             });
             return res.status >= 200 && res.status < 300;
         } catch (err) {
@@ -32,35 +32,34 @@ export class PostgresRemoteStore implements IRemoteStore {
     }
 
     public async fetchSnapshot(documentId: string): Promise<EncryptedBlob | null> {
-        try {
-            const url = `${this.serverUrl}/vault_snapshots?document_id=eq.${encodeURIComponent(documentId)}`;
-            const res = await requestUrl({
-                url: url,
-                method: 'GET',
-                headers: this.headers,
-                throwOnError: false
-            });
+    try {
+        const url = `${this.serverUrl}/vault_snapshots?document_id=eq.${encodeURIComponent(documentId)}`;
+        const res = await requestUrl({
+            url: url,
+            method: 'GET',
+            headers: this.headers,
+            throw: false // ⚡ Changed from throw to throw
+        });
 
-            if (res.status === 404) return null;
-            if (res.status < 200 || res.status >= 300) {
-                throw new Error(`Failed to fetch snapshot: ${res.status}`);
-            }
-
-            const data = res.json;
-            if (Array.isArray(data) && data.length > 0) {
-                const row = data[0];
-                if (!row.encrypted_state) return null;
-
-                const rawJson = CryptoUtils.hexToString(row.encrypted_state);
-                const blob = JSON.parse(rawJson) as EncryptedBlob;
-                return blob;
-            }
-            return null;
-        } catch (err) {
-            console.error(`fetchSnapshot failed for ${documentId}:`, err);
-            return null;
+        if (res.status === 404) return null;
+        if (res.status < 200 || res.status >= 300) {
+            throw new Error(`Failed to fetch snapshot: ${res.status}`);
         }
+
+        const data = res.json;
+        if (Array.isArray(data) && data.length > 0) {
+            const row = data[0];
+            if (!row.encrypted_state) return null;
+
+            const rawJson = CryptoUtils.hexToString(row.encrypted_state);
+            return JSON.parse(rawJson) as EncryptedBlob;
+        }
+        return null;
+    } catch (err) {
+        console.error(`fetchSnapshot failed for ${documentId}:`, err);
+        return null; // Gracefully return null on network disconnect/failure
     }
+}
 
     public async fetchUpdatesSince(documentId: string, lastId: number): Promise<CRDTUpdate[]> {
         let allUpdates: CRDTUpdate[] = [];
@@ -78,7 +77,7 @@ export class PostgresRemoteStore implements IRemoteStore {
                         'Range-Unit': 'items',
                         'Range': `${offset}-${offset + limit - 1}`
                     },
-                    throwOnError: false
+                    throw: false
                 });
 
                 if (res.status < 200 || res.status >= 300) {
@@ -121,7 +120,7 @@ export class PostgresRemoteStore implements IRemoteStore {
                 url: snapshotCheckUrl,
                 method: 'GET',
                 headers: this.headers,
-                throwOnError: false
+                throw: false
             });
 
             const snapshotExists = snapshotCheckRes.status >= 200 && snapshotCheckRes.status < 300 && Array.isArray(snapshotCheckRes.json) && snapshotCheckRes.json.length > 0;
@@ -139,7 +138,7 @@ export class PostgresRemoteStore implements IRemoteStore {
                         encrypted_state: initialSnapshotBytes,
                         updated_at: new Date().toISOString()
                     }),
-                    throwOnError: false
+                    throw: false
                 });
             }
 
@@ -153,7 +152,7 @@ export class PostgresRemoteStore implements IRemoteStore {
                     encrypted_update: updateBytes,
                     created_at: new Date().toISOString()
                 }),
-                throwOnError: false
+                throw: false
             });
 
             if (res.status < 200 || res.status >= 300) {
@@ -179,7 +178,7 @@ export class PostgresRemoteStore implements IRemoteStore {
                     p_max_id: maxId,
                     p_is_deleted: isDeleted
                 }),
-                throwOnError: false
+                throw: false
             });
 
             if (res.status < 200 || res.status >= 300) {

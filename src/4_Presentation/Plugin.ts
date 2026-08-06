@@ -1,4 +1,5 @@
-﻿import { Plugin, Notice, TFile, TAbstractFile, WorkspaceLeaf } from 'obsidian';
+﻿
+import { Plugin, Notice, TFile, TAbstractFile, WorkspaceLeaf, TFolder } from 'obsidian';
 import { SettingsTab } from './SettingsTab';
 import { WebCryptoService } from '@infrastructure/Crypto/WebCryptoService';
 import { PostgresRemoteStore } from '@infrastructure/Postgres/PostgresRemoteStore';
@@ -30,7 +31,6 @@ export default class MyPlugin extends Plugin {
     private indexManager: IndexManager | null = null;
     private derivedKey: CryptoKey | null = null;
     private statusBarItem!: HTMLElement;
-    private readonly KEY_FILE = '.obsidian/crdt-sync-key.json';
 
     get isKeyDerived(): boolean {
         return this.derivedKey !== null;
@@ -73,13 +73,13 @@ export default class MyPlugin extends Plugin {
 
         this.initializeSyncOrchestrator();
 
-        // Auto-load persisted key from disk
+        // Auto-load persisted key from secure secret storage
         try {
-            if (await this.app.vault.adapter.exists(this.KEY_FILE)) {
+            const keyData = await (this.app as any).secretStorage.getSecret('crdt-master-key');
+            if (keyData) {
                 this.updateStatusBar('syncing', 'Loading key...');
-                const keyData = await this.app.vault.adapter.read(this.KEY_FILE);
                 this.derivedKey = await this.cryptoService.importKey(keyData);
-                
+
                 if (this.syncOrchestrator && this.indexManager) {
                     this.syncOrchestrator.setCryptoKey(this.derivedKey);
                     this.runBackgroundBootstrap().catch(console.error);
@@ -128,12 +128,16 @@ export default class MyPlugin extends Plugin {
                 } else if (file instanceof TFolder) {
                     // Find all markdown files that lived under the old folder path
                     const allFiles = this.app.vault.getMarkdownFiles();
+                    const renames = [];
                     for (const child of allFiles) {
                         if (child.path.startsWith(file.path + '/')) {
                             // Reconstruct what the old path of this specific file was
                             const childOldPath = child.path.replace(file.path, oldPath);
-                            await this.indexManager.handleFileRename(childOldPath, child.path);
+                            renames.push({ oldPath: childOldPath, newPath: child.path });
                         }
+                    }
+                    if (renames.length > 0) {
+                        await this.indexManager.handleBulkFileRename(renames);
                     }
                 }
             })
@@ -146,6 +150,14 @@ export default class MyPlugin extends Plugin {
                 }
             })
         );
+
+        this.registerInterval(
+                window.setInterval(async () => {
+                    if (this.isKeyDerived && this.indexManager) {
+                        await this.indexManager.syncIndex(true); // ⚡ Pass true here
+                    }
+                }, 10000) 
+            );
     }
 
     async onunload() {
@@ -204,10 +216,10 @@ export default class MyPlugin extends Plugin {
     public async deriveKeyFromPassword(password: string): Promise<void> {
         try {
             this.derivedKey = await this.cryptoService.deriveKey(password, this.settings.salt);
-            
-            // Save the derived key to disk
+
+            // Save the derived key securely to native secret storage
             const exportedKey = await this.cryptoService.exportKey(this.derivedKey);
-            await this.app.vault.adapter.write(this.KEY_FILE, exportedKey);
+            await (this.app as any).secretStorage.setSecret('crdt-master-key', exportedKey);
 
             if (this.syncOrchestrator && this.indexManager) {
                 this.syncOrchestrator.setCryptoKey(this.derivedKey);
@@ -257,9 +269,7 @@ export default class MyPlugin extends Plugin {
         this.updateStatusBar('offline', 'Disconnected');
 
         try {
-            if (await this.app.vault.adapter.exists(this.KEY_FILE)) {
-                await this.app.vault.adapter.remove(this.KEY_FILE);
-            }
+            await (this.app as any).secretStorage.deleteSecret('crdt_master_key');
         } catch (err) {
             console.error('Failed to remove persisted sync key:', err);
         }
@@ -292,3 +302,4 @@ export default class MyPlugin extends Plugin {
         }
     }
 }
+

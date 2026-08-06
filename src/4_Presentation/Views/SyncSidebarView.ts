@@ -65,7 +65,8 @@ export class SyncSidebarView extends ItemView {
         const queueContainer = container.createDiv({ cls: 'nav-folder-children' });
 
         if (isConnected && syncOrchestrator) {
-            const activePaths = syncOrchestrator.getActiveSyncPaths();
+            // Filter out 'System Index' so it never clutters the UI list
+            const activePaths = syncOrchestrator.getActiveSyncPaths().filter(p => p !== 'System Index');
             
             if (activePaths.length === 0) {
                 const emptyEl = queueContainer.createDiv({ cls: 'nav-file' });
@@ -73,17 +74,50 @@ export class SyncSidebarView extends ItemView {
             } else {
                 for (const path of activePaths) {
                     const itemEl = queueContainer.createDiv({ cls: 'nav-file mod-clickable' });
-                    const titleEl = itemEl.createDiv({ cls: 'nav-file-title' });
                     
-                    const iconEl = titleEl.createDiv({ cls: 'nav-file-icon' });
+                    // Native UI styling with borders
+                    itemEl.style.border = '1px solid var(--background-modifier-border)';
+                    itemEl.style.borderRadius = 'var(--radius-s)';
+                    itemEl.style.padding = '6px 8px';
+                    itemEl.style.marginBottom = '6px';
+                    itemEl.style.display = 'flex';
+                    itemEl.style.alignItems = 'center';
+                    itemEl.style.gap = '8px';
+
+                    const iconEl = itemEl.createDiv({ cls: 'nav-file-icon' });
                     setIcon(iconEl, 'document');
-                    
-                    titleEl.createDiv({ cls: 'nav-file-title-content', text: path });
+
+                    // Split path into name and directory
+                    const pathParts = path.split('/');
+                    const fileName = pathParts.pop() || path;
+                    const dirName = pathParts.join('/');
+
+                    const textContainer = itemEl.createDiv();
+                    textContainer.style.display = 'flex';
+                    textContainer.style.flexDirection = 'column';
+                    textContainer.style.overflow = 'hidden'; // Prevent text clipping
+
+                    // File name (Primary color, bold)
+                    const nameEl = textContainer.createDiv({ text: fileName });
+                    nameEl.style.color = 'var(--text-normal)';
+                    nameEl.style.fontWeight = 'var(--font-medium)';
+                    nameEl.style.whiteSpace = 'nowrap';
+                    nameEl.style.textOverflow = 'ellipsis';
+                    nameEl.style.overflow = 'hidden';
+
+                    // File path (Monospace, small, grey)
+                    if (dirName) {
+                        const pathEl = textContainer.createDiv({ text: dirName });
+                        pathEl.style.color = 'var(--text-muted)';
+                        pathEl.style.fontSize = 'var(--font-ui-smaller)';
+                        pathEl.style.fontFamily = 'var(--font-monospace)';
+                        pathEl.style.whiteSpace = 'nowrap';
+                        pathEl.style.textOverflow = 'ellipsis';
+                        pathEl.style.overflow = 'hidden';
+                    }
                     
                     itemEl.onClickEvent(() => {
-                        if (path !== 'System Index') {
-                            this.app.workspace.openLinkText(path, '', false);
-                        }
+                        this.app.workspace.openLinkText(path, '', false);
                     });
                 }
             }
