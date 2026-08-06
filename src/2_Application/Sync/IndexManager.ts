@@ -166,8 +166,13 @@ export class IndexManager {
         });
 
         this.pushIndexDebounced();
+    
+        const file = this.app.vault.getAbstractFileByPath(path);
+        if (file && file instanceof TFile) {
+            const content = await this.app.vault.read(file);
+            await this.syncOrchestrator.handleLocalChange(path, content);
+        }
     }
-
     public async handleFileRename(oldPath: string, newPath: string): Promise<void> {
         const uuid = this.pathToUuid.get(oldPath);
         if (!uuid) return;

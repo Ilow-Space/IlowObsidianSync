@@ -121,8 +121,20 @@ export default class MyPlugin extends Plugin {
 
         this.registerEvent(
             this.app.vault.on('rename', async (file: TAbstractFile, oldPath: string) => {
-                if (file instanceof TFile && file.extension === 'md' && this.indexManager) {
+                if (!this.indexManager) return;
+            
+                if (file instanceof TFile && file.extension === 'md') {
                     await this.indexManager.handleFileRename(oldPath, file.path);
+                } else if (file instanceof TFolder) {
+                    // Find all markdown files that lived under the old folder path
+                    const allFiles = this.app.vault.getMarkdownFiles();
+                    for (const child of allFiles) {
+                        if (child.path.startsWith(file.path + '/')) {
+                            // Reconstruct what the old path of this specific file was
+                            const childOldPath = child.path.replace(file.path, oldPath);
+                            await this.indexManager.handleFileRename(childOldPath, child.path);
+                        }
+                    }
                 }
             })
         );
@@ -215,6 +227,15 @@ export default class MyPlugin extends Plugin {
             await this.indexManager.initialize();
             await this.indexManager.syncIndex();
             
+            // NEW: Keep the index synchronized periodically
+            this.registerInterval(
+                window.setInterval(async () => {
+                    if (this.isKeyDerived && this.indexManager) {
+                        await this.indexManager.syncIndex();
+                    }
+                }, 10000) // Poll the system index every 10 seconds
+            );
+        
             const activeFile = this.app.workspace.getActiveFile();
             if (activeFile && activeFile.extension === 'md') {
                 await this.syncOrchestrator.handleFileOpen(activeFile.path);
