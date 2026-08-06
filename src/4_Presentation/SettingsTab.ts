@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting, Notice } from 'obsidian';
+﻿import { App, PluginSettingTab, Setting, Notice } from 'obsidian';
 import MyPlugin from './Plugin';
 import { QrDisplayModal } from './Modals/QrDisplayModal';
 import { QrScannerModal } from './Modals/QrScannerModal';
@@ -13,6 +13,17 @@ export class SettingsTab extends PluginSettingTab {
         containerEl.empty();
 
         containerEl.createEl('h2', { text: 'Obsidian CRDT Sync Settings' });
+
+        const nativeSyncEnabled = (this.app as any).internalPlugins?.plugins?.sync?.enabled;
+        if (nativeSyncEnabled) {
+            const warning = containerEl.createDiv({ cls: 'crdt-sync-warning' });
+            warning.style.backgroundColor = 'var(--background-modifier-error)';
+            warning.style.padding = '10px';
+            warning.style.borderRadius = '5px';
+            warning.style.marginBottom = '15px';
+            warning.createEl('h3', { text: '⚠️ Conflict Warning', cls: 'crdt-sync-warning-title' });
+            warning.createEl('p', { text: 'For Obsidian CRDT Sync to function correctly and avoid data corruption, please disable the official Obsidian Sync plugin in your Core Plugins settings.' });
+        }
 
         // PostgREST URL
         new Setting(containerEl)
@@ -88,9 +99,9 @@ export class SettingsTab extends PluginSettingTab {
                     btn.setButtonText('Unload Key')
                         .setWarning()
                         .onClick(async () => {
-                            this.plugin.unloadKey();
+                            await this.plugin.unloadKey();
                             this.display();
-                            new Notice('Master key unloaded from memory.');
+                            new Notice('Master key unloaded from memory and disk.');
                         });
                 } else {
                     btn.setButtonText('Derive Key')

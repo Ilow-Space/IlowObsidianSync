@@ -1,10 +1,12 @@
-import { Plugin, Notice, TFile, WorkspaceLeaf } from 'obsidian';
+﻿import { Plugin, Notice, TFile, TAbstractFile, WorkspaceLeaf } from 'obsidian';
 import { SettingsTab } from './SettingsTab';
 import { WebCryptoService } from '@infrastructure/Crypto/WebCryptoService';
 import { PostgresRemoteStore } from '@infrastructure/Postgres/PostgresRemoteStore';
 import { ObsidianNoteRepository } from '@infrastructure/Obsidian/ObsidianNoteRepository';
 import { YjsEngine } from '@infrastructure/Crdt/YjsEngine';
-import { SyncOrchestrator } from '@application/Sync/SyncOrchestrator';
+import { SyncOrchestrator, SyncStatus } from '@application/Sync/SyncOrchestrator';
+import { IndexManager } from '@application/Sync/IndexManager';
+import { SyncSidebarView, SYNC_SIDEBAR_VIEW_TYPE } from './Views/SyncSidebarView';
 
 interface PluginSettings {
     serverUrl: string;
@@ -25,7 +27,10 @@ export default class MyPlugin extends Plugin {
     private yjsEngine!: YjsEngine;
     private remoteStore: PostgresRemoteStore | null = null;
     private syncOrchestrator: SyncOrchestrator | null = null;
+    private indexManager: IndexManager | null = null;
     private derivedKey: CryptoKey | null = null;
+    private statusBarItem!: HTMLElement;
+    private readonly KEY_FILE = '.obsidian/crdt-sync-key.json';
 
     get isKeyDerived(): boolean {
         return this.derivedKey !== null;
@@ -46,12 +51,49 @@ export default class MyPlugin extends Plugin {
             await this.saveSettings();
         }
 
+        // Register Sidebar View
+        this.registerView(
+            SYNC_SIDEBAR_VIEW_TYPE,
+            (leaf) => new SyncSidebarView(leaf, this)
+        );
+
+        // Status Bar Setup
+        this.statusBarItem = this.addStatusBarItem();
+        this.statusBarItem.addClass('crdt-sync-status');
+        this.statusBarItem.addClass('mod-clickable');
+        this.updateStatusBar('offline', 'Disconnected');
+        this.statusBarItem.onClickEvent(() => {
+            this.activateSidebar();
+        });
+
+        // Ribbon Icon Setup
+        this.addRibbonIcon('folder-sync', 'CRDT Sync History', () => {
+            this.activateSidebar();
+        });
+
         this.initializeSyncOrchestrator();
+
+        // Auto-load persisted key from disk
+        try {
+            if (await this.app.vault.adapter.exists(this.KEY_FILE)) {
+                this.updateStatusBar('syncing', 'Loading key...');
+                const keyData = await this.app.vault.adapter.read(this.KEY_FILE);
+                this.derivedKey = await this.cryptoService.importKey(keyData);
+                
+                if (this.syncOrchestrator && this.indexManager) {
+                    this.syncOrchestrator.setCryptoKey(this.derivedKey);
+                    this.runBackgroundBootstrap().catch(console.error);
+                }
+            }
+        } catch (err) {
+            console.error('Failed to auto-load persisted sync key:', err);
+            this.updateStatusBar('error', 'Failed to load key');
+        }
 
         // Add settings tab
         this.addSettingTab(new SettingsTab(this.app, this));
 
-        // Register vault event listeners
+        // Register workspace & vault event listeners
         this.registerEvent(
             this.app.workspace.on('file-open', async (file: TFile | null) => {
                 if (file && file.extension === 'md' && this.syncOrchestrator) {
@@ -61,18 +103,34 @@ export default class MyPlugin extends Plugin {
         );
 
         this.registerEvent(
-            this.app.workspace.on('layout-change', async () => {
-                // Periodically check active file changes/closing or switching tabs
-                // Wait for any active file closing
-            })
-        );
-
-        // Intercept local editor typing and forward to sync loop
-        this.registerEvent(
             this.app.vault.on('modify', async (file) => {
                 if (file instanceof TFile && file.extension === 'md' && this.syncOrchestrator) {
                     const content = await this.app.vault.read(file);
                     await this.syncOrchestrator.handleLocalChange(file.path, content);
+                }
+            })
+        );
+
+        this.registerEvent(
+            this.app.vault.on('create', async (file: TAbstractFile) => {
+                if (file instanceof TFile && file.extension === 'md' && this.indexManager) {
+                    await this.indexManager.handleFileCreate(file.path);
+                }
+            })
+        );
+
+        this.registerEvent(
+            this.app.vault.on('rename', async (file: TAbstractFile, oldPath: string) => {
+                if (file instanceof TFile && file.extension === 'md' && this.indexManager) {
+                    await this.indexManager.handleFileRename(oldPath, file.path);
+                }
+            })
+        );
+
+        this.registerEvent(
+            this.app.vault.on('delete', async (file: TAbstractFile) => {
+                if (file instanceof TFile && file.extension === 'md' && this.indexManager) {
+                    await this.indexManager.handleFileDelete(file.path);
                 }
             })
         );
@@ -102,16 +160,46 @@ export default class MyPlugin extends Plugin {
         return this.syncOrchestrator;
     }
 
+    public updateStatusBar(status: SyncStatus, msg: string) {
+        let icon = '🔴';
+        if (status === 'synced') icon = '🟢';
+        else if (status === 'syncing') icon = '🟡';
+        
+        this.statusBarItem.setText(`${icon} ${msg}`);
+    }
+
+    public async activateSidebar() {
+        const { workspace } = this.app;
+        
+        let leaf: WorkspaceLeaf | null = null;
+        const leaves = workspace.getLeavesOfType(SYNC_SIDEBAR_VIEW_TYPE);
+        
+        if (leaves.length > 0) {
+            leaf = leaves[0];
+        } else {
+            const rightLeaf = workspace.getRightLeaf(false);
+            if (rightLeaf) {
+                leaf = rightLeaf;
+                await leaf.setViewState({ type: SYNC_SIDEBAR_VIEW_TYPE, active: true });
+            }
+        }
+        
+        if (leaf) {
+            workspace.revealLeaf(leaf);
+        }
+    }
+
     public async deriveKeyFromPassword(password: string): Promise<void> {
         try {
             this.derivedKey = await this.cryptoService.deriveKey(password, this.settings.salt);
-            if (this.syncOrchestrator) {
+            
+            // Save the derived key to disk
+            const exportedKey = await this.cryptoService.exportKey(this.derivedKey);
+            await this.app.vault.adapter.write(this.KEY_FILE, exportedKey);
+
+            if (this.syncOrchestrator && this.indexManager) {
                 this.syncOrchestrator.setCryptoKey(this.derivedKey);
-                // If there's an active note, trigger standard pull/sync loop immediately
-                const activeFile = this.app.workspace.getActiveFile();
-                if (activeFile && activeFile.extension === 'md') {
-                    await this.syncOrchestrator.handleFileOpen(activeFile.path);
-                }
+                this.runBackgroundBootstrap().catch(console.error);
             }
         } catch (err) {
             console.error('Error deriving master key:', err);
@@ -119,11 +207,40 @@ export default class MyPlugin extends Plugin {
         }
     }
 
-    public unloadKey(): void {
+    private async runBackgroundBootstrap() {
+        if (!this.indexManager || !this.syncOrchestrator) return;
+        
+        this.updateStatusBar('syncing', 'Bootstrapping index...');
+        try {
+            await this.indexManager.initialize();
+            await this.indexManager.syncIndex();
+            
+            const activeFile = this.app.workspace.getActiveFile();
+            if (activeFile && activeFile.extension === 'md') {
+                await this.syncOrchestrator.handleFileOpen(activeFile.path);
+            }
+            
+            this.updateStatusBar('synced', 'Fully synced');
+        } catch (err) {
+            this.updateStatusBar('error', 'Bootstrap failed');
+            console.error('Background bootstrap failed:', err);
+        }
+    }
+
+    public async unloadKey(): Promise<void> {
         this.derivedKey = null;
         if (this.syncOrchestrator) {
             this.syncOrchestrator.setCryptoKey(null);
             this.syncOrchestrator.stopAll();
+        }
+        this.updateStatusBar('offline', 'Disconnected');
+
+        try {
+            if (await this.app.vault.adapter.exists(this.KEY_FILE)) {
+                await this.app.vault.adapter.remove(this.KEY_FILE);
+            }
+        } catch (err) {
+            console.error('Failed to remove persisted sync key:', err);
         }
     }
 
@@ -138,14 +255,19 @@ export default class MyPlugin extends Plugin {
                 this.remoteStore,
                 this.cryptoService,
                 this.yjsEngine,
-                this.noteRepo
+                this.noteRepo,
+                (status, msg) => this.updateStatusBar(status, msg)
             );
+            this.indexManager = new IndexManager(this.app, this.yjsEngine, this.syncOrchestrator);
+            this.syncOrchestrator.setIndexManager(this.indexManager);
+
             if (this.derivedKey) {
                 this.syncOrchestrator.setCryptoKey(this.derivedKey);
             }
         } else {
             this.remoteStore = null;
             this.syncOrchestrator = null;
+            this.indexManager = null;
         }
     }
 }

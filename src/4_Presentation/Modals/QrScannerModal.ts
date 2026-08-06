@@ -1,4 +1,4 @@
-import { Modal, App, Setting, Notice } from 'obsidian';
+﻿import { Modal, App, Setting, Notice } from 'obsidian';
 import { Html5Qrcode } from 'html5-qrcode';
 
 export class QrScannerModal extends Modal {
@@ -12,6 +12,17 @@ export class QrScannerModal extends Modal {
         const { contentEl } = this;
         contentEl.empty();
         contentEl.createEl('h2', { text: 'Import Setup Credentials' });
+
+        const nativeSyncEnabled = (this.app as any).internalPlugins?.plugins?.sync?.enabled;
+        if (nativeSyncEnabled) {
+            const warning = contentEl.createDiv({ cls: 'crdt-sync-warning' });
+            warning.style.backgroundColor = 'var(--background-modifier-error)';
+            warning.style.padding = '10px';
+            warning.style.borderRadius = '5px';
+            warning.style.marginBottom = '15px';
+            warning.createEl('h3', { text: '⚠️ Conflict Warning' });
+            warning.createEl('p', { text: 'For Obsidian CRDT Sync to function correctly and avoid data corruption, please disable the official Obsidian Sync plugin in your Core Plugins settings.' });
+        }
 
         // 1. Direct Paste Fallback (Ideal for Desktop)
         contentEl.createEl('h4', { text: 'Paste Connection String' });
@@ -91,3 +102,4 @@ export class QrScannerModal extends Modal {
         contentEl.empty();
     }
 }
+

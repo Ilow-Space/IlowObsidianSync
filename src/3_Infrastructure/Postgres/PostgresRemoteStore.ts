@@ -1,4 +1,4 @@
-import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
+﻿import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
 import { EncryptedBlob } from '@domain/ValueObjects/CryptoTypes';
 import { CRDTUpdate } from '@domain/Entities/Models';
 import { CryptoUtils } from '../Crypto/CryptoUtils';
@@ -31,9 +31,9 @@ export class PostgresRemoteStore implements IRemoteStore {
         }
     }
 
-    public async fetchSnapshot(path: string): Promise<EncryptedBlob | null> {
+    public async fetchSnapshot(documentId: string): Promise<EncryptedBlob | null> {
         try {
-            const url = `${this.serverUrl}/vault_snapshots?path=eq.${encodeURIComponent(path)}`;
+            const url = `${this.serverUrl}/vault_snapshots?document_id=eq.${encodeURIComponent(documentId)}`;
             const res = await requestUrl({
                 url: url,
                 method: 'GET',
@@ -57,48 +57,66 @@ export class PostgresRemoteStore implements IRemoteStore {
             }
             return null;
         } catch (err) {
-            console.error(`fetchSnapshot failed for ${path}:`, err);
+            console.error(`fetchSnapshot failed for ${documentId}:`, err);
             return null;
         }
     }
 
-    public async fetchUpdatesSince(path: string, lastId: number): Promise<CRDTUpdate[]> {
+    public async fetchUpdatesSince(documentId: string, lastId: number): Promise<CRDTUpdate[]> {
+        let allUpdates: CRDTUpdate[] = [];
+        let offset = 0;
+        const limit = 500;
+
         try {
-            const url = `${this.serverUrl}/vault_updates?path=eq.${encodeURIComponent(path)}&id=gt.${lastId}&order=id.asc`;
-            const res = await requestUrl({
-                url: url,
-                method: 'GET',
-                headers: this.headers,
-                throwOnError: false
-            });
-
-            if (res.status < 200 || res.status >= 300) {
-                throw new Error(`Failed to fetch updates: ${res.status}`);
-            }
-
-            const data = res.json;
-            if (Array.isArray(data)) {
-                return data.map((row: any) => {
-                    const rawJson = CryptoUtils.hexToString(row.encrypted_update);
-                    const blob = JSON.parse(rawJson) as EncryptedBlob;
-                    return {
-                        id: row.id,
-                        path: row.path,
-                        encryptedUpdate: blob,
-                        createdAt: row.created_at
-                    };
+            while (true) {
+                const url = `${this.serverUrl}/vault_updates?document_id=eq.${encodeURIComponent(documentId)}&id=gt.${lastId}&order=id.asc`;
+                const res = await requestUrl({
+                    url: url,
+                    method: 'GET',
+                    headers: {
+                        ...this.headers,
+                        'Range-Unit': 'items',
+                        'Range': `${offset}-${offset + limit - 1}`
+                    },
+                    throwOnError: false
                 });
+
+                if (res.status < 200 || res.status >= 300) {
+                    throw new Error(`Failed to fetch updates: ${res.status}`);
+                }
+
+                const data = res.json;
+                if (Array.isArray(data)) {
+                    const parsed = data.map((row: any) => {
+                        const rawJson = CryptoUtils.hexToString(row.encrypted_update);
+                        const blob = JSON.parse(rawJson) as EncryptedBlob;
+                        return {
+                            id: row.id,
+                            documentId: row.document_id,
+                            encryptedUpdate: blob,
+                            createdAt: row.created_at
+                        };
+                    });
+                    allUpdates = allUpdates.concat(parsed);
+
+                    if (data.length < limit) {
+                        break;
+                    }
+                    offset += limit;
+                } else {
+                    break;
+                }
             }
-            return [];
+            return allUpdates;
         } catch (err) {
-            console.error(`fetchUpdatesSince failed for ${path}:`, err);
+            console.error(`fetchUpdatesSince failed for ${documentId}:`, err);
             return [];
         }
     }
 
-    public async pushUpdate(path: string, update: EncryptedBlob): Promise<void> {
+    public async pushUpdate(documentId: string, update: EncryptedBlob): Promise<void> {
         try {
-            const snapshotCheckUrl = `${this.serverUrl}/vault_snapshots?path=eq.${encodeURIComponent(path)}`;
+            const snapshotCheckUrl = `${this.serverUrl}/vault_snapshots?document_id=eq.${encodeURIComponent(documentId)}`;
             const snapshotCheckRes = await requestUrl({
                 url: snapshotCheckUrl,
                 method: 'GET',
@@ -117,7 +135,7 @@ export class PostgresRemoteStore implements IRemoteStore {
                         'Prefer': 'resolution=ignore-duplicates'
                     },
                     body: JSON.stringify({
-                        path: path,
+                        document_id: documentId,
                         encrypted_state: initialSnapshotBytes,
                         updated_at: new Date().toISOString()
                     }),
@@ -131,7 +149,7 @@ export class PostgresRemoteStore implements IRemoteStore {
                 method: 'POST',
                 headers: this.headers,
                 body: JSON.stringify({
-                    path: path,
+                    document_id: documentId,
                     encrypted_update: updateBytes,
                     created_at: new Date().toISOString()
                 }),
@@ -142,12 +160,12 @@ export class PostgresRemoteStore implements IRemoteStore {
                 throw new Error(`Failed to push update: ${res.status}. Details: ${res.text}`);
             }
         } catch (err) {
-            console.error(`pushUpdate failed for ${path}:`, err);
+            console.error(`pushUpdate failed for ${documentId}:`, err);
             throw err;
         }
     }
 
-    public async compactSnapshot(path: string, newState: EncryptedBlob, maxId: number): Promise<void> {
+    public async compactSnapshot(documentId: string, newState: EncryptedBlob, maxId: number, isDeleted: boolean = false): Promise<void> {
         try {
             const stateBytes = CryptoUtils.stringToHex(JSON.stringify(newState));
             const url = `${this.serverUrl}/rpc/compact_document`;
@@ -156,9 +174,10 @@ export class PostgresRemoteStore implements IRemoteStore {
                 method: 'POST',
                 headers: this.headers,
                 body: JSON.stringify({
-                    p_path: path,
+                    p_document_id: documentId,
                     p_state: stateBytes,
-                    p_max_id: maxId
+                    p_max_id: maxId,
+                    p_is_deleted: isDeleted
                 }),
                 throwOnError: false
             });
@@ -167,8 +186,9 @@ export class PostgresRemoteStore implements IRemoteStore {
                 throw new Error(`Failed to compact snapshot: ${res.status}. Details: ${res.text}`);
             }
         } catch (err) {
-            console.error(`compactSnapshot failed for ${path}:`, err);
+            console.error(`compactSnapshot failed for ${documentId}:`, err);
             throw err;
         }
     }
 }
+

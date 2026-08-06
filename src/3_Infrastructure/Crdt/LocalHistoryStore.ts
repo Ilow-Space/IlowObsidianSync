@@ -1,4 +1,4 @@
-import * as Y from 'yjs';
+﻿import * as Y from 'yjs';
 import { CryptoUtils } from '../Crypto/CryptoUtils';
 
 export class LocalHistoryStore {
@@ -24,24 +24,24 @@ export class LocalHistoryStore {
         return this.dbPromise;
     }
 
-    public async saveDocumentState(path: string, stateVector: Uint8Array): Promise<void> {
+    public async saveDocumentState(documentId: string, stateVector: Uint8Array): Promise<void> {
         const db = await this.getDB();
         return new Promise((resolve, reject) => {
             const tx = db.transaction(this.storeName, 'readwrite');
             const store = tx.objectStore(this.storeName);
             const hex = CryptoUtils.bufToHex(stateVector);
-            const request = store.put(hex, path);
+            const request = store.put(hex, documentId);
             request.onsuccess = () => resolve();
             request.onerror = () => reject(request.error);
         });
     }
 
-    public async loadDocumentState(path: string): Promise<Uint8Array | null> {
+    public async loadDocumentState(documentId: string): Promise<Uint8Array | null> {
         const db = await this.getDB();
         return new Promise((resolve, reject) => {
             const tx = db.transaction(this.storeName, 'readonly');
             const store = tx.objectStore(this.storeName);
-            const request = store.get(path);
+            const request = store.get(documentId);
             request.onsuccess = () => {
                 const hex = request.result;
                 if (hex && typeof hex === 'string') {
@@ -54,14 +54,15 @@ export class LocalHistoryStore {
         });
     }
 
-    public async deleteDocumentState(path: string): Promise<void> {
+    public async deleteDocumentState(documentId: string): Promise<void> {
         const db = await this.getDB();
         return new Promise((resolve, reject) => {
             const tx = db.transaction(this.storeName, 'readwrite');
             const store = tx.objectStore(this.storeName);
-            const request = store.delete(path);
+            const request = store.delete(documentId);
             request.onsuccess = () => resolve();
             request.onerror = () => reject(request.error);
         });
     }
 }
+

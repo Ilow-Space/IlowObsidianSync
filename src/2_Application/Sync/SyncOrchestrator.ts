@@ -1,23 +1,32 @@
-import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
+﻿import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
 import { ICryptography } from '@domain/Interfaces/ICryptography';
 import { YjsEngine } from '@infrastructure/Crdt/YjsEngine';
 import { INoteRepository } from '@domain/Interfaces/INoteRepository';
 import { PullRemoteChangesUseCase } from './PullRemoteChanges';
 import { PushLocalChangesUseCase } from './PushLocalChanges';
+import { IndexManager } from './IndexManager';
+
+export type SyncStatus = 'synced' | 'syncing' | 'error' | 'offline';
 
 export class SyncOrchestrator {
     private pullUseCase: PullRemoteChangesUseCase;
     private pushUseCase: PushLocalChangesUseCase;
+    private indexManager: IndexManager | null = null;
+    
     private fileLastSyncIds = new Map<string, number>();
     private fileUpdateCounters = new Map<string, number>();
     private activeIntervals = new Map<string, any>();
     private activeKey: CryptoKey | null = null;
+    
+    private activeDocumentId: string | null = null;
     private activePath: string | null = null;
 
-    // Mutex/Lock to avoid infinite loops when writing remote modifications locally
-    private isApplyingRemoteChanges = false;
+    // Queue tracking, ping tracking & anti-flicker
+    private activeTasks = new Set<string>();
+    private statusIdleTimer: any = null;
+    private lastPingMs: number | null = null;
 
-    // Debouncing local changes to avoid network/keystroke spamming
+    private isApplyingRemoteChanges = false;
     private localChangeDebounceTimers = new Map<string, any>();
     private pendingContents = new Map<string, string>();
 
@@ -25,165 +34,258 @@ export class SyncOrchestrator {
         private remoteStore: IRemoteStore,
         private crypto: ICryptography,
         private crdtEngine: YjsEngine,
-        private noteRepo: INoteRepository
+        private noteRepo: INoteRepository,
+        private statusCallback: (status: SyncStatus, msg: string) => void
     ) {
         this.pullUseCase = new PullRemoteChangesUseCase(remoteStore, crypto, crdtEngine, noteRepo);
         this.pushUseCase = new PushLocalChangesUseCase(remoteStore, crypto, crdtEngine, noteRepo);
     }
 
+    public setIndexManager(im: IndexManager) {
+        this.indexManager = im;
+    }
+
     public setCryptoKey(key: CryptoKey | null) {
         this.activeKey = key;
+        this.triggerStatusUpdate();
+    }
+
+    public getActiveSyncPaths(): string[] {
+        return Array.from(this.activeTasks);
+    }
+
+    public getLastPing(): number | null {
+        return this.lastPingMs;
+    }
+
+    private addActiveTask(taskName: string) {
+        this.activeTasks.add(taskName);
+        this.triggerStatusUpdate();
+    }
+
+    private removeActiveTask(taskName: string) {
+        this.activeTasks.delete(taskName);
+        this.triggerStatusUpdate();
+    }
+
+    private triggerStatusUpdate() {
+        if (!this.activeKey) {
+            this.statusCallback('offline', 'Disconnected');
+            return;
+        }
+
+        if (this.statusIdleTimer) {
+            clearTimeout(this.statusIdleTimer);
+            this.statusIdleTimer = null;
+        }
+
+        if (this.activeTasks.size > 0) {
+            this.statusCallback('syncing', `Syncing ${this.activeTasks.size} files...`);
+        } else {
+            this.statusIdleTimer = setTimeout(() => {
+                this.statusCallback('synced', 'Fully synced');
+            }, 1000);
+        }
     }
 
     public async handleFileOpen(path: string): Promise<void> {
-        if (!this.activeKey) return;
+        if (!this.activeKey || !this.indexManager) return;
+
+        let documentId = this.indexManager.getUuidForPath(path);
+        if (!documentId) {
+             await this.indexManager.handleFileCreate(path);
+             documentId = this.indexManager.getUuidForPath(path)!;
+        }
 
         this.activePath = path;
+        this.activeDocumentId = documentId;
 
-        // Ensure Yjs has loaded local storage state
         const content = await this.noteRepo.readNote(path) || '';
-        await this.crdtEngine.getOrCreateDoc(path, content);
-
-        // Perform initial pull
-        await this.pullFile(path);
-
-        // Setup real-time hybrid polling loop (every 5 seconds)
-        this.startPolling(path);
+        await this.crdtEngine.getOrCreateDoc(documentId, content);
+        await this.pullDocument(documentId, path);
+        this.startPolling(documentId, path);
     }
 
     public async handleFileClose(path: string): Promise<void> {
-        this.stopPolling(path);
+        if (!this.indexManager) return;
+        const documentId = this.indexManager.getUuidForPath(path);
+        if (!documentId) return;
 
-        // Clear any pending debounced triggers
-        if (this.localChangeDebounceTimers.has(path)) {
-            clearTimeout(this.localChangeDebounceTimers.get(path));
-            this.localChangeDebounceTimers.delete(path);
+        this.stopPolling(documentId);
+
+        if (this.localChangeDebounceTimers.has(documentId)) {
+            clearTimeout(this.localChangeDebounceTimers.get(documentId));
+            this.localChangeDebounceTimers.delete(documentId);
         }
 
-        if (this.activePath === path) {
+        if (this.activeDocumentId === documentId) {
+            this.activeDocumentId = null;
             this.activePath = null;
         }
 
         if (!this.activeKey) return;
 
-        // Push any remaining buffered content
-        const bufferedContent = this.pendingContents.get(path);
+        const bufferedContent = this.pendingContents.get(documentId);
         if (bufferedContent !== undefined) {
-            await this.pushUseCase.execute(path, bufferedContent, this.activeKey);
-            this.pendingContents.delete(path);
+            this.addActiveTask(path);
+            const start = performance.now();
+            try {
+                await this.pushUseCase.execute(documentId, bufferedContent, this.activeKey);
+                this.lastPingMs = Math.round(performance.now() - start);
+            } finally {
+                this.removeActiveTask(path);
+            }
+            this.pendingContents.delete(documentId);
         } else {
             const content = await this.noteRepo.readNote(path);
             if (content !== null) {
-                await this.pushUseCase.execute(path, content, this.activeKey);
+                this.addActiveTask(path);
+                const start = performance.now();
+                try {
+                    await this.pushUseCase.execute(documentId, content, this.activeKey);
+                    this.lastPingMs = Math.round(performance.now() - start);
+                } finally {
+                    this.removeActiveTask(path);
+                }
             }
         }
 
-        // Remove from memory to save resource
-        this.crdtEngine.removeDoc(path);
+        this.crdtEngine.removeDoc(documentId);
     }
 
     public async handleLocalChange(path: string, content: string): Promise<void> {
-        if (!this.activeKey) return;
+        if (!this.activeKey || !this.indexManager) return;
+        
+        const documentId = this.indexManager.getUuidForPath(path);
+        if (!documentId) return;
 
-        // If we are currently writing a remote change, ignore this modification event
-        if (this.isApplyingRemoteChanges) {
-            return;
-        }
+        if (this.isApplyingRemoteChanges) return;
 
-        // Buffer/save the most up-to-date content
-        this.pendingContents.set(path, content);
+        this.pendingContents.set(documentId, content);
 
-        // Debounce actual DB pushes by 1 second to bundle rapid keystrokes cleanly
-        if (this.localChangeDebounceTimers.has(path)) {
-            clearTimeout(this.localChangeDebounceTimers.get(path));
+        if (this.localChangeDebounceTimers.has(documentId)) {
+            clearTimeout(this.localChangeDebounceTimers.get(documentId));
         }
 
         const timer = setTimeout(async () => {
-            this.localChangeDebounceTimers.delete(path);
-            const latestContent = this.pendingContents.get(path);
+            this.localChangeDebounceTimers.delete(documentId);
+            const latestContent = this.pendingContents.get(documentId);
             if (latestContent !== undefined && this.activeKey) {
-                this.pendingContents.delete(path);
+                this.pendingContents.delete(documentId);
+                const start = performance.now();
                 try {
-                    await this.pushUseCase.execute(path, latestContent, this.activeKey);
+                    this.addActiveTask(path);
+                    await this.pushUseCase.execute(documentId, latestContent, this.activeKey);
+                    this.lastPingMs = Math.round(performance.now() - start);
 
-                    // Track push counts for compaction threshold
-                    const currentCount = (this.fileUpdateCounters.get(path) || 0) + 1;
-                    this.fileUpdateCounters.set(path, currentCount);
+                    const currentCount = (this.fileUpdateCounters.get(documentId) || 0) + 1;
+                    this.fileUpdateCounters.set(documentId, currentCount);
 
                     if (currentCount >= 50) {
-                        await this.pushUseCase.forceCompact(path, this.activeKey);
-                        this.fileUpdateCounters.set(path, 0);
+                        await this.pushUseCase.forceCompact(documentId, this.activeKey);
+                        this.fileUpdateCounters.set(documentId, 0);
                     }
                 } catch (err) {
-                    console.error(`SyncOrchestrator push failed for ${path}:`, err);
+                    console.error(`SyncOrchestrator push failed for ${documentId}:`, err);
+                } finally {
+                    this.removeActiveTask(path);
                 }
             }
         }, 1000);
 
-        this.localChangeDebounceTimers.set(path, timer);
+        this.localChangeDebounceTimers.set(documentId, timer);
     }
 
     public async forceSyncAndCompact(path: string): Promise<void> {
         if (!this.activeKey) throw new Error('Master key not loaded');
+        if (!this.indexManager) throw new Error('Index manager not loaded');
+        
+        const documentId = this.indexManager.getUuidForPath(path);
+        if (!documentId) throw new Error('Document ID not found in index');
 
-        // Pull latest updates first
-        await this.pullFile(path);
-        // Force compaction
-        await this.pushUseCase.forceCompact(path, this.activeKey);
-        this.fileUpdateCounters.set(path, 0);
+        this.addActiveTask(path);
+        try {
+            await this.pullDocument(documentId, path);
+            await this.pushUseCase.forceCompact(documentId, this.activeKey);
+            this.fileUpdateCounters.set(documentId, 0);
+        } finally {
+            this.removeActiveTask(path);
+        }
     }
 
-    private async pullFile(path: string): Promise<void> {
+    public async pullDocument(documentId: string, path: string | null = null): Promise<void> {
         if (!this.activeKey) return;
+        if (this.localChangeDebounceTimers.has(documentId) || this.isApplyingRemoteChanges) return;
 
-        // Ignore pull if we have a pending push that has not gone through yet,
-        // to avoid clobbering latest changes or race conditions.
-        if (this.localChangeDebounceTimers.has(path) || this.isApplyingRemoteChanges) {
-            return;
-        }
+        const taskName = path || 'System Index';
+        this.addActiveTask(taskName);
 
-        const lastId = this.fileLastSyncIds.get(path) || 0;
+        const start = performance.now();
         try {
+            const lastId = this.fileLastSyncIds.get(documentId) || 0;
             const result = await this.pullUseCase.execute(
+                documentId,
                 path,
                 lastId,
                 this.activeKey,
                 () => { this.isApplyingRemoteChanges = true; },
                 () => { this.isApplyingRemoteChanges = false; }
             );
-            this.fileLastSyncIds.set(path, result.newLastSyncId);
+            this.fileLastSyncIds.set(documentId, result.newLastSyncId);
+            this.lastPingMs = Math.round(performance.now() - start);
         } catch (err) {
-            console.error(`SyncOrchestrator pull failed for ${path}:`, err);
+            console.error(`Sync pull failed for ${documentId}:`, err);
+        } finally {
+            this.removeActiveTask(taskName);
         }
     }
 
-    private startPolling(path: string) {
-        this.stopPolling(path);
+    public async pushDocumentUpdate(documentId: string, updateBinary: Uint8Array): Promise<void> {
+        if (!this.activeKey) return;
+        
+        this.addActiveTask('System Index');
+        const start = performance.now();
+        try {
+            await this.pushUseCase.pushRawUpdate(documentId, updateBinary, this.activeKey);
+            this.lastPingMs = Math.round(performance.now() - start);
+        } finally {
+            this.removeActiveTask('System Index');
+        }
+    }
+
+    private startPolling(documentId: string, path: string) {
+        this.stopPolling(documentId);
 
         const interval = setInterval(async () => {
-            if (this.activePath === path && this.activeKey) {
-                await this.pullFile(path);
+            if (this.activeDocumentId === documentId && this.activeKey) {
+                await this.pullDocument(documentId, path);
             }
         }, 5000);
 
-        this.activeIntervals.set(path, interval);
+        this.activeIntervals.set(documentId, interval);
     }
 
-    private stopPolling(path: string) {
-        if (this.activeIntervals.has(path)) {
-            clearInterval(this.activeIntervals.get(path));
-            this.activeIntervals.delete(path);
+    private stopPolling(documentId: string) {
+        if (this.activeIntervals.has(documentId)) {
+            clearInterval(this.activeIntervals.get(documentId));
+            this.activeIntervals.delete(documentId);
         }
     }
 
     public stopAll() {
-        for (const path of this.activeIntervals.keys()) {
-            this.stopPolling(path);
+        for (const documentId of this.activeIntervals.keys()) {
+            this.stopPolling(documentId);
         }
         for (const timer of this.localChangeDebounceTimers.values()) {
             clearTimeout(timer);
         }
+        if (this.statusIdleTimer) {
+            clearTimeout(this.statusIdleTimer);
+            this.statusIdleTimer = null;
+        }
         this.localChangeDebounceTimers.clear();
         this.pendingContents.clear();
+        this.activeTasks.clear();
+        this.triggerStatusUpdate();
     }
 }

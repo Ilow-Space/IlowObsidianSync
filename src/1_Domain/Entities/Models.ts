@@ -1,4 +1,4 @@
-import { EncryptedBlob } from '../ValueObjects/CryptoTypes';
+﻿import { EncryptedBlob } from '../ValueObjects/CryptoTypes';
 
 export interface Note {
     path: string;
@@ -7,14 +7,22 @@ export interface Note {
 }
 
 export interface CRDTSnapshot {
-    path: string;
+    documentId: string;
     encryptedState: EncryptedBlob;
     updatedAt: string;
+    isDeleted: boolean;
 }
 
 export interface CRDTUpdate {
     id: number;
-    path: string;
+    documentId: string;
     encryptedUpdate: EncryptedBlob;
     createdAt: string;
 }
+
+export interface DocumentMetadata {
+    path: string;
+    isDeleted: boolean;
+    mtime: number;
+}
+

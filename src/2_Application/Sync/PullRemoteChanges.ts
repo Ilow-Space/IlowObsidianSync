@@ -1,4 +1,4 @@
-import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
+﻿import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
 import { ICryptography } from '@domain/Interfaces/ICryptography';
 import { YjsEngine } from '@infrastructure/Crdt/YjsEngine';
 import { INoteRepository } from '@domain/Interfaces/INoteRepository';
@@ -13,31 +13,32 @@ export class PullRemoteChangesUseCase {
     ) {}
 
     public async execute(
-        path: string,
+        documentId: string,
+        path: string | null,
         lastSyncId: number,
         key: CryptoKey,
         acquireLock: () => void,
         releaseLock: () => void
     ): Promise<{ newLastSyncId: number; appliedCount: number }> {
-        const doc = await this.crdtEngine.getOrCreateDoc(path);
+        const doc = await this.crdtEngine.getOrCreateDoc(documentId);
 
         let appliedCount = 0;
         let newLastSyncId = lastSyncId;
 
         if (lastSyncId === 0) {
-            const encryptedSnapshot = await this.remoteStore.fetchSnapshot(path);
+            const encryptedSnapshot = await this.remoteStore.fetchSnapshot(documentId);
             if (encryptedSnapshot && encryptedSnapshot.ciphertext) {
                 try {
                     const decryptedSnapshot = await this.crypto.decrypt(encryptedSnapshot, key);
-                    await this.crdtEngine.applyUpdates(path, [decryptedSnapshot]);
+                    await this.crdtEngine.applyUpdates(documentId, [decryptedSnapshot]);
                     appliedCount++;
                 } catch (err) {
-                    console.error(`PullRemoteChangesUseCase failed to decrypt snapshot for ${path}:`, err);
+                    console.error(`PullRemoteChangesUseCase failed to decrypt snapshot for ${documentId}:`, err);
                 }
             }
         }
 
-        const remoteUpdates = await this.remoteStore.fetchUpdatesSince(path, lastSyncId);
+        const remoteUpdates = await this.remoteStore.fetchUpdatesSince(documentId, lastSyncId);
         if (remoteUpdates.length > 0) {
             const decryptedUpdates: Uint8Array[] = [];
             for (const update of remoteUpdates) {
@@ -46,23 +47,26 @@ export class PullRemoteChangesUseCase {
                     decryptedUpdates.push(decrypted);
                     appliedCount++;
                 } catch (err) {
-                    console.error(`PullRemoteChangesUseCase failed to decrypt update ID ${update.id} for ${path}:`, err);
+                    console.error(`PullRemoteChangesUseCase failed to decrypt update ID ${update.id} for ${documentId}:`, err);
                 }
                 newLastSyncId = Math.max(newLastSyncId, update.id);
             }
 
             if (decryptedUpdates.length > 0) {
-                const updatedDoc = await this.crdtEngine.applyUpdates(path, decryptedUpdates);
-                const updatedContent = updatedDoc.getText('markdown').toString();
-
-                const localContent = await this.noteRepo.readNote(path);
-                if (localContent !== updatedContent) {
-                    // Acquire write lock to prevent triggering a local modify event / infinite loop
-                    acquireLock();
-                    try {
-                        await this.noteRepo.writeNote(path, updatedContent);
-                    } finally {
-                        releaseLock();
+                const updatedDoc = await this.crdtEngine.applyUpdates(documentId, decryptedUpdates);
+                
+                if (path && !documentId.startsWith('shard-')) {
+                    const updatedContent = updatedDoc.getText('markdown').toString();
+                    const localContent = await this.noteRepo.readNote(path);
+                    
+                    if (localContent !== updatedContent) {
+                        // Acquire write lock to prevent triggering a local modify event / infinite loop
+                        acquireLock();
+                        try {
+                            await this.noteRepo.writeNote(path, updatedContent);
+                        } finally {
+                            releaseLock();
+                        }
                     }
                 }
             }
@@ -71,3 +75,4 @@ export class PullRemoteChangesUseCase {
         return { newLastSyncId, appliedCount };
     }
 }
+
