@@ -1,4 +1,3 @@
-﻿
 {
   "name": "obsidian-crdt-sync",
   "version": "1.0.0",
@@ -8,10 +7,11 @@
     "build": "tsc -v && vite build --mode production && node -e \"require('fs').copyFileSync('manifest.json', 'dist/manifest.json')\""
   },
   "dependencies": {
-    "yjs": "^13.6.0",
-    "y-codemirror.next": "^0.3.4",
+    "fflate": "^0.8.3",
+    "html5-qrcode": "^2.3.8",
     "qrcode": "^1.5.3",
-    "html5-qrcode": "^2.3.8"
+    "y-codemirror.next": "^0.3.4",
+    "yjs": "^13.6.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

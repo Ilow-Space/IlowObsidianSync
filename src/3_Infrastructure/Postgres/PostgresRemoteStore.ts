@@ -1,4 +1,5 @@
-﻿import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
+﻿
+import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
 import { EncryptedBlob } from '@domain/ValueObjects/CryptoTypes';
 import { CRDTUpdate } from '@domain/Entities/Models';
 import { CryptoUtils } from '../Crypto/CryptoUtils';
@@ -28,6 +29,29 @@ export class PostgresRemoteStore implements IRemoteStore {
         } catch (err) {
             console.error('PostgresRemoteStore connection test failed:', err);
             return false;
+        }
+    }
+
+    public async getLatestUpdateId(documentId: string): Promise<number> {
+        try {
+            const url = `${this.serverUrl}/vault_updates?document_id=eq.${encodeURIComponent(documentId)}&select=id&order=id.desc&limit=1`;
+            const res = await requestUrl({
+                url: url,
+                method: 'GET',
+                headers: this.headers,
+                throw: false
+            });
+
+            if (res.status >= 200 && res.status < 300) {
+                const data = res.json;
+                if (Array.isArray(data) && data.length > 0) {
+                    return data[0].id;
+                }
+            }
+            return 0; // No updates exist
+        } catch (err) {
+            console.error(`getLatestUpdateId failed for ${documentId}:`, err);
+            return 0;
         }
     }
 
@@ -190,4 +214,3 @@ export class PostgresRemoteStore implements IRemoteStore {
         }
     }
 }
-

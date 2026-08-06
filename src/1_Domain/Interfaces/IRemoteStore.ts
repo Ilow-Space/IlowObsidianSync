@@ -1,7 +1,9 @@
-﻿import { EncryptedBlob } from '../ValueObjects/CryptoTypes';
+﻿
+import { EncryptedBlob } from '../ValueObjects/CryptoTypes';
 import { CRDTUpdate } from '../Entities/Models';
 
 export interface IRemoteStore {
+    getLatestUpdateId(documentId: string): Promise<number>;
     fetchSnapshot(documentId: string): Promise<EncryptedBlob | null>;
     fetchUpdatesSince(documentId: string, lastId: number): Promise<CRDTUpdate[]>;
     pushUpdate(documentId: string, update: EncryptedBlob): Promise<void>;

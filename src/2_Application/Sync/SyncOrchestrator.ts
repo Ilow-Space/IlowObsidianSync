@@ -243,6 +243,21 @@ export class SyncOrchestrator {
         if (!this.activeKey) return;
         if (this.localChangeDebounceTimers.has(documentId) || this.isApplyingRemoteChanges) return;
 
+        const lastId = this.fileLastSyncIds.get(documentId) || 0;
+
+        // Optimization: Pre-Flight Completeness Check (The "Hash" Exchange)
+        // If we already have updates, check if there are any newer ones before pulling payloads.
+        if (lastId > 0) {
+            try {
+                const latestRemoteId = await this.remoteStore.getLatestUpdateId(documentId);
+                if (latestRemoteId <= lastId) {
+                    return; // Everything is up to date, abort payload fetch
+                }
+            } catch (err) {
+                console.warn(`Pre-flight check failed for ${documentId}:`, err);
+            }
+        }
+
         const taskName = path || 'System Index';
         
         // Only add to the UI queue if it's not a silent background task
@@ -250,7 +265,6 @@ export class SyncOrchestrator {
 
         const start = performance.now();
         try {
-            const lastId = this.fileLastSyncIds.get(documentId) || 0;
             const result = await this.pullUseCase.execute(
                 documentId,
                 path,
@@ -261,6 +275,16 @@ export class SyncOrchestrator {
             );
             this.fileLastSyncIds.set(documentId, result.newLastSyncId);
             this.lastPingMs = Math.round(performance.now() - start);
+
+            // Optimization: Automatic Remote Compaction if too many updates were downloaded
+            if (result.appliedCount > 50) {
+                this.pushUseCase.forceCompact(documentId, this.activeKey).catch(err => {
+                    console.error(`Auto-compaction failed for ${documentId}:`, err);
+                });
+                // Reset local update counter since we just compacted remotely
+                this.fileUpdateCounters.set(documentId, 0);
+            }
+
         } catch (err) {
             console.error(`Sync pull failed for ${documentId}:`, err);
         } finally {

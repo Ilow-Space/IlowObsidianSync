@@ -4,6 +4,15 @@ import { ICryptography } from '@domain/Interfaces/ICryptography';
 import { YjsEngine } from '@infrastructure/Crdt/YjsEngine';
 import { INoteRepository } from '@domain/Interfaces/INoteRepository';
 import { EncryptedBlob } from '@domain/ValueObjects/CryptoTypes';
+import { gunzipSync } from 'fflate';
+
+function decompress(data: Uint8Array): Uint8Array {
+    // Magic bytes for GZIP are 0x1F and 0x8B. Fallback to raw if uncompressed.
+    if (data.length >= 2 && data[0] === 0x1f && data[1] === 0x8b) {
+        return gunzipSync(data);
+    }
+    return data;
+}
 
 export class PullRemoteChangesUseCase {
     constructor(
@@ -32,7 +41,7 @@ export class PullRemoteChangesUseCase {
             if (encryptedSnapshot && encryptedSnapshot.ciphertext) {
                 try {
                     const decryptedSnapshot = await this.crypto.decrypt(encryptedSnapshot, key);
-                    await this.crdtEngine.applyUpdates(documentId, [decryptedSnapshot]);
+                    await this.crdtEngine.applyUpdates(documentId, [decompress(decryptedSnapshot)]);
                     appliedCount++;
                 } catch (err) {
                     console.error(`PullRemoteChangesUseCase failed to decrypt snapshot for ${documentId}:`, err);
@@ -46,7 +55,7 @@ export class PullRemoteChangesUseCase {
             for (const update of remoteUpdates) {
                 try {
                     const decrypted = await this.crypto.decrypt(update.encryptedUpdate, key);
-                    decryptedUpdates.push(decrypted);
+                    decryptedUpdates.push(decompress(decrypted));
                     appliedCount++;
                 } catch (err) {
                     console.error(`PullRemoteChangesUseCase failed to decrypt update ID ${update.id} for ${documentId}:`, err);
