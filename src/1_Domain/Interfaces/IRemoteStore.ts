@@ -9,5 +9,11 @@ export interface IRemoteStore {
     pushUpdate(documentId: string, update: EncryptedBlob): Promise<void>;
     compactSnapshot(documentId: string, newState: EncryptedBlob, maxId: number, isDeleted?: boolean): Promise<void>;
     testConnection(): Promise<boolean>;
+    
+    // Realtime WebSocket support
+    connectWebSocket(wssUrl: string): void;
+    subscribeToUpdates(documentId: string, onUpdateDetected: () => void): () => void;
+    disconnect(): void;
 }
+
 

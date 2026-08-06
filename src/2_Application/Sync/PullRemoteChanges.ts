@@ -64,26 +64,27 @@ export class PullRemoteChangesUseCase {
             }
 
             if (decryptedUpdates.length > 0) {
-                const updatedDoc = await this.crdtEngine.applyUpdates(documentId, decryptedUpdates);
-                
-                if (path && !documentId.startsWith('shard-')) {
-                    const updatedContent = updatedDoc.getText('markdown').toString();
-                    const localContent = await this.noteRepo.readNote(path);
-                    
-                    if (localContent !== updatedContent) {
-                        // Acquire write lock to prevent triggering a local modify event / infinite loop
-                        acquireLock();
-                        try {
-                            if (this.registerRemoteWrite) {
-                                this.registerRemoteWrite(path, updatedContent);
-                            }
-                            await this.noteRepo.writeNote(path, updatedContent);
-                        } finally {
-                            releaseLock();
-                        }
-                    }
+    const updatedDoc = await this.crdtEngine.applyUpdates(documentId, decryptedUpdates);
+    
+    if (path && !documentId.startsWith('shard-')) {
+        const updatedContent = updatedDoc.getText('markdown').toString();
+        const localContent = await this.noteRepo.readNote(path);
+        
+        if (localContent !== updatedContent) {
+            acquireLock();
+            try {
+                if (this.registerRemoteWrite) {
+                    this.registerRemoteWrite(path, updatedContent);
                 }
+                await this.noteRepo.writeNote(path, updatedContent);
+            } catch (writeErr) {
+                console.error(`Failed to write updated content to disk for ${path}:`, writeErr);
+            } finally {
+                releaseLock();
             }
+        }
+    }
+}
         }
 
         return { newLastSyncId, appliedCount };

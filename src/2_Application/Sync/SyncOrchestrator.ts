@@ -16,7 +16,7 @@ export class SyncOrchestrator {
     
     private fileLastSyncIds = new Map<string, number>();
     private fileUpdateCounters = new Map<string, number>();
-    private activeIntervals = new Map<string, any>();
+    private activeSubscriptions = new Map<string, () => void>();
     private activeKey: CryptoKey | null = null;
     
     private activeDocumentId: string | null = null;
@@ -120,7 +120,13 @@ export class SyncOrchestrator {
         const content = await this.noteRepo.readNote(path) || '';
         await this.crdtEngine.getOrCreateDoc(documentId, content);
         await this.pullDocument(documentId, path);
-        this.startPolling(documentId, path);
+        
+        // Subscribe to real-time remote changes for this active document
+        const unsubscribe = this.remoteStore.subscribeToUpdates(documentId, () => {
+            this.pullDocument(documentId, path, true).catch(console.error);
+        });
+        
+        this.activeSubscriptions.set(documentId, unsubscribe);
     }
 
     public async handleFileClose(path: string): Promise<void> {
@@ -128,7 +134,11 @@ export class SyncOrchestrator {
         const documentId = this.indexManager.getUuidForPath(path);
         if (!documentId) return;
 
-        this.stopPolling(documentId);
+        const unsubscribe = this.activeSubscriptions.get(documentId);
+        if (unsubscribe) {
+            unsubscribe();
+            this.activeSubscriptions.delete(documentId);
+        }
 
         if (this.localChangeDebounceTimers.has(documentId)) {
             clearTimeout(this.localChangeDebounceTimers.get(documentId));
@@ -185,10 +195,6 @@ export class SyncOrchestrator {
 
         this.pendingContents.set(documentId, content);
 
-        if (this.activeDocumentId === documentId && this.activePath === path) {
-            this.startPolling(documentId, path);
-        }
-
         if (this.localChangeDebounceTimers.has(documentId)) {
             clearTimeout(this.localChangeDebounceTimers.get(documentId));
         }
@@ -240,58 +246,54 @@ export class SyncOrchestrator {
     }
 
     public async pullDocument(documentId: string, path: string | null = null, isSilent: boolean = false): Promise<void> {
-        if (!this.activeKey) return;
-        if (this.localChangeDebounceTimers.has(documentId) || this.isApplyingRemoteChanges) return;
+    if (!this.activeKey) return;
+    
+    // ⚡ FIX: Do NOT abort pullDocument if isApplyingRemoteChanges is true!
+    // Only skip if there's an active local typing debounce timer for this specific document.
+    if (this.localChangeDebounceTimers.has(documentId)) return;
 
-        const lastId = this.fileLastSyncIds.get(documentId) || 0;
+    const lastId = this.fileLastSyncIds.get(documentId) || 0;
 
-        // Optimization: Pre-Flight Completeness Check (The "Hash" Exchange)
-        // If we already have updates, check if there are any newer ones before pulling payloads.
-        if (lastId > 0) {
-            try {
-                const latestRemoteId = await this.remoteStore.getLatestUpdateId(documentId);
-                if (latestRemoteId <= lastId) {
-                    return; // Everything is up to date, abort payload fetch
-                }
-            } catch (err) {
-                console.warn(`Pre-flight check failed for ${documentId}:`, err);
-            }
-        }
-
-        const taskName = path || 'System Index';
-        
-        // Only add to the UI queue if it's not a silent background task
-        if (!isSilent) this.addActiveTask(taskName);
-
-        const start = performance.now();
+    if (lastId > 0) {
         try {
-            const result = await this.pullUseCase.execute(
-                documentId,
-                path,
-                lastId,
-                this.activeKey,
-                () => { this.isApplyingRemoteChanges = true; },
-                () => { this.isApplyingRemoteChanges = false; }
-            );
-            this.fileLastSyncIds.set(documentId, result.newLastSyncId);
-            this.lastPingMs = Math.round(performance.now() - start);
-
-            // Optimization: Automatic Remote Compaction if too many updates were downloaded
-            if (result.appliedCount > 50) {
-                this.pushUseCase.forceCompact(documentId, this.activeKey).catch(err => {
-                    console.error(`Auto-compaction failed for ${documentId}:`, err);
-                });
-                // Reset local update counter since we just compacted remotely
-                this.fileUpdateCounters.set(documentId, 0);
+            const latestRemoteId = await this.remoteStore.getLatestUpdateId(documentId);
+            if (latestRemoteId <= lastId) {
+                return; // Up to date
             }
-
         } catch (err) {
-            console.error(`Sync pull failed for ${documentId}:`, err);
-        } finally {
-            // Clean up correctly
-            if (!isSilent) this.removeActiveTask(taskName);
+            console.warn(`Pre-flight check failed for ${documentId}:`, err);
         }
     }
+
+    const taskName = path || 'System Index';
+    if (!isSilent) this.addActiveTask(taskName);
+
+    const start = performance.now();
+    try {
+        const result = await this.pullUseCase.execute(
+            documentId,
+            path,
+            lastId,
+            this.activeKey,
+            () => { this.isApplyingRemoteChanges = true; },
+            () => { this.isApplyingRemoteChanges = false; }
+        );
+        this.fileLastSyncIds.set(documentId, result.newLastSyncId);
+        this.lastPingMs = Math.round(performance.now() - start);
+
+        if (result.appliedCount > 50) {
+            this.pushUseCase.forceCompact(documentId, this.activeKey).catch(err => {
+                console.error(`Auto-compaction failed for ${documentId}:`, err);
+            });
+            this.fileUpdateCounters.set(documentId, 0);
+        }
+
+    } catch (err) {
+        console.error(`Sync pull failed for ${documentId}:`, err);
+    } finally {
+        if (!isSilent) this.removeActiveTask(taskName);
+    }
+}
 
     public async pushDocumentUpdate(documentId: string, updateBinary: Uint8Array): Promise<void> {
         if (!this.activeKey) return;
@@ -306,35 +308,12 @@ export class SyncOrchestrator {
         }
     }
 
-    private startPolling(documentId: string, path: string) {
-        this.stopPolling(documentId);
-
-        let currentInterval = 3000;
-
-        const poll = async () => {
-            if (this.activeDocumentId === documentId && this.activeKey) {
-                await this.pullDocument(documentId, path, true);
-                currentInterval = Math.min(currentInterval * 1.5, 60000);
-                const timer = setTimeout(poll, currentInterval);
-                this.activeIntervals.set(documentId, timer);
-            }
-        };
-
-        const timer = setTimeout(poll, currentInterval);
-        this.activeIntervals.set(documentId, timer);
-    }
-
-    private stopPolling(documentId: string) {
-        if (this.activeIntervals.has(documentId)) {
-            clearTimeout(this.activeIntervals.get(documentId));
-            this.activeIntervals.delete(documentId);
-        }
-    }
-
     public stopAll() {
-        for (const documentId of this.activeIntervals.keys()) {
-            this.stopPolling(documentId);
+        for (const unsubscribe of this.activeSubscriptions.values()) {
+            unsubscribe();
         }
+        this.activeSubscriptions.clear();
+        
         for (const timer of this.localChangeDebounceTimers.values()) {
             clearTimeout(timer);
         }
@@ -356,4 +335,5 @@ export class SyncOrchestrator {
         this.isApplyingRemoteChanges = false;
     }
 }
+
 

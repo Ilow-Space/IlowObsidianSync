@@ -110,8 +110,11 @@ export default class MyPlugin extends Plugin {
 
         this.registerEvent(
             this.app.vault.on('create', async (file: TAbstractFile) => {
-                if (file instanceof TFile && file.extension === 'md' && this.indexManager) {
+                if (!this.indexManager) return;
+                if (file instanceof TFile && file.extension === 'md') {
                     await this.indexManager.handleFileCreate(file.path);
+                } else if (file instanceof TFolder) {
+                    await this.indexManager.handleFolderCreate(file.path);
                 }
             })
         );
@@ -119,23 +122,10 @@ export default class MyPlugin extends Plugin {
         this.registerEvent(
             this.app.vault.on('rename', async (file: TAbstractFile, oldPath: string) => {
                 if (!this.indexManager) return;
-            
                 if (file instanceof TFile && file.extension === 'md') {
                     await this.indexManager.handleFileRename(oldPath, file.path);
                 } else if (file instanceof TFolder) {
-                    // Find all markdown files that lived under the old folder path
-                    const allFiles = this.app.vault.getMarkdownFiles();
-                    const renames = [];
-                    for (const child of allFiles) {
-                        if (child.path.startsWith(file.path + '/')) {
-                            // Reconstruct what the old path of this specific file was
-                            const childOldPath = child.path.replace(file.path, oldPath);
-                            renames.push({ oldPath: childOldPath, newPath: child.path });
-                        }
-                    }
-                    if (renames.length > 0) {
-                        await this.indexManager.handleBulkFileRename(renames);
-                    }
+                    await this.indexManager.handleFolderRename(oldPath, file.path);
                 }
             })
         );
@@ -161,6 +151,9 @@ export default class MyPlugin extends Plugin {
         console.log('Unloading Obsidian CRDT Sync Plugin');
         if (this.syncOrchestrator) {
             this.syncOrchestrator.stopAll();
+        }
+        if (this.remoteStore) {
+            this.remoteStore.disconnect();
         }
     }
 
@@ -229,35 +222,32 @@ export default class MyPlugin extends Plugin {
     }
 
     private async runBackgroundBootstrap() {
-        if (!this.indexManager || !this.syncOrchestrator) return;
+    if (!this.indexManager || !this.syncOrchestrator || !this.remoteStore) return;
+    
+    this.updateStatusBar('syncing', 'Bootstrapping index...');
+    try {
+        await this.indexManager.initialize();
+        await this.indexManager.syncIndex(true);
         
-        this.updateStatusBar('syncing', 'Bootstrapping index...');
-        try {
-            await this.indexManager.initialize();
-            await this.indexManager.syncIndex(true);
-            
-            // ⚡ Run the reconciliation check right after initial index sync
-            await this.indexManager.runCompletenessCheck();
-            
-            this.registerInterval(
-                window.setInterval(async () => {
-                    if (this.isKeyDerived && this.indexManager) {
-                        await this.indexManager.syncIndex(true);
-                    }
-                }, 10000)
-            );
+        // ⚡ FIX: Subscribe global root index to real-time updates
+        const INDEX_DOC_ID = 'root-index';
+        this.remoteStore.subscribeToUpdates(INDEX_DOC_ID, () => {
+            this.indexManager?.syncIndex(true).catch(console.error);
+        });
+
+        await this.indexManager.runCompletenessCheck();
         
-            const activeFile = this.app.workspace.getActiveFile();
-            if (activeFile && activeFile.extension === 'md') {
-                await this.syncOrchestrator.handleFileOpen(activeFile.path);
-            }
-            
-            this.updateStatusBar('synced', 'Fully synced');
-        } catch (err) {
-            this.updateStatusBar('error', 'Bootstrap failed');
-            console.error('Background bootstrap failed:', err);
+        const activeFile = this.app.workspace.getActiveFile();
+        if (activeFile && activeFile.extension === 'md') {
+            await this.syncOrchestrator.handleFileOpen(activeFile.path);
         }
+        
+        this.updateStatusBar('synced', 'Fully synced');
+    } catch (err) {
+        this.updateStatusBar('error', 'Bootstrap failed');
+        console.error('Background bootstrap failed:', err);
     }
+}
 
     public async unloadKey(): Promise<void> {
         this.derivedKey = null;
@@ -278,9 +268,18 @@ export default class MyPlugin extends Plugin {
         if (this.syncOrchestrator) {
             this.syncOrchestrator.stopAll();
         }
+        
+        if (this.remoteStore) {
+            this.remoteStore.disconnect();
+        }
 
         if (this.settings.serverUrl) {
             this.remoteStore = new PostgresRemoteStore(this.settings.serverUrl, this.settings.headers);
+            
+            // Derive WebSocket URL and connect realtime listener
+            const socketUrl = this.settings.serverUrl.replace(/^http/i, 'ws');
+            this.remoteStore.connectWebSocket(socketUrl);
+
             this.syncOrchestrator = new SyncOrchestrator(
                 this.remoteStore,
                 this.cryptoService,

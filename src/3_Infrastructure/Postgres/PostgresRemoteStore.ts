@@ -8,6 +8,8 @@ import { requestUrl } from 'obsidian';
 export class PostgresRemoteStore implements IRemoteStore {
     private serverUrl: string;
     private headers: Record<string, string>;
+    private socket: WebSocket | null = null;
+    private subscriptions = new Map<string, Array<() => void>>();
 
     constructor(serverUrl: string, headers: Record<string, string>) {
         this.serverUrl = serverUrl.replace(/\/$/, ''); // strip trailing slash
@@ -15,6 +17,78 @@ export class PostgresRemoteStore implements IRemoteStore {
             'Content-Type': 'application/json',
             ...headers
         };
+    }
+
+    public connectWebSocket(wssUrl: string) {
+    try {
+        this.socket = new WebSocket(wssUrl);
+
+        // ⚡ FIX: Flush all pending subscriptions to Go as soon as the connection opens
+        this.socket.onopen = () => {
+            for (const documentId of this.subscriptions.keys()) {
+                this.socket?.send(JSON.stringify({ 
+                    action: 'subscribe', 
+                    filter: `document_id=eq.${documentId}` 
+                }));
+            }
+        };
+
+        this.socket.onmessage = (event) => {
+            try {
+                const payload = JSON.parse(event.data);
+
+                // Listen for INSERT events on vault_updates table
+                if (payload.type === 'INSERT' && payload.table === 'vault_updates') {
+                    const docId = payload.record.document_id;
+                    const callbacks = this.subscriptions.get(docId);
+                    if (callbacks) {
+                        callbacks.forEach(cb => cb());
+                    }
+                }
+            } catch (err) {
+                // Ignore parsing errors for non-JSON messages
+            }
+        };
+
+        this.socket.onerror = (err) => {
+            console.error('Postgres realtime WebSocket error:', err);
+        };
+    } catch (err) {
+        console.error('Failed to establish realtime WebSocket connection:', err);
+    }
+}
+
+public subscribeToUpdates(documentId: string, onUpdateDetected: () => void): () => void {
+    if (!this.subscriptions.has(documentId)) {
+        this.subscriptions.set(documentId, []);
+    }
+    
+    this.subscriptions.get(documentId)!.push(onUpdateDetected);
+
+    // ⚡ Send subscription payload immediately if socket is already open
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+        this.socket.send(JSON.stringify({ action: 'subscribe', filter: `document_id=eq.${documentId}` }));
+    }
+
+    // Return unsubscribe function
+    return () => {
+        const callbacks = this.subscriptions.get(documentId);
+        if (callbacks) {
+            const remaining = callbacks.filter(cb => cb !== onUpdateDetected);
+            if (remaining.length === 0) {
+                this.subscriptions.delete(documentId);
+            } else {
+                this.subscriptions.set(documentId, remaining);
+            }
+        }
+    };
+}
+    public disconnect() {
+        if (this.socket) {
+            this.socket.close();
+            this.socket = null;
+        }
+        this.subscriptions.clear();
     }
 
     public async testConnection(): Promise<boolean> {
@@ -62,7 +136,7 @@ export class PostgresRemoteStore implements IRemoteStore {
             url: url,
             method: 'GET',
             headers: this.headers,
-            throw: false // ⚡ Changed from throw to throw
+            throw: false 
         });
 
         if (res.status === 404) return null;
@@ -214,3 +288,5 @@ export class PostgresRemoteStore implements IRemoteStore {
         }
     }
 }
+
+

@@ -1,4 +1,5 @@
-﻿import { EncryptedBlob } from '../ValueObjects/CryptoTypes';
+﻿
+import { EncryptedBlob } from '../ValueObjects/CryptoTypes';
 
 export interface Note {
     path: string;
@@ -24,5 +25,7 @@ export interface DocumentMetadata {
     path: string;
     isDeleted: boolean;
     mtime: number;
+    isFolder?: boolean;
 }
+
 

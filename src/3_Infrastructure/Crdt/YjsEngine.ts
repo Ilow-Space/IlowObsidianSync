@@ -1,8 +1,9 @@
-﻿import * as Y from 'yjs';
+﻿
+import * as Y from 'yjs';
 import { LocalHistoryStore } from './LocalHistoryStore';
 
 export class YjsEngine {
-    private localStore = new LocalHistoryStore();
+    public localStore = new LocalHistoryStore();
     private activeDocs = new Map<string, Y.Doc>();
 
     public async getOrCreateDoc(documentId: string, initialContent?: string): Promise<Y.Doc> {
@@ -109,4 +110,3 @@ export class YjsEngine {
         this.activeDocs.delete(documentId);
     }
 }
-
