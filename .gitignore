@@ -4,3 +4,5 @@ main.js
 styles.css
 *.log
 node_modules/
+
+project_context.txt

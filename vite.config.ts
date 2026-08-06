@@ -6,8 +6,8 @@ export default defineConfig(({ mode }) => {
 
   return {
     build: {
-      outDir: '.',
-      emptyOutDir: false,
+      outDir: 'dist',
+      emptyOutDir: true,
       sourcemap: isDev ? 'inline' : false,
       minify: !isDev,
 
