@@ -2,6 +2,7 @@ import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
 import { EncryptedBlob } from '@domain/ValueObjects/CryptoTypes';
 import { CRDTUpdate } from '@domain/Entities/Models';
 import { CryptoUtils } from '../Crypto/CryptoUtils';
+import { requestUrl } from 'obsidian';
 
 export class PostgresRemoteStore implements IRemoteStore {
     private serverUrl: string;
@@ -17,11 +18,13 @@ export class PostgresRemoteStore implements IRemoteStore {
 
     public async testConnection(): Promise<boolean> {
         try {
-            const res = await fetch(`${this.serverUrl}/vault_snapshots?limit=1`, {
+            const res = await requestUrl({
+                url: `${this.serverUrl}/vault_snapshots?limit=1`,
                 method: 'GET',
-                headers: this.headers
+                headers: this.headers,
+                throwOnError: false
             });
-            return res.ok;
+            return res.status >= 200 && res.status < 300;
         } catch (err) {
             console.error('PostgresRemoteStore connection test failed:', err);
             return false;
@@ -31,17 +34,19 @@ export class PostgresRemoteStore implements IRemoteStore {
     public async fetchSnapshot(path: string): Promise<EncryptedBlob | null> {
         try {
             const url = `${this.serverUrl}/vault_snapshots?path=eq.${encodeURIComponent(path)}`;
-            const res = await fetch(url, {
+            const res = await requestUrl({
+                url: url,
                 method: 'GET',
-                headers: this.headers
+                headers: this.headers,
+                throwOnError: false
             });
 
-            if (!res.ok) {
-                if (res.status === 404) return null;
-                throw new Error(`Failed to fetch snapshot: ${res.statusText}`);
+            if (res.status === 404) return null;
+            if (res.status < 200 || res.status >= 300) {
+                throw new Error(`Failed to fetch snapshot: ${res.status}`);
             }
 
-            const data = await res.json();
+            const data = res.json;
             if (Array.isArray(data) && data.length > 0) {
                 const row = data[0];
                 if (!row.encrypted_state) return null;
@@ -60,16 +65,18 @@ export class PostgresRemoteStore implements IRemoteStore {
     public async fetchUpdatesSince(path: string, lastId: number): Promise<CRDTUpdate[]> {
         try {
             const url = `${this.serverUrl}/vault_updates?path=eq.${encodeURIComponent(path)}&id=gt.${lastId}&order=id.asc`;
-            const res = await fetch(url, {
+            const res = await requestUrl({
+                url: url,
                 method: 'GET',
-                headers: this.headers
+                headers: this.headers,
+                throwOnError: false
             });
 
-            if (!res.ok) {
-                throw new Error(`Failed to fetch updates: ${res.statusText}`);
+            if (res.status < 200 || res.status >= 300) {
+                throw new Error(`Failed to fetch updates: ${res.status}`);
             }
 
-            const data = await res.json();
+            const data = res.json;
             if (Array.isArray(data)) {
                 return data.map((row: any) => {
                     const rawJson = CryptoUtils.hexToString(row.encrypted_update);
@@ -92,15 +99,18 @@ export class PostgresRemoteStore implements IRemoteStore {
     public async pushUpdate(path: string, update: EncryptedBlob): Promise<void> {
         try {
             const snapshotCheckUrl = `${this.serverUrl}/vault_snapshots?path=eq.${encodeURIComponent(path)}`;
-            const snapshotCheckRes = await fetch(snapshotCheckUrl, {
+            const snapshotCheckRes = await requestUrl({
+                url: snapshotCheckUrl,
                 method: 'GET',
-                headers: this.headers
+                headers: this.headers,
+                throwOnError: false
             });
 
-            const snapshotExists = snapshotCheckRes.ok && (await snapshotCheckRes.json()).length > 0;
+            const snapshotExists = snapshotCheckRes.status >= 200 && snapshotCheckRes.status < 300 && Array.isArray(snapshotCheckRes.json) && snapshotCheckRes.json.length > 0;
             if (!snapshotExists) {
                 const initialSnapshotBytes = CryptoUtils.stringToHex(JSON.stringify({ ciphertext: '', iv: '' }));
-                await fetch(`${this.serverUrl}/vault_snapshots`, {
+                await requestUrl({
+                    url: `${this.serverUrl}/vault_snapshots`,
                     method: 'POST',
                     headers: {
                         ...this.headers,
@@ -110,24 +120,26 @@ export class PostgresRemoteStore implements IRemoteStore {
                         path: path,
                         encrypted_state: initialSnapshotBytes,
                         updated_at: new Date().toISOString()
-                    })
+                    }),
+                    throwOnError: false
                 });
             }
 
             const updateBytes = CryptoUtils.stringToHex(JSON.stringify(update));
-            const res = await fetch(`${this.serverUrl}/vault_updates`, {
+            const res = await requestUrl({
+                url: `${this.serverUrl}/vault_updates`,
                 method: 'POST',
                 headers: this.headers,
                 body: JSON.stringify({
                     path: path,
                     encrypted_update: updateBytes,
                     created_at: new Date().toISOString()
-                })
+                }),
+                throwOnError: false
             });
 
-            if (!res.ok) {
-                const errText = await res.text();
-                throw new Error(`Failed to push update: ${res.statusText}. Details: ${errText}`);
+            if (res.status < 200 || res.status >= 300) {
+                throw new Error(`Failed to push update: ${res.status}. Details: ${res.text}`);
             }
         } catch (err) {
             console.error(`pushUpdate failed for ${path}:`, err);
@@ -139,19 +151,20 @@ export class PostgresRemoteStore implements IRemoteStore {
         try {
             const stateBytes = CryptoUtils.stringToHex(JSON.stringify(newState));
             const url = `${this.serverUrl}/rpc/compact_document`;
-            const res = await fetch(url, {
+            const res = await requestUrl({
+                url: url,
                 method: 'POST',
                 headers: this.headers,
                 body: JSON.stringify({
                     p_path: path,
                     p_state: stateBytes,
                     p_max_id: maxId
-                })
+                }),
+                throwOnError: false
             });
 
-            if (!res.ok) {
-                const errText = await res.text();
-                throw new Error(`Failed to compact snapshot: ${res.statusText}. Details: ${errText}`);
+            if (res.status < 200 || res.status >= 300) {
+                throw new Error(`Failed to compact snapshot: ${res.status}. Details: ${res.text}`);
             }
         } catch (err) {
             console.error(`compactSnapshot failed for ${path}:`, err);
