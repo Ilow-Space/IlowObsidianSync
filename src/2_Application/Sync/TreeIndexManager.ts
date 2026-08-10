@@ -43,16 +43,41 @@ export class TreeIndexManager {
         }
     }
 
+    /**
+     * Executes a transaction on the index document, capturing the Yjs update delta,
+     * saving it to local storage, and pushing it to the remote server.
+     */
+    private async applyAndPushIndexTransaction(transaction: () => void): Promise<void> {
+        let update: Uint8Array | null = null;
+        
+        const updateHandler = (u: Uint8Array) => { update = u; };
+        this.doc.once('update', updateHandler);
+        
+        this.doc.transact(transaction);
+        
+        // Type assertion informs TypeScript that the closure mutated 'update'
+        const payload = update as Uint8Array | null;
+        if (payload && payload.length > 0) {
+            // 1. Persist new VFS state locally
+            const state = Y.encodeStateAsUpdate(this.doc);
+            await this.crdtEngine.localStore.saveDocumentState(this.INDEX_DOC_ID, state);
+            
+            // 2. Push structural changes to the server
+            await this.syncOrchestrator.pushDocumentUpdate(this.INDEX_DOC_ID, payload, null);
+        }
+    }
+
     public async reconcileFilesystem(): Promise<void> {
         // 1. Enforce remote state onto local filesystem
         for (const [uuid, node] of this.treeMap.entries()) {
             const localFile = this.app.vault.getAbstractFileByPath(node.path);
 
             if (node.isDeleted) {
-                if (localFile) {
+                if (localFile && !this.pathToUuid.has(node.path)) {
                     try { 
                         await this.app.vault.trash(localFile, true); 
                     } catch (e) {
+                        console.warn(`Failed to move ${localFile.path} to system trash. Attempting local vault trash.`, e);
                         try { await this.app.vault.trash(localFile, false); } catch(e2) {}
                     }
                 }
@@ -72,7 +97,7 @@ export class TreeIndexManager {
         // 2. Scan for untracked local files/folders
         const allFiles = this.app.vault.getAllLoadedFiles();
         
-        this.doc.transact(() => {
+        await this.applyAndPushIndexTransaction(() => {
             for (const file of allFiles) {
                 if (file.path === '/' || file.path.startsWith('.')) continue; 
                 
@@ -84,8 +109,6 @@ export class TreeIndexManager {
                 }
             }
         });
-
-        await this.syncOrchestrator.pushDocumentUpdate(this.INDEX_DOC_ID, new Uint8Array(), null);
     }
 
     private async ensureFolderExists(path: string, isFolderItself: boolean): Promise<void> {
@@ -109,14 +132,12 @@ export class TreeIndexManager {
         const uuid = window.crypto.randomUUID();
         const type = file instanceof TFolder ? 'folder' : 'file';
 
-        this.doc.transact(() => {
+        await this.applyAndPushIndexTransaction(() => {
             this.treeMap.set(uuid, { type, path: file.path, isDeleted: false });
         });
         
         this.pathToUuid.set(file.path, uuid);
         
-        await this.syncOrchestrator.pushDocumentUpdate(this.INDEX_DOC_ID, new Uint8Array(), null);
-
         if (type === 'file' && file instanceof TFile) {
             const content = await this.app.vault.read(file);
             await this.crdtEngine.getOrCreateDoc(uuid, content);
@@ -125,7 +146,7 @@ export class TreeIndexManager {
     }
 
     public async handleRename(oldPath: string, newPath: string): Promise<void> {
-        this.doc.transact(() => {
+        await this.applyAndPushIndexTransaction(() => {
             for (const [uuid, node] of this.treeMap.entries()) {
                 if (node.isDeleted) continue;
 
@@ -139,11 +160,10 @@ export class TreeIndexManager {
         });
 
         this.rebuildReverseLookup();
-        await this.syncOrchestrator.pushDocumentUpdate(this.INDEX_DOC_ID, new Uint8Array(), null);
     }
 
     public async handleDelete(path: string): Promise<void> {
-        this.doc.transact(() => {
+        await this.applyAndPushIndexTransaction(() => {
             for (const [uuid, node] of this.treeMap.entries()) {
                 if (node.isDeleted) continue;
 
@@ -154,7 +174,6 @@ export class TreeIndexManager {
         });
 
         this.rebuildReverseLookup();
-        await this.syncOrchestrator.pushDocumentUpdate(this.INDEX_DOC_ID, new Uint8Array(), null);
     }
 
     public getUuidForPath(path: string): string | undefined {

@@ -1,5 +1,4 @@
-﻿
-import { Modal, App, Setting, Notice } from 'obsidian';
+﻿import { Modal, App, Setting, Notice } from 'obsidian';
 import { Html5Qrcode } from 'html5-qrcode';
 
 export class QrScannerModal extends Modal {
@@ -74,8 +73,8 @@ export class QrScannerModal extends Modal {
                             this.onScanSuccess(decodedText);
                             this.close();
                         },
-                        () => {
-                            // ignore frame scanning errors
+                        (errorMessage: string) => {
+                            console.debug('QR Frame Scan ignored:', errorMessage);
                         }
                     )
                     .catch(() => {
@@ -84,7 +83,7 @@ export class QrScannerModal extends Modal {
                             cls: 'mod-warning'
                         });
                     });
-            } catch (err) {
+            } catch (err: unknown) {
                 readerDiv.createEl('p', {
                     text: 'Camera access not supported on this device. Please use the paste box above.',
                     cls: 'mod-warning'
@@ -97,10 +96,9 @@ export class QrScannerModal extends Modal {
         if (this.html5QrcodeScanner) {
             this.html5QrcodeScanner
                 .stop()
-                .catch((err) => console.error('Error stopping scanner:', err));
+                .catch((err: unknown) => console.error('Error stopping scanner:', err));
         }
         const { contentEl } = this;
         contentEl.empty();
     }
 }
-

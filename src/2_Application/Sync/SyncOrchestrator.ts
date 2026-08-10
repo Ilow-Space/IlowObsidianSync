@@ -22,14 +22,15 @@ export class SyncOrchestrator {
     private activePath: string | null = null;
 
     private activeTasks = new Set<string>();
-    private statusIdleTimer: any = null;
+    private statusIdleTimer: ReturnType<typeof setTimeout> | null = null;
     private lastPingMs: number | null = null;
 
     private hasConnectionError = false;
     private lastErrorMessage = '';
+    private isSyncingFull = false; // Mutex lock preventing request storms
 
     private isApplyingRemoteChanges = false;
-    private localChangeDebounceTimers = new Map<string, any>();
+    private localChangeDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
     private pendingContents = new Map<string, string>();
     private remoteWriteHashes = new Map<string, string>();
 
@@ -128,7 +129,7 @@ export class SyncOrchestrator {
         if (!this.activeKey || !this.treeIndexManager) return;
 
         let documentId = this.treeIndexManager.getUuidForPath(path);
-        if (!documentId) return; // Managed by VFS reconciler
+        if (!documentId) return;
 
         this.activePath = path;
         this.activeDocumentId = documentId;
@@ -138,7 +139,7 @@ export class SyncOrchestrator {
         await this.pullDocument(documentId, path);
         
         const unsubscribe = this.remoteStore.subscribeToUpdates(documentId, () => {
-            this.pullDocument(documentId, path, true).catch(console.error);
+            this.pullDocument(documentId, path, true).catch(() => {});
         });
         
         this.activeSubscriptions.set(documentId, unsubscribe);
@@ -155,8 +156,9 @@ export class SyncOrchestrator {
             this.activeSubscriptions.delete(documentId);
         }
 
-        if (this.localChangeDebounceTimers.has(documentId)) {
-            clearTimeout(this.localChangeDebounceTimers.get(documentId));
+        const timer = this.localChangeDebounceTimers.get(documentId);
+        if (timer) {
+            clearTimeout(timer);
             this.localChangeDebounceTimers.delete(documentId);
         }
 
@@ -175,7 +177,7 @@ export class SyncOrchestrator {
                 await this.pushUseCase.execute(documentId, bufferedContent, this.activeKey, path);
                 this.lastPingMs = Math.round(performance.now() - start);
                 this.hasConnectionError = false;
-            } catch (err: any) {
+            } catch (err: unknown) {
                 console.error(`SyncOrchestrator push on close failed for ${documentId}:`, err);
                 this.hasConnectionError = true;
                 this.lastErrorMessage = 'Connection failed';
@@ -192,7 +194,7 @@ export class SyncOrchestrator {
                     await this.pushUseCase.execute(documentId, content, this.activeKey, path);
                     this.lastPingMs = Math.round(performance.now() - start);
                     this.hasConnectionError = false;
-                } catch (err: any) {
+                } catch (err: unknown) {
                     console.error(`SyncOrchestrator push on close failed for ${documentId}:`, err);
                     this.hasConnectionError = true;
                     this.lastErrorMessage = 'Connection failed';
@@ -220,11 +222,12 @@ export class SyncOrchestrator {
 
         this.pendingContents.set(documentId, content);
 
-        if (this.localChangeDebounceTimers.has(documentId)) {
-            clearTimeout(this.localChangeDebounceTimers.get(documentId));
+        const existingTimer = this.localChangeDebounceTimers.get(documentId);
+        if (existingTimer) {
+            clearTimeout(existingTimer);
         }
 
-        const timer = setTimeout(async () => {
+        const newTimer = setTimeout(async () => {
             this.localChangeDebounceTimers.delete(documentId);
             const latestContent = this.pendingContents.get(documentId);
             if (latestContent !== undefined && this.activeKey) {
@@ -243,7 +246,7 @@ export class SyncOrchestrator {
                         await this.pushUseCase.forceCompact(documentId, this.activeKey, path);
                         this.fileUpdateCounters.set(documentId, 0);
                     }
-                } catch (err: any) {
+                } catch (err: unknown) {
                     console.error(`SyncOrchestrator push failed for ${documentId}:`, err);
                     this.hasConnectionError = true;
                     this.lastErrorMessage = 'Connection failed';
@@ -253,12 +256,18 @@ export class SyncOrchestrator {
             }
         }, 1000);
 
-        this.localChangeDebounceTimers.set(documentId, timer);
+        this.localChangeDebounceTimers.set(documentId, newTimer);
     }
 
     public async runFullSync(): Promise<void> {
         if (!this.activeKey || !this.treeIndexManager) return;
+        
+        // Prevent concurrent sync runs from flooding network requests
+        if (this.isSyncingFull) {
+            return;
+        }
 
+        this.isSyncingFull = true;
         try {
             console.log('[SyncOrchestrator] Starting VFS Index Sync...');
 
@@ -272,17 +281,21 @@ export class SyncOrchestrator {
             // 2. Reconcile hard drive with the new CRDT structure
             await this.treeIndexManager.reconcileFilesystem();
 
-            // 3. Sync text contents for all active files in the index
+            // 3. Sync text contents for all active files in the index sequentially
             const activeFiles = this.treeIndexManager.getActiveFiles();
             for (const file of activeFiles) {
+                // Halt loop if connection dropped to avoid request waterfalls
+                if (this.hasConnectionError) break;
                 await this.pullDocument(file.uuid, file.path, true);
             }
 
             console.log('[SyncOrchestrator] Full Sync Complete.');
-        } catch (error) {
+        } catch (error: unknown) {
             console.error('[SyncOrchestrator] Sync failed:', error);
             this.hasConnectionError = true;
             this.lastErrorMessage = 'Sync failed';
+        } finally {
+            this.isSyncingFull = false;
         }
     }
 
@@ -299,7 +312,7 @@ export class SyncOrchestrator {
             await this.pushUseCase.forceCompact(documentId, this.activeKey, path);
             this.fileUpdateCounters.set(documentId, 0);
             this.hasConnectionError = false;
-        } catch (err: any) {
+        } catch (err: unknown) {
             this.hasConnectionError = true;
             this.lastErrorMessage = 'Compaction failed';
             throw err;
@@ -321,8 +334,8 @@ export class SyncOrchestrator {
                 if (latestRemoteId <= lastId) {
                     return; 
                 }
-            } catch (err) {
-                console.warn(`Pre-flight check failed for ${documentId}:`, err);
+            } catch (err: unknown) {
+                // Suppress pre-flight warning trace when server is unreachable
             }
         }
 
@@ -345,14 +358,11 @@ export class SyncOrchestrator {
             this.hasConnectionError = false;
 
             if (result.appliedCount > 50) {
-                this.pushUseCase.forceCompact(documentId, this.activeKey).catch(err => {
-                    console.error(`Auto-compaction failed for ${documentId}:`, err);
-                });
+                this.pushUseCase.forceCompact(documentId, this.activeKey).catch(() => {});
                 this.fileUpdateCounters.set(documentId, 0);
             }
 
-        } catch (err: any) {
-            console.error(`Sync pull failed for ${documentId}:`, err);
+        } catch (err: unknown) {
             this.hasConnectionError = true;
             this.lastErrorMessage = 'Connection failed';
         } finally {
@@ -369,7 +379,7 @@ export class SyncOrchestrator {
             await this.pushUseCase.pushRawUpdate(documentId, updateBinary, this.activeKey, path);
             this.lastPingMs = Math.round(performance.now() - start);
             this.hasConnectionError = false;
-        } catch (err: any) {
+        } catch (err: unknown) {
             console.error(`pushDocumentUpdate failed for ${documentId}:`, err);
             this.hasConnectionError = true;
             this.lastErrorMessage = 'Connection failed';
@@ -395,6 +405,7 @@ export class SyncOrchestrator {
         this.pendingContents.clear();
         this.activeTasks.clear();
         this.hasConnectionError = false;
+        this.isSyncingFull = false;
         this.triggerStatusUpdate();
     }
 

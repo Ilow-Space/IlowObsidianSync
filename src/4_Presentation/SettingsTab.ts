@@ -52,8 +52,8 @@ export class SettingsTab extends PluginSettingTab {
                             const parsed = JSON.parse(value);
                             this.plugin.settings.headers = parsed;
                             await this.plugin.saveSettings();
-                        } catch (e) {
-                            // Suppress invalid JSON till typed correctly
+                        } catch (e: unknown) {
+                            console.debug('Invalid JSON payload typed in settings; waiting for correction.', e);
                         }
                     })
             );
@@ -130,7 +130,7 @@ export class SettingsTab extends PluginSettingTab {
                                 await this.plugin.deriveKeyFromPassword(pwd);
                                 this.display();
                                 new Notice('Key derived successfully! Sync is now active.');
-                            } catch (err) {
+                            } catch (err: unknown) {
                                 new Notice('Failed to derive key. See console.');
                             }
                         });
@@ -173,8 +173,9 @@ export class SettingsTab extends PluginSettingTab {
                         try {
                             await this.plugin.getSyncOrchestrator()?.forceSyncAndCompact(file.path);
                             new Notice(`Successfully compacted: ${file.path}`);
-                        } catch (err: any) {
-                            new Notice(`Compaction failed: ${err.message}`);
+                        } catch (err: unknown) {
+                            const msg = err instanceof Error ? err.message : String(err);
+                            new Notice(`Compaction failed: ${msg}`);
                         }
                     })
             );
@@ -227,7 +228,7 @@ export class SettingsTab extends PluginSettingTab {
                                 } else {
                                     new Notice('QR payload is missing required configuration parameters.');
                                 }
-                            } catch (err) {
+                            } catch (err: unknown) {
                                 new Notice('Failed to parse QR code setup configuration.');
                             }
                         });
@@ -255,12 +256,14 @@ export class SettingsTab extends PluginSettingTab {
                                 new Notice('Local state hard reset successful! Initiating fresh re-sync...');
 
                                 if (this.plugin.isKeyDerived && this.plugin.getSyncOrchestrator()) {
-                                    await this.plugin.indexManager?.initialize();
-                                    await this.plugin.indexManager?.syncIndex(false);
+                                    // Make sure you bypass typing if indexManager is private or not strongly typed on `MyPlugin`
+                                    await (this.plugin as any).treeIndexManager?.initialize();
+                                    await this.plugin.getSyncOrchestrator()?.runFullSync();
                                     new Notice('Local re-sync completed successfully!');
                                 }
-                            } catch (err: any) {
-                                new Notice(`Hard reset failed: ${err.message}`);
+                            } catch (err: unknown) {
+                                const msg = err instanceof Error ? err.message : String(err);
+                                new Notice(`Hard reset failed: ${msg}`);
                             }
                         }
                     })
@@ -289,8 +292,9 @@ export class SettingsTab extends PluginSettingTab {
                                 }
                                 await store.truncateServer(token);
                                 new Notice('Remote server data successfully purged! The server is now at a clean slate.');
-                            } catch (err: any) {
-                                new Notice(`Purge failed: ${err.message}`);
+                            } catch (err: unknown) {
+                                const msg = err instanceof Error ? err.message : String(err);
+                                new Notice(`Purge failed: ${msg}`);
                             }
                         }
                     })
