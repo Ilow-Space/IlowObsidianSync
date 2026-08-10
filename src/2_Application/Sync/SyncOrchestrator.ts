@@ -1,18 +1,17 @@
-﻿
-import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
+﻿import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
 import { ICryptography } from '@domain/Interfaces/ICryptography';
 import { YjsEngine } from '@infrastructure/Crdt/YjsEngine';
 import { INoteRepository } from '@domain/Interfaces/INoteRepository';
 import { PullRemoteChangesUseCase } from './PullRemoteChanges';
 import { PushLocalChangesUseCase } from './PushLocalChanges';
-import { IndexManager } from './IndexManager';
+import { TreeIndexManager } from './TreeIndexManager';
 
 export type SyncStatus = 'synced' | 'syncing' | 'error' | 'offline';
 
 export class SyncOrchestrator {
     private pullUseCase: PullRemoteChangesUseCase;
     private pushUseCase: PushLocalChangesUseCase;
-    private indexManager: IndexManager | null = null;
+    private treeIndexManager: TreeIndexManager | null = null;
     
     private fileLastSyncIds = new Map<string, number>();
     private fileUpdateCounters = new Map<string, number>();
@@ -22,10 +21,12 @@ export class SyncOrchestrator {
     private activeDocumentId: string | null = null;
     private activePath: string | null = null;
 
-    // Queue tracking, ping tracking & anti-flicker
     private activeTasks = new Set<string>();
     private statusIdleTimer: any = null;
     private lastPingMs: number | null = null;
+
+    private hasConnectionError = false;
+    private lastErrorMessage = '';
 
     private isApplyingRemoteChanges = false;
     private localChangeDebounceTimers = new Map<string, any>();
@@ -61,12 +62,13 @@ export class SyncOrchestrator {
         return this.crypto;
     }
 
-    public setIndexManager(im: IndexManager) {
-        this.indexManager = im;
+    public setTreeIndexManager(im: TreeIndexManager) {
+        this.treeIndexManager = im;
     }
 
     public setCryptoKey(key: CryptoKey | null) {
         this.activeKey = key;
+        this.hasConnectionError = false;
         this.triggerStatusUpdate();
     }
 
@@ -94,6 +96,11 @@ export class SyncOrchestrator {
             return;
         }
 
+        if (this.hasConnectionError) {
+            this.statusCallback('error', this.lastErrorMessage || 'Connection Error');
+            return;
+        }
+
         if (this.statusIdleTimer) {
             clearTimeout(this.statusIdleTimer);
             this.statusIdleTimer = null;
@@ -118,13 +125,10 @@ export class SyncOrchestrator {
     }
 
     public async handleFileOpen(path: string): Promise<void> {
-        if (!this.activeKey || !this.indexManager) return;
+        if (!this.activeKey || !this.treeIndexManager) return;
 
-        let documentId = this.indexManager.getUuidForPath(path);
-        if (!documentId) {
-             await this.indexManager.handleFileCreate(path);
-             documentId = this.indexManager.getUuidForPath(path)!;
-        }
+        let documentId = this.treeIndexManager.getUuidForPath(path);
+        if (!documentId) return; // Managed by VFS reconciler
 
         this.activePath = path;
         this.activeDocumentId = documentId;
@@ -133,7 +137,6 @@ export class SyncOrchestrator {
         await this.crdtEngine.getOrCreateDoc(documentId, content);
         await this.pullDocument(documentId, path);
         
-        // Subscribe to real-time remote changes for this active document
         const unsubscribe = this.remoteStore.subscribeToUpdates(documentId, () => {
             this.pullDocument(documentId, path, true).catch(console.error);
         });
@@ -142,8 +145,8 @@ export class SyncOrchestrator {
     }
 
     public async handleFileClose(path: string): Promise<void> {
-        if (!this.indexManager) return;
-        const documentId = this.indexManager.getUuidForPath(path);
+        if (!this.treeIndexManager) return;
+        const documentId = this.treeIndexManager.getUuidForPath(path);
         if (!documentId) return;
 
         const unsubscribe = this.activeSubscriptions.get(documentId);
@@ -171,6 +174,11 @@ export class SyncOrchestrator {
             try {
                 await this.pushUseCase.execute(documentId, bufferedContent, this.activeKey, path);
                 this.lastPingMs = Math.round(performance.now() - start);
+                this.hasConnectionError = false;
+            } catch (err: any) {
+                console.error(`SyncOrchestrator push on close failed for ${documentId}:`, err);
+                this.hasConnectionError = true;
+                this.lastErrorMessage = 'Connection failed';
             } finally {
                 this.removeActiveTask(path);
             }
@@ -183,6 +191,11 @@ export class SyncOrchestrator {
                 try {
                     await this.pushUseCase.execute(documentId, content, this.activeKey, path);
                     this.lastPingMs = Math.round(performance.now() - start);
+                    this.hasConnectionError = false;
+                } catch (err: any) {
+                    console.error(`SyncOrchestrator push on close failed for ${documentId}:`, err);
+                    this.hasConnectionError = true;
+                    this.lastErrorMessage = 'Connection failed';
                 } finally {
                     this.removeActiveTask(path);
                 }
@@ -193,14 +206,14 @@ export class SyncOrchestrator {
     }
 
     public async handleLocalChange(path: string, content: string): Promise<void> {
-        if (!this.activeKey || !this.indexManager) return;
+        if (!this.activeKey || !this.treeIndexManager) return;
         
         if (this.remoteWriteHashes.get(path) === content) {
             this.remoteWriteHashes.delete(path);
             return;
         }
 
-        const documentId = this.indexManager.getUuidForPath(path);
+        const documentId = this.treeIndexManager.getUuidForPath(path);
         if (!documentId) return;
 
         if (this.isApplyingRemoteChanges) return;
@@ -221,6 +234,7 @@ export class SyncOrchestrator {
                     this.addActiveTask(path);
                     await this.pushUseCase.execute(documentId, latestContent, this.activeKey, path);
                     this.lastPingMs = Math.round(performance.now() - start);
+                    this.hasConnectionError = false;
 
                     const currentCount = (this.fileUpdateCounters.get(documentId) || 0) + 1;
                     this.fileUpdateCounters.set(documentId, currentCount);
@@ -229,8 +243,10 @@ export class SyncOrchestrator {
                         await this.pushUseCase.forceCompact(documentId, this.activeKey, path);
                         this.fileUpdateCounters.set(documentId, 0);
                     }
-                } catch (err) {
+                } catch (err: any) {
                     console.error(`SyncOrchestrator push failed for ${documentId}:`, err);
+                    this.hasConnectionError = true;
+                    this.lastErrorMessage = 'Connection failed';
                 } finally {
                     this.removeActiveTask(path);
                 }
@@ -240,11 +256,41 @@ export class SyncOrchestrator {
         this.localChangeDebounceTimers.set(documentId, timer);
     }
 
+    public async runFullSync(): Promise<void> {
+        if (!this.activeKey || !this.treeIndexManager) return;
+
+        try {
+            console.log('[SyncOrchestrator] Starting VFS Index Sync...');
+
+            // 1. Pull changes for the Master Index first
+            await this.pullDocument(
+                this.treeIndexManager.INDEX_DOC_ID, 
+                null, 
+                true
+            );
+
+            // 2. Reconcile hard drive with the new CRDT structure
+            await this.treeIndexManager.reconcileFilesystem();
+
+            // 3. Sync text contents for all active files in the index
+            const activeFiles = this.treeIndexManager.getActiveFiles();
+            for (const file of activeFiles) {
+                await this.pullDocument(file.uuid, file.path, true);
+            }
+
+            console.log('[SyncOrchestrator] Full Sync Complete.');
+        } catch (error) {
+            console.error('[SyncOrchestrator] Sync failed:', error);
+            this.hasConnectionError = true;
+            this.lastErrorMessage = 'Sync failed';
+        }
+    }
+
     public async forceSyncAndCompact(path: string): Promise<void> {
         if (!this.activeKey) throw new Error('Master key not loaded');
-        if (!this.indexManager) throw new Error('Index manager not loaded');
+        if (!this.treeIndexManager) throw new Error('Index manager not loaded');
         
-        const documentId = this.indexManager.getUuidForPath(path);
+        const documentId = this.treeIndexManager.getUuidForPath(path);
         if (!documentId) throw new Error('Document ID not found in index');
 
         this.addActiveTask(path);
@@ -252,60 +298,67 @@ export class SyncOrchestrator {
             await this.pullDocument(documentId, path);
             await this.pushUseCase.forceCompact(documentId, this.activeKey, path);
             this.fileUpdateCounters.set(documentId, 0);
+            this.hasConnectionError = false;
+        } catch (err: any) {
+            this.hasConnectionError = true;
+            this.lastErrorMessage = 'Compaction failed';
+            throw err;
         } finally {
             this.removeActiveTask(path);
         }
     }
 
     public async pullDocument(documentId: string, path: string | null = null, isSilent: boolean = false): Promise<void> {
-    if (!this.activeKey) return;
-    
-    // ⚡ FIX: Do NOT abort pullDocument if isApplyingRemoteChanges is true!
-    // Only skip if there's an active local typing debounce timer for this specific document.
-    if (this.localChangeDebounceTimers.has(documentId)) return;
+        if (!this.activeKey) return;
+        
+        if (this.localChangeDebounceTimers.has(documentId)) return;
 
-    const lastId = this.fileLastSyncIds.get(documentId) || 0;
+        const lastId = this.fileLastSyncIds.get(documentId) || 0;
 
-    if (lastId > 0) {
-        try {
-            const latestRemoteId = await this.remoteStore.getLatestUpdateId(documentId);
-            if (latestRemoteId <= lastId) {
-                return; // Up to date
+        if (lastId > 0) {
+            try {
+                const latestRemoteId = await this.remoteStore.getLatestUpdateId(documentId);
+                if (latestRemoteId <= lastId) {
+                    return; 
+                }
+            } catch (err) {
+                console.warn(`Pre-flight check failed for ${documentId}:`, err);
             }
-        } catch (err) {
-            console.warn(`Pre-flight check failed for ${documentId}:`, err);
-        }
-    }
-
-    const taskName = path || 'System Index';
-    if (!isSilent) this.addActiveTask(taskName);
-
-    const start = performance.now();
-    try {
-        const result = await this.pullUseCase.execute(
-            documentId,
-            path,
-            lastId,
-            this.activeKey,
-            () => { this.isApplyingRemoteChanges = true; },
-            () => { this.isApplyingRemoteChanges = false; }
-        );
-        this.fileLastSyncIds.set(documentId, result.newLastSyncId);
-        this.lastPingMs = Math.round(performance.now() - start);
-
-        if (result.appliedCount > 50) {
-            this.pushUseCase.forceCompact(documentId, this.activeKey).catch(err => {
-                console.error(`Auto-compaction failed for ${documentId}:`, err);
-            });
-            this.fileUpdateCounters.set(documentId, 0);
         }
 
-    } catch (err) {
-        console.error(`Sync pull failed for ${documentId}:`, err);
-    } finally {
-        if (!isSilent) this.removeActiveTask(taskName);
+        const taskName = path || 'System Index';
+        if (!isSilent) this.addActiveTask(taskName);
+
+        const start = performance.now();
+        try {
+            const result = await this.pullUseCase.execute(
+                documentId,
+                path,
+                lastId,
+                this.activeKey,
+                () => { this.isApplyingRemoteChanges = true; },
+                () => { this.isApplyingRemoteChanges = false; }
+            );
+            this.fileLastSyncIds.set(documentId, result.newLastSyncId);
+            this.lastPingMs = Math.round(performance.now() - start);
+
+            this.hasConnectionError = false;
+
+            if (result.appliedCount > 50) {
+                this.pushUseCase.forceCompact(documentId, this.activeKey).catch(err => {
+                    console.error(`Auto-compaction failed for ${documentId}:`, err);
+                });
+                this.fileUpdateCounters.set(documentId, 0);
+            }
+
+        } catch (err: any) {
+            console.error(`Sync pull failed for ${documentId}:`, err);
+            this.hasConnectionError = true;
+            this.lastErrorMessage = 'Connection failed';
+        } finally {
+            if (!isSilent) this.removeActiveTask(taskName);
+        }
     }
-}
 
     public async pushDocumentUpdate(documentId: string, updateBinary: Uint8Array, path?: string | null): Promise<void> {
         if (!this.activeKey) return;
@@ -315,6 +368,11 @@ export class SyncOrchestrator {
         try {
             await this.pushUseCase.pushRawUpdate(documentId, updateBinary, this.activeKey, path);
             this.lastPingMs = Math.round(performance.now() - start);
+            this.hasConnectionError = false;
+        } catch (err: any) {
+            console.error(`pushDocumentUpdate failed for ${documentId}:`, err);
+            this.hasConnectionError = true;
+            this.lastErrorMessage = 'Connection failed';
         } finally {
             this.removeActiveTask('System Index');
         }
@@ -336,6 +394,7 @@ export class SyncOrchestrator {
         this.localChangeDebounceTimers.clear();
         this.pendingContents.clear();
         this.activeTasks.clear();
+        this.hasConnectionError = false;
         this.triggerStatusUpdate();
     }
 
@@ -347,5 +406,3 @@ export class SyncOrchestrator {
         this.isApplyingRemoteChanges = false;
     }
 }
-
-

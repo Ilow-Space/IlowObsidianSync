@@ -1,5 +1,4 @@
-﻿
-import { EncryptedBlob } from '../ValueObjects/CryptoTypes';
+﻿import { EncryptedBlob } from '../ValueObjects/CryptoTypes';
 import { CRDTUpdate } from '../Entities/Models';
 
 export interface RemoteManifestItem {
@@ -7,6 +6,17 @@ export interface RemoteManifestItem {
     encrypted_path?: string; // hex string prefixed with \x
     is_deleted: boolean;
     updated_at: string;
+}
+
+export interface ServerTelemetry {
+    rps: number;
+    rpmAvgHour: number;
+    dataTransferredBytes: number;
+    activeWebSockets: number;
+    uptimeSeconds: number;
+    memoryAllocMb: number;
+    dbConnections: number;
+    systemHealth: 'healthy' | 'degraded' | 'critical';
 }
 
 export interface IRemoteStore {
@@ -19,6 +29,7 @@ export interface IRemoteStore {
     deleteSnapshot(documentId: string): Promise<void>;
     truncateServer(adminToken: string): Promise<void>;
     testConnection(): Promise<boolean>;
+    fetchTelemetry(): Promise<ServerTelemetry | null>;
     
     // Realtime WebSocket support
     connectWebSocket(wssUrl: string): void;

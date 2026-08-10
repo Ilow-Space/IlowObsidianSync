@@ -13,7 +13,7 @@ if (Test-Path $outputFile) {
 $excludePattern = "node_modules|dist|build|\.git|\.next|out|coverage|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb"
 
 # Find TypeScript, JavaScript, and JSON files recursively
-$files = Get-ChildItem -Path $rootPath -Recurse -Include *.ts, *.tsx, *.js, *.jsx, *.json | 
+$files = Get-ChildItem -Path $rootPath -Recurse -Include *.ts, *.tsx, *.js, *.jsx, *.json, *.go | 
          Where-Object { 
              $_.FullName -notmatch $excludePattern -and
              $_.Name -notmatch "\.min\."

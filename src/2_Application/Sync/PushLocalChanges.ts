@@ -1,5 +1,4 @@
-﻿
-import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
+﻿import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
 import { ICryptography } from '@domain/Interfaces/ICryptography';
 import { YjsEngine } from '@infrastructure/Crdt/YjsEngine';
 import { INoteRepository } from '@domain/Interfaces/INoteRepository';
@@ -8,7 +7,6 @@ import * as Y from 'yjs';
 import { gzipSync, gunzipSync } from 'fflate';
 
 function decompress(data: Uint8Array): Uint8Array {
-    // Magic bytes for GZIP are 0x1F and 0x8B. Fallback to raw if uncompressed.
     if (data.length >= 2 && data[0] === 0x1f && data[1] === 0x8b) {
         return gunzipSync(data);
     }
@@ -24,10 +22,8 @@ export class PushLocalChangesUseCase {
     ) {}
 
     public async execute(documentId: string, localContent: string, key: CryptoKey, path?: string | null): Promise<void> {
-        // 1. Inform Yjs of local text changes
         const updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent);
 
-        // 2. If there are changes, compress, encrypt and push to remote store
         if (updateBinary && updateBinary.length > 0) {
             const compressedBinary = gzipSync(updateBinary);
             const encryptedBlob = await this.crypto.encrypt(compressedBinary, key);
@@ -58,16 +54,17 @@ export class PushLocalChangesUseCase {
     }
 
     public async forceCompact(documentId: string, key: CryptoKey, path?: string | null): Promise<void> {
-        // Fetches all remote updates, applies them locally to build the most up-to-date state
-        // Then writes it to the snapshot and clears all remote updates up to the last fetched update ID.
         const doc = await this.crdtEngine.getOrCreateDoc(documentId);
 
-        // Fetch snapshot and all updates to make sure we are fully synced before compacting
         const encryptedSnapshot = await this.remoteStore.fetchSnapshot(documentId);
         if (encryptedSnapshot && encryptedSnapshot.ciphertext) {
             try {
                 const decryptedSnapshot = await this.crypto.decrypt(encryptedSnapshot, key);
-                await this.crdtEngine.applyUpdates(documentId, [decompress(decryptedSnapshot)]);
+                const decompressed = decompress(decryptedSnapshot);
+                // 🛡️ BEST PRACTICE: Filter empty payloads during compaction
+                if (decompressed.length > 0) {
+                    await this.crdtEngine.applyUpdates(documentId, [decompressed]);
+                }
             } catch (err) {
                 console.error('Decryption of snapshot failed during compaction:', err);
                 throw new Error('Failed to decrypt snapshot during compaction. Aborting.');
@@ -81,7 +78,12 @@ export class PushLocalChangesUseCase {
             for (const update of remoteUpdates) {
                 try {
                     const decrypted = await this.crypto.decrypt(update.encryptedUpdate, key);
-                    decryptedUpdates.push(decompress(decrypted));
+                    const decompressed = decompress(decrypted);
+                    
+                    // 🛡️ BEST PRACTICE: Filter empty payloads during compaction
+                    if (decompressed.length > 0) {
+                        decryptedUpdates.push(decompressed);
+                    }
                 } catch (err) {
                     console.error(`Decryption of update ${update.id} failed during compaction:`, err);
                     throw new Error(`Failed to decrypt update ${update.id} during compaction. Aborting.`);
@@ -93,7 +95,6 @@ export class PushLocalChangesUseCase {
             }
         }
 
-        // Generate full state update to compact
         const fullStateUpdate = Y.encodeStateAsUpdate(doc);
         const compressedNewState = gzipSync(fullStateUpdate);
         const encryptedNewState = await this.crypto.encrypt(compressedNewState, key);
@@ -104,7 +105,6 @@ export class PushLocalChangesUseCase {
             encryptedPath = await this.crypto.encrypt(encoder.encode(path), key);
         }
 
-        // Atomically update snapshot and delete corresponding updates
         await this.remoteStore.compactSnapshot(documentId, encryptedNewState, maxId, false, encryptedPath);
     }
 }

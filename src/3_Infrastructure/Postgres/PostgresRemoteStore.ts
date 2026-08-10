@@ -1,5 +1,4 @@
-﻿
-import { IRemoteStore, RemoteManifestItem } from '@domain/Interfaces/IRemoteStore';
+﻿import { IRemoteStore, RemoteManifestItem, ServerTelemetry } from '@domain/Interfaces/IRemoteStore';
 import { EncryptedBlob } from '@domain/ValueObjects/CryptoTypes';
 import { CRDTUpdate } from '@domain/Entities/Models';
 import { CryptoUtils } from '../Crypto/CryptoUtils';
@@ -110,6 +109,24 @@ export class PostgresRemoteStore implements IRemoteStore {
         } catch (err) {
             console.error('PostgresRemoteStore connection test failed:', err);
             return false;
+        }
+    }
+    
+    public async fetchTelemetry(): Promise<ServerTelemetry | null> {
+        try {
+            const res = await requestUrl({
+                url: `${this.serverUrl}/api/telemetry`,
+                method: 'GET',
+                headers: this.headers,
+                throw: false
+            });
+
+            if (res.status >= 200 && res.status < 300) {
+                return res.json as ServerTelemetry;
+            }
+            return null;
+        } catch (err) {
+            return null;
         }
     }
 

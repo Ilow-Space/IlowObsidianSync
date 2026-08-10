@@ -1,12 +1,11 @@
-﻿
-import { Plugin, Notice, TFile, TAbstractFile, WorkspaceLeaf, TFolder } from 'obsidian';
+﻿import { Plugin, Notice, TFile, TAbstractFile, WorkspaceLeaf, TFolder } from 'obsidian';
 import { SettingsTab } from './SettingsTab';
 import { WebCryptoService } from '@infrastructure/Crypto/WebCryptoService';
 import { PostgresRemoteStore } from '@infrastructure/Postgres/PostgresRemoteStore';
 import { ObsidianNoteRepository } from '@infrastructure/Obsidian/ObsidianNoteRepository';
 import { YjsEngine } from '@infrastructure/Crdt/YjsEngine';
 import { SyncOrchestrator, SyncStatus } from '@application/Sync/SyncOrchestrator';
-import { IndexManager } from '@application/Sync/IndexManager';
+import { TreeIndexManager } from '@application/Sync/TreeIndexManager';
 import { SyncSidebarView, SYNC_SIDEBAR_VIEW_TYPE } from './Views/SyncSidebarView';
 
 interface PluginSettings {
@@ -21,7 +20,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
     headers: {},
     salt: '',
     adminToken: ''
-};
+}
 
 export default class MyPlugin extends Plugin {
     public settings!: PluginSettings;
@@ -30,7 +29,7 @@ export default class MyPlugin extends Plugin {
     private yjsEngine!: YjsEngine;
     private remoteStore: PostgresRemoteStore | null = null;
     private syncOrchestrator: SyncOrchestrator | null = null;
-    private indexManager: IndexManager | null = null;
+    private treeIndexManager: TreeIndexManager | null = null;
     private derivedKey: CryptoKey | null = null;
     private statusBarItem!: HTMLElement;
 
@@ -39,7 +38,7 @@ export default class MyPlugin extends Plugin {
     }
 
     async onload() {
-        console.log('Loading Obsidian CRDT Sync Plugin');
+        console.log('Loading Obsidian CRDT Sync Plugin (VFS Edition)');
 
         await this.loadSettings();
 
@@ -81,14 +80,14 @@ export default class MyPlugin extends Plugin {
 
         this.initializeSyncOrchestrator();
 
-        // Auto-load persisted key from secure secret storage
+        // Auto-load persisted key from secure secret storage[cite: 3]
         try {
             const keyData = await (this.app as any).secretStorage.getSecret('crdt-master-key');
             if (keyData) {
                 this.updateStatusBar('syncing', 'Loading key...');
                 this.derivedKey = await this.cryptoService.importKey(keyData);
 
-                if (this.syncOrchestrator && this.indexManager) {
+                if (this.syncOrchestrator && this.treeIndexManager) {
                     this.syncOrchestrator.setCryptoKey(this.derivedKey);
                     this.runBackgroundBootstrap().catch(console.error);
                 }
@@ -98,10 +97,10 @@ export default class MyPlugin extends Plugin {
             this.updateStatusBar('error', 'Failed to load key');
         }
 
-        // Add settings tab
+        // Add settings tab[cite: 3]
         this.addSettingTab(new SettingsTab(this.app, this));
 
-        // Register workspace & vault event listeners
+        // Register workspace & vault event listeners[cite: 3]
         this.registerEvent(
             this.app.workspace.on('file-open', async (file: TFile | null) => {
                 if (file && file.extension === 'md' && this.syncOrchestrator) {
@@ -112,38 +111,33 @@ export default class MyPlugin extends Plugin {
 
         this.registerEvent(
             this.app.vault.on('create', async (file: TAbstractFile) => {
-                if (!this.indexManager) return;
-                if (file instanceof TFile && file.extension === 'md') {
-                    await this.indexManager.handleFileCreate(file.path);
-                } else if (file instanceof TFolder) {
-                    await this.indexManager.handleFolderCreate(file.path);
+                if (this.treeIndexManager) {
+                    await this.treeIndexManager.handleCreate(file);
                 }
             })
         );
 
         this.registerEvent(
             this.app.vault.on('rename', async (file: TAbstractFile, oldPath: string) => {
-                if (!this.indexManager) return;
-                if (file instanceof TFile && file.extension === 'md') {
-                    await this.indexManager.handleFileRename(oldPath, file.path);
-                } else if (file instanceof TFolder) {
-                    await this.indexManager.handleFolderRename(oldPath, file.path);
+                if (this.treeIndexManager) {
+                    await this.treeIndexManager.handleRename(oldPath, file.path);
                 }
             })
         );
 
         this.registerEvent(
             this.app.vault.on('delete', async (file: TAbstractFile) => {
-                if (file instanceof TFile && file.extension === 'md' && this.indexManager) {
-                    await this.indexManager.handleFileDelete(file.path);
+                if (this.treeIndexManager) {
+                    await this.treeIndexManager.handleDelete(file.path);
                 }
             })
         );
 
+        // Run full VFS synchronization interval[cite: 3]
         this.registerInterval(
             window.setInterval(async () => {
-                if (this.isKeyDerived && this.indexManager) {
-                    await this.indexManager.syncIndex(true); // ⚡ Pass true here
+                if (this.isKeyDerived && this.syncOrchestrator) {
+                    await this.syncOrchestrator.runFullSync();
                 }
             }, 10000) 
         );
@@ -209,11 +203,11 @@ export default class MyPlugin extends Plugin {
         try {
             this.derivedKey = await this.cryptoService.deriveKey(password, this.settings.salt);
 
-            // Save the derived key securely to native secret storage
+            // Save the derived key securely to native secret storage[cite: 3]
             const exportedKey = await this.cryptoService.exportKey(this.derivedKey);
             await (this.app as any).secretStorage.setSecret('crdt-master-key', exportedKey);
 
-            if (this.syncOrchestrator && this.indexManager) {
+            if (this.syncOrchestrator && this.treeIndexManager) {
                 this.syncOrchestrator.setCryptoKey(this.derivedKey);
                 this.runBackgroundBootstrap().catch(console.error);
             }
@@ -224,20 +218,19 @@ export default class MyPlugin extends Plugin {
     }
 
     private async runBackgroundBootstrap() {
-        if (!this.indexManager || !this.syncOrchestrator || !this.remoteStore) return;
+        if (!this.treeIndexManager || !this.syncOrchestrator || !this.remoteStore) return;
         
-        this.updateStatusBar('syncing', 'Bootstrapping index...');
+        this.updateStatusBar('syncing', 'Bootstrapping VFS index...');
         try {
-            await this.indexManager.initialize();
-            await this.indexManager.syncIndex(true);
+            await this.treeIndexManager.initialize();
 
-            // Subscribe to real-time global manifest/index updates
-            const MANIFEST_DOC_ID = 'manifest';
-            this.remoteStore.subscribeToUpdates(MANIFEST_DOC_ID, () => {
-                this.indexManager?.syncIndex(true).catch(console.error);
+            // Subscribe to real-time updates specifically for the VFS index
+            const INDEX_DOC_ID = this.treeIndexManager.INDEX_DOC_ID;
+            this.remoteStore.subscribeToUpdates(INDEX_DOC_ID, () => {
+                this.syncOrchestrator?.runFullSync().catch(console.error);
             });
 
-            await this.indexManager.runCompletenessCheck();
+            await this.syncOrchestrator.runFullSync();
 
             const activeFile = this.app.workspace.getActiveFile();
             if (activeFile && activeFile.extension === 'md') {
@@ -278,7 +271,7 @@ export default class MyPlugin extends Plugin {
         if (this.settings.serverUrl) {
             this.remoteStore = new PostgresRemoteStore(this.settings.serverUrl, this.settings.headers);
             
-            // Derive WebSocket URL and connect realtime listener
+            // Derive WebSocket URL and connect realtime listener[cite: 3]
             const socketUrl = this.settings.serverUrl.replace(/^http/i, 'ws');
             this.remoteStore.connectWebSocket(socketUrl);
 
@@ -289,8 +282,10 @@ export default class MyPlugin extends Plugin {
                 this.noteRepo,
                 (status, msg) => this.updateStatusBar(status, msg)
             );
-            this.indexManager = new IndexManager(this.app, this.yjsEngine, this.syncOrchestrator);
-            this.syncOrchestrator.setIndexManager(this.indexManager);
+            
+            // Initialize TreeIndexManager instead of IndexManager
+            this.treeIndexManager = new TreeIndexManager(this.app, this.yjsEngine, this.syncOrchestrator);
+            this.syncOrchestrator.setTreeIndexManager(this.treeIndexManager);
 
             if (this.derivedKey) {
                 this.syncOrchestrator.setCryptoKey(this.derivedKey);
@@ -298,8 +293,7 @@ export default class MyPlugin extends Plugin {
         } else {
             this.remoteStore = null;
             this.syncOrchestrator = null;
-            this.indexManager = null;
+            this.treeIndexManager = null;
         }
     }
 }
-

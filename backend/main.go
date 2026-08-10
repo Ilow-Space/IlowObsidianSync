@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -25,6 +27,29 @@ var (
 	channel     = "vault_updates_channel"
 	db          *sql.DB
 )
+
+// Telemetry & Metrics Globals
+var (
+	startTime        = time.Now()
+	dataTransferred  uint64
+	activeWebSockets int64
+	reqsLastSecond   uint64
+	reqsLastHour     uint64
+	currentRPS       float64
+	currentRPM       float64
+	telemetryMux     sync.Mutex
+)
+
+type ServerTelemetry struct {
+	RPS                  float64 `json:"rps"`
+	RPMAvgHour           float64 `json:"rpmAvgHour"`
+	DataTransferredBytes uint64  `json:"dataTransferredBytes"`
+	ActiveWebSockets     int64   `json:"activeWebSockets"`
+	UptimeSeconds        int64   `json:"uptimeSeconds"`
+	MemoryAllocMB        float64 `json:"memoryAllocMb"`
+	DBConnections        int     `json:"dbConnections"`
+	SystemHealth         string  `json:"systemHealth"`
+}
 
 // Upgrader allows cross-origin connections (Obsidian acts as a local origin)
 var upgrader = websocket.Upgrader{
@@ -78,6 +103,25 @@ type CompactPayload struct {
 	PEncryptedPath *string `json:"p_encrypted_path,omitempty"`
 }
 
+func startTelemetryTracker() {
+	secTicker := time.NewTicker(1 * time.Second)
+	hourTicker := time.NewTicker(1 * time.Hour)
+	for {
+		select {
+		case <-secTicker.C:
+			rps := atomic.SwapUint64(&reqsLastSecond, 0)
+			telemetryMux.Lock()
+			currentRPS = float64(rps)
+			telemetryMux.Unlock()
+		case <-hourTicker.C:
+			rpm := atomic.SwapUint64(&reqsLastHour, 0)
+			telemetryMux.Lock()
+			currentRPM = float64(rpm) / 60.0
+			telemetryMux.Unlock()
+		}
+	}
+}
+
 func main() {
 	// 1. Load .env file
 	if err := godotenv.Load(); err != nil {
@@ -119,12 +163,14 @@ func main() {
 	}
 	log.Printf("Connected to PostgreSQL. Listening on channel: %s\n", channel)
 
-	// 5. Start WebSocket event broadcaster
+	// 5. Start Background Routines
 	go handleDatabaseNotifications(listener)
+	go startTelemetryTracker()
 
 	// 6. Setup Unified REST & WebSocket ServeMux
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", handleWebSocket)
+	mux.HandleFunc("GET /api/telemetry", handleGetTelemetry)
 	mux.HandleFunc("GET /api/snapshots/{id}", handleGetSnapshot)
 	mux.HandleFunc("GET /api/snapshots/{id}/updates", handleGetUpdates)
 	mux.HandleFunc("GET /api/snapshots/{id}/latest_id", handleGetLatestUpdateID)
@@ -142,6 +188,12 @@ func main() {
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddUint64(&reqsLastSecond, 1)
+		atomic.AddUint64(&reqsLastHour, 1)
+		if r.ContentLength > 0 {
+			atomic.AddUint64(&dataTransferred, uint64(r.ContentLength))
+		}
+
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -208,6 +260,30 @@ func byteaToHex(b []byte) string {
 		return ""
 	}
 	return "\\x" + hex.EncodeToString(b)
+}
+
+func handleGetTelemetry(w http.ResponseWriter, r *http.Request) {
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+
+	telemetryMux.Lock()
+	rps := currentRPS
+	rpm := currentRPM
+	telemetryMux.Unlock()
+
+	dbStats := db.Stats()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(ServerTelemetry{
+		RPS:                  rps,
+		RPMAvgHour:           rpm,
+		DataTransferredBytes: atomic.LoadUint64(&dataTransferred),
+		ActiveWebSockets:     atomic.LoadInt64(&activeWebSockets),
+		UptimeSeconds:        int64(time.Since(startTime).Seconds()),
+		MemoryAllocMB:        float64(memStats.Alloc) / 1024 / 1024,
+		DBConnections:        dbStats.OpenConnections,
+		SystemHealth:         "healthy",
+	})
 }
 
 func handleGetSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -566,7 +642,7 @@ func handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 		SELECT pg_notify('vault_updates_channel', json_build_object(
 			'type', 'DELETE',
 			'table', 'vault_snapshots',
-			'record', json_build_object('document_id', $1, 'id', 0)
+			'record', json_build_object('document_id', $1::text, 'id', 0)
 		)::text);
 	`, id)
 	if err != nil {
@@ -615,15 +691,19 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		subscriptions: make(map[string]bool),
 	}
 
-	// Register client
+	// Register client & increment telemetry WS count
 	globalHub.mu.Lock()
 	globalHub.clients[client] = true
 	globalHub.mu.Unlock()
+
+	atomic.AddInt64(&activeWebSockets, 1)
 
 	defer func() {
 		globalHub.mu.Lock()
 		delete(globalHub.clients, client)
 		globalHub.mu.Unlock()
+
+		atomic.AddInt64(&activeWebSockets, -1)
 		conn.Close()
 	}()
 
