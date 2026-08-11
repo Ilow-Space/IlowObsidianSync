@@ -21,7 +21,15 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
                 createFolder: vi.fn().mockResolvedValue(undefined),
                 create: vi.fn().mockResolvedValue(undefined),
                 getAllLoadedFiles: vi.fn().mockReturnValue([]),
-                read: vi.fn().mockResolvedValue('Mock Content')
+                read: vi.fn().mockResolvedValue('Mock Content'),
+                adapter: {
+                    // FIX: Use !! to ensure undefined safely evaluates to false, preventing infinite loops
+                    exists: vi.fn().mockImplementation(async (p: string) => {
+                        return !!appMock.vault.getAbstractFileByPath(p);
+                    }),
+                    remove: vi.fn().mockResolvedValue(undefined),
+                    trashSystem: vi.fn().mockResolvedValue(undefined)
+                }
             },
             fileManager: {
                 renameFile: vi.fn().mockResolvedValue(undefined)
@@ -49,8 +57,11 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
         testMap.set('uuid-deleted-ghost', { type: 'file', path: 'Notes/Meeting.md', isDeleted: true });
         testMap.set('uuid-active-node', { type: 'file', path: 'Notes/Meeting.md', isDeleted: false });
         
+        // FIX: Register as a known tracked file to bypass offline collision renaming
+        (manager as any).uuidToLastKnownPath.set('uuid-active-node', 'Notes/Meeting.md');
+        
         (manager as any).rebuildReverseLookup();
-        appMock.vault.getAbstractFileByPath.mockReturnValue({ path: 'Notes/Meeting.md' });
+        appMock.vault.getAbstractFileByPath.mockImplementation((p: string) => p === 'Notes/Meeting.md' ? { path: p } : null);
 
         await manager.reconcileFilesystem();
 
@@ -79,7 +90,7 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
         (manager as any).rebuildReverseLookup();
         
         const mockFile = { path: 'Legacy.md' };
-        appMock.vault.getAbstractFileByPath.mockReturnValue(mockFile);
+        appMock.vault.getAbstractFileByPath.mockImplementation((p: string) => p === 'Legacy.md' ? mockFile : null);
 
         appMock.vault.trash.mockImplementationOnce(() => Promise.reject(new Error('System trash restricted')));
         appMock.vault.trash.mockImplementationOnce(() => Promise.resolve());

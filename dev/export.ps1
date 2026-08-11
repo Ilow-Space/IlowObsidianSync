@@ -10,10 +10,10 @@ if (Test-Path $outputFile) {
 }
 
 # Regex pattern for directories, lockfiles, and build outputs to ignore
-$excludePattern = "node_modules|dist|build|\.git|\.next|out|coverage|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb"
+$excludePattern = "node_modules|dist|build|\.git|\.next|out|coverage|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb|.obsidian-cache"
 
 # Find TypeScript, JavaScript, and JSON files recursively
-$files = Get-ChildItem -Path $rootPath -Recurse -Include *.ts, *.tsx, *.js, *.jsx, *.json, *.go | 
+$files = Get-ChildItem -Path $rootPath -Recurse -Include *.ts, *.tsx, *.js, *.jsx, *.json, *.go, *.test.ts, *.e2e.ts | 
          Where-Object { 
              $_.FullName -notmatch $excludePattern -and
              $_.Name -notmatch "\.min\."

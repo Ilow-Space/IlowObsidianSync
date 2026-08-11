@@ -73,33 +73,51 @@ export class TreeIndexManager {
         this.isReconciling = true;
         
         try {
-            // FIX: Array.from() prevents Y.Map iterator mutation skipping
             const dedupeEntries = Array.from(this.treeMap.entries());
             const seenPaths = new Set<string>();
+            const justDeletedPaths = new Set<string>(); 
             
-            await this.applyAndPushIndexTransaction(() => {
-                for (const [uuid, node] of dedupeEntries) {
-                    if (node.isDeleted) continue;
+            // 1. Gather index mutations asynchronously to avoid breaking Y.Doc.transact
+            const pendingUpdates = new Map<string, string>();
+            
+            for (const [uuid, node] of dedupeEntries) {
+                if (node.isDeleted) continue;
+                
+                const isNewRemote = !this.uuidToLastKnownPath.has(uuid);
+                const localExists = await this.app.vault.adapter.exists(node.path);
+                const isFolder = node.type === 'folder';
+                
+                // Folders seamlessly merge. Only files conflict on collision.
+                if (seenPaths.has(node.path) || (!isFolder && isNewRemote && localExists)) {
+                    let collisionCount = 1;
+                    let newPath = '';
+                    const extMatch = node.path.match(/(\.[^.]+)$/);
+                    const ext = extMatch ? extMatch[0] : '';
+                    const base = extMatch ? node.path.slice(0, -ext.length) : node.path;
                     
-                    if (seenPaths.has(node.path)) {
-                        let collisionCount = 1;
-                        let newPath = '';
-                        const extMatch = node.path.match(/(\.[^.]+)$/);
-                        const ext = extMatch ? extMatch[0] : '';
-                        const base = extMatch ? node.path.slice(0, -ext.length) : node.path;
-                        
-                        do {
-                            newPath = `${base} (Conflict ${collisionCount})${ext}`;
-                            collisionCount++;
-                        } while (seenPaths.has(newPath));
-                        
-                        this.treeMap.set(uuid, { ...node, path: newPath });
-                        seenPaths.add(newPath);
-                    } else {
-                        seenPaths.add(node.path);
-                    }
+                    do {
+                        newPath = `${base} (Conflict ${collisionCount})${ext}`;
+                        collisionCount++;
+                    } while (seenPaths.has(newPath) || await this.app.vault.adapter.exists(newPath));
+                    
+                    pendingUpdates.set(uuid, newPath);
+                    seenPaths.add(newPath);
+                } else {
+                    seenPaths.add(node.path);
                 }
-            });
+            }
+
+            // 2. Apply index mutations synchronously inside the CRDT transaction
+            if (pendingUpdates.size > 0) {
+                await this.applyAndPushIndexTransaction(() => {
+                    for (const [uuid, newPath] of pendingUpdates.entries()) {
+                        const node = this.treeMap.get(uuid);
+                        if (node) {
+                            this.treeMap.set(uuid, { ...node, path: newPath });
+                        }
+                    }
+                });
+            }
 
             this.rebuildReverseLookup();
 
@@ -113,20 +131,36 @@ export class TreeIndexManager {
                 .filter(e => !e[1].isDeleted)
                 .sort((a, b) => a[1].path.split('/').length - b[1].path.split('/').length);
 
-            // Phase 1: Deletions
+            // Phase 1: Aggressive Deletions
             for (const [uuid, node] of toDelete) {
-                const localFile = this.app.vault.getAbstractFileByPath(node.path);
                 this.uuidToLastKnownPath.delete(uuid);
-                if (localFile && !this.pathToUuid.has(node.path)) {
-                    try { await this.app.vault.trash(localFile, true); } 
-                    catch (e) { try { await this.app.vault.trash(localFile, false); } catch(e2) {} }
+                
+                if (!this.pathToUuid.has(node.path)) {
+                    justDeletedPaths.add(node.path);
+                    const localFile = this.app.vault.getAbstractFileByPath(node.path);
+                    
+                    if (localFile) {
+                        try { await this.app.vault.trash(localFile, true); } 
+                        catch (e) { 
+                            try { await this.app.vault.trash(localFile, false); } catch(e2) {} 
+                        }
+                    } 
+                    
+                    // Fallback: If file is on disk but Obsidian hasn't cached it yet, force native removal
+                    if (await this.app.vault.adapter.exists(node.path)) {
+                        try {
+                            if (this.app.vault.adapter.remove) {
+                                await this.app.vault.adapter.remove(node.path);
+                            }
+                        } catch(e) {}
+                    }
                 }
             }
 
             // Phase 2: Creations & Renames
             for (const [uuid, node] of toKeep) {
                 const localFile = this.app.vault.getAbstractFileByPath(node.path);
-                if (!localFile) {
+                if (!localFile && !(await this.app.vault.adapter.exists(node.path))) {
                     const lastKnownPath = this.uuidToLastKnownPath.get(uuid);
                     const oldLocalFile = lastKnownPath ? this.app.vault.getAbstractFileByPath(lastKnownPath) : null;
 
@@ -134,9 +168,7 @@ export class TreeIndexManager {
                         await this.ensureFolderExists(node.path, false);
                         try {
                             await this.app.fileManager.renameFile(oldLocalFile, node.path);
-                        } catch (e) {
-                            console.warn(`Failed to move local file from ${lastKnownPath} to ${node.path}:`, e);
-                        }
+                        } catch (e) {}
                     } else {
                         if (node.type === 'folder') {
                             await this.ensureFolderExists(node.path, true);
@@ -148,21 +180,31 @@ export class TreeIndexManager {
                 this.uuidToLastKnownPath.set(uuid, node.path);
             }
 
-            // Phase 3: Scan for untracked
+            // Phase 3: Scan for untracked offline files
             const allFiles = this.app.vault.getAllLoadedFiles();
-            await this.applyAndPushIndexTransaction(() => {
-                for (const file of allFiles) {
-                    if (file.path === '/' || file.path.startsWith('.')) continue; 
-                    
-                    if (!this.pathToUuid.has(file.path)) {
+            const newFilesToTrack: any[] = [];
+            
+            for (const file of allFiles) {
+                if (file.path === '/' || file.path.startsWith('.')) continue; 
+                
+                if (!this.pathToUuid.has(file.path) && !justDeletedPaths.has(file.path)) {
+                    newFilesToTrack.push(file);
+                }
+            }
+
+            // Apply new tracked files synchronously
+            if (newFilesToTrack.length > 0) {
+                await this.applyAndPushIndexTransaction(() => {
+                    for (const file of newFilesToTrack) {
                         const type = file instanceof TFolder ? 'folder' : 'file';
                         const uuid = window.crypto.randomUUID() as string;
                         this.treeMap.set(uuid, { type, path: file.path, isDeleted: false });
                         this.pathToUuid.set(file.path, uuid);
                         this.uuidToLastKnownPath.set(uuid, file.path);
                     }
-                }
-            });
+                });
+            }
+            
         } finally {
             this.isReconciling = false;
         }
@@ -207,7 +249,12 @@ export class TreeIndexManager {
         
         if (type === 'file' && file instanceof TFile) {
             const content = await this.app.vault.read(file);
-            await this.crdtEngine.getOrCreateDoc(uuid, content);
+            const doc = await this.crdtEngine.getOrCreateDoc(uuid, content);
+            
+            // FIX: Explicitly encode and push the baseline snapshot of newly created files
+            const fullState = Y.encodeStateAsUpdate(doc);
+            await this.syncOrchestrator.pushDocumentUpdate(uuid, fullState, file.path);
+            
             await this.syncOrchestrator.handleLocalChange(file.path, content);
         }
     }
