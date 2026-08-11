@@ -2,13 +2,20 @@
 import { ICryptography } from '@domain/Interfaces/ICryptography';
 import { YjsEngine } from '@infrastructure/Crdt/YjsEngine';
 import { INoteRepository } from '@domain/Interfaces/INoteRepository';
-import { gunzipSync } from 'fflate';
+import { gunzip } from 'fflate';
 
-function decompress(data: Uint8Array): Uint8Array {
-    if (data.length >= 2 && data[0] === 0x1f && data[1] === 0x8b) {
-        return gunzipSync(data);
-    }
-    return data;
+// ASYNC DECOMPRESSION HELPER
+function decompressAsync(data: Uint8Array): Promise<Uint8Array> {
+    return new Promise((resolve, reject) => {
+        if (data.length >= 2 && data[0] === 0x1f && data[1] === 0x8b) {
+            gunzip(data, (err, decompressed) => {
+                if (err) reject(err);
+                else resolve(decompressed);
+            });
+        } else {
+            resolve(data);
+        }
+    });
 }
 
 export class PullRemoteChangesUseCase {
@@ -32,17 +39,16 @@ export class PullRemoteChangesUseCase {
         let newLastSyncId = lastSyncId;
         let didApplyChanges = false;
 
-        // 1. Process Baseline Snapshot (if we have no local history)
         if (lastSyncId === 0) {
             const encryptedSnapshot = await this.remoteStore.fetchSnapshot(documentId);
             if (encryptedSnapshot && encryptedSnapshot.ciphertext) {
                 try {
                     const decryptedSnapshot = await this.crypto.decrypt(encryptedSnapshot, key);
-                    const decompressed = decompress(decryptedSnapshot);
+                    const decompressed = await decompressAsync(decryptedSnapshot); // ASYNC
                     if (decompressed.length > 0) {
                         await this.crdtEngine.applyUpdates(documentId, [decompressed]);
                         appliedCount++;
-                        didApplyChanges = true; // ⚡ FLAG: Content was updated!
+                        didApplyChanges = true;
                     }
                 } catch (err) {
                     console.error(`PullRemoteChangesUseCase failed to decrypt snapshot for ${documentId}:`, err);
@@ -50,31 +56,29 @@ export class PullRemoteChangesUseCase {
             }
         }
 
-        // 2. Process Delta Updates
         const remoteUpdates = await this.remoteStore.fetchUpdatesSince(documentId, lastSyncId);
         if (remoteUpdates.length > 0) {
             const decryptedUpdates: Uint8Array[] = [];
             for (const update of remoteUpdates) {
                 try {
                     const decrypted = await this.crypto.decrypt(update.encryptedUpdate, key);
-                    const decompressed = decompress(decrypted);
+                    const decompressed = await decompressAsync(decrypted); // ASYNC
                     if (decompressed.length > 0) {
                         decryptedUpdates.push(decompressed);
                         appliedCount++;
                     }
                 } catch (err) {
-                    console.error(`PullRemoteChangesUseCase failed to decrypt update ID ${update.id} for ${documentId}:`, err);
+                    console.error(`PullRemoteChangesUseCase failed to decrypt update ID ${update.id} for${documentId}:`, err);
                 }
                 newLastSyncId = Math.max(newLastSyncId, update.id);
             }
 
             if (decryptedUpdates.length > 0) {
                 await this.crdtEngine.applyUpdates(documentId, decryptedUpdates);
-                didApplyChanges = true; // ⚡ FLAG: Content was updated!
+                didApplyChanges = true;
             }
         }
 
-        // 3. ⚡ FIX: Safely Write ALL applied changes to the hard drive
         if (didApplyChanges && path && !documentId.startsWith('shard-')) {
             const doc = await this.crdtEngine.getOrCreateDoc(documentId);
             const updatedContent = doc.getText('markdown').toString();

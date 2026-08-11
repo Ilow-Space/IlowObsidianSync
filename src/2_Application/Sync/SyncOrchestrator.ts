@@ -27,7 +27,7 @@ export class SyncOrchestrator {
 
     private hasConnectionError = false;
     private lastErrorMessage = '';
-    private isSyncingFull = false; // Mutex lock preventing request storms
+    private isSyncingFull = false;
 
     private isApplyingRemoteChanges = false;
     private localChangeDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -39,7 +39,8 @@ export class SyncOrchestrator {
         private crypto: ICryptography,
         private crdtEngine: YjsEngine,
         private noteRepo: INoteRepository,
-        private statusCallback: (status: SyncStatus, msg: string) => void
+        private statusCallback: (status: SyncStatus, msg: string) => void,
+        private debounceMs: number = 1000 // FAST TEST INJECTION
     ) {
         this.pullUseCase = new PullRemoteChangesUseCase(
             remoteStore, 
@@ -51,21 +52,10 @@ export class SyncOrchestrator {
         this.pushUseCase = new PushLocalChangesUseCase(remoteStore, crypto, crdtEngine, noteRepo);
     }
 
-    public getRemoteStore(): IRemoteStore {
-        return this.remoteStore;
-    }
-
-    public getActiveKey(): CryptoKey | null {
-        return this.activeKey;
-    }
-
-    public getCrypto(): ICryptography {
-        return this.crypto;
-    }
-
-    public setTreeIndexManager(im: TreeIndexManager) {
-        this.treeIndexManager = im;
-    }
+    public getRemoteStore(): IRemoteStore { return this.remoteStore; }
+    public getActiveKey(): CryptoKey | null { return this.activeKey; }
+    public getCrypto(): ICryptography { return this.crypto; }
+    public setTreeIndexManager(im: TreeIndexManager) { this.treeIndexManager = im; }
 
     public setCryptoKey(key: CryptoKey | null) {
         this.activeKey = key;
@@ -73,13 +63,8 @@ export class SyncOrchestrator {
         this.triggerStatusUpdate();
     }
 
-    public getActiveSyncPaths(): string[] {
-        return Array.from(this.activeTasks);
-    }
-
-    public getLastPing(): number | null {
-        return this.lastPingMs;
-    }
+    public getActiveSyncPaths(): string[] { return Array.from(this.activeTasks); }
+    public getLastPing(): number | null { return this.lastPingMs; }
 
     private addActiveTask(taskName: string) {
         this.activeTasks.add(taskName);
@@ -177,8 +162,7 @@ export class SyncOrchestrator {
                 await this.pushUseCase.execute(documentId, bufferedContent, this.activeKey, path);
                 this.lastPingMs = Math.round(performance.now() - start);
                 this.hasConnectionError = false;
-            } catch (err: unknown) {
-                console.error(`SyncOrchestrator push on close failed for ${documentId}:`, err);
+            } catch (err) {
                 this.hasConnectionError = true;
                 this.lastErrorMessage = 'Connection failed';
             } finally {
@@ -194,8 +178,7 @@ export class SyncOrchestrator {
                     await this.pushUseCase.execute(documentId, content, this.activeKey, path);
                     this.lastPingMs = Math.round(performance.now() - start);
                     this.hasConnectionError = false;
-                } catch (err: unknown) {
-                    console.error(`SyncOrchestrator push on close failed for ${documentId}:`, err);
+                } catch (err) {
                     this.hasConnectionError = true;
                     this.lastErrorMessage = 'Connection failed';
                 } finally {
@@ -246,15 +229,14 @@ export class SyncOrchestrator {
                         await this.pushUseCase.forceCompact(documentId, this.activeKey, path);
                         this.fileUpdateCounters.set(documentId, 0);
                     }
-                } catch (err: unknown) {
-                    console.error(`SyncOrchestrator push failed for ${documentId}:`, err);
+                } catch (err) {
                     this.hasConnectionError = true;
                     this.lastErrorMessage = 'Connection failed';
                 } finally {
                     this.removeActiveTask(path);
                 }
             }
-        }, 1000);
+        }, this.debounceMs); // CONFIGURABLE INJECTION
 
         this.localChangeDebounceTimers.set(documentId, newTimer);
     }
@@ -262,35 +244,35 @@ export class SyncOrchestrator {
     public async runFullSync(): Promise<void> {
         if (!this.activeKey || !this.treeIndexManager) return;
         
-        // Prevent concurrent sync runs from flooding network requests
-        if (this.isSyncingFull) {
-            return;
-        }
-
+        if (this.isSyncingFull) return;
         this.isSyncingFull = true;
+
         try {
             console.log('[SyncOrchestrator] Starting VFS Index Sync...');
 
-            // 1. Pull changes for the Master Index first
-            await this.pullDocument(
-                this.treeIndexManager.INDEX_DOC_ID, 
-                null, 
-                true
-            );
+            // Fetch bulk updates array to prevent N+1 request waterfalls
+            let bulkUpdates: Record<string, number> = {};
+            try {
+                bulkUpdates = await this.remoteStore.getBulkLatestUpdateIds();
+            } catch (e) {
+                console.warn('[SyncOrchestrator] Bulk fetch failed, falling back to sequential checks.');
+            }
 
-            // 2. Reconcile hard drive with the new CRDT structure
+            const indexLatest = bulkUpdates[this.treeIndexManager.INDEX_DOC_ID];
+            await this.pullDocument(this.treeIndexManager.INDEX_DOC_ID, null, true, indexLatest);
+
             await this.treeIndexManager.reconcileFilesystem();
 
-            // 3. Sync text contents for all active files in the index sequentially
             const activeFiles = this.treeIndexManager.getActiveFiles();
             for (const file of activeFiles) {
-                // Halt loop if connection dropped to avoid request waterfalls
                 if (this.hasConnectionError) break;
-                await this.pullDocument(file.uuid, file.path, true);
+                
+                const latestRemoteId = bulkUpdates[file.uuid];
+                await this.pullDocument(file.uuid, file.path, true, latestRemoteId);
             }
 
             console.log('[SyncOrchestrator] Full Sync Complete.');
-        } catch (error: unknown) {
+        } catch (error) {
             console.error('[SyncOrchestrator] Sync failed:', error);
             this.hasConnectionError = true;
             this.lastErrorMessage = 'Sync failed';
@@ -300,11 +282,10 @@ export class SyncOrchestrator {
     }
 
     public async forceSyncAndCompact(path: string): Promise<void> {
-        if (!this.activeKey) throw new Error('Master key not loaded');
-        if (!this.treeIndexManager) throw new Error('Index manager not loaded');
+        if (!this.activeKey || !this.treeIndexManager) return;
         
         const documentId = this.treeIndexManager.getUuidForPath(path);
-        if (!documentId) throw new Error('Document ID not found in index');
+        if (!documentId) return;
 
         this.addActiveTask(path);
         try {
@@ -312,45 +293,41 @@ export class SyncOrchestrator {
             await this.pushUseCase.forceCompact(documentId, this.activeKey, path);
             this.fileUpdateCounters.set(documentId, 0);
             this.hasConnectionError = false;
-        } catch (err: unknown) {
+        } catch (err) {
             this.hasConnectionError = true;
             this.lastErrorMessage = 'Compaction failed';
-            throw err;
         } finally {
             this.removeActiveTask(path);
         }
     }
 
-    public async pullDocument(documentId: string, path: string | null = null, isSilent: boolean = false): Promise<void> {
+    public async pullDocument(documentId: string, path: string | null = null, isSilent: boolean = false, knownLatestRemoteId?: number): Promise<void> {
         if (!this.activeKey) return;
-        
         if (this.localChangeDebounceTimers.has(documentId)) return;
 
         const lastId = this.fileLastSyncIds.get(documentId) || 0;
 
-        if (lastId > 0) {
+        // BULK OPTIMIZATION: Skip fetching if we already know the remote ID matches local
+        if (knownLatestRemoteId !== undefined) {
+            if (knownLatestRemoteId <= lastId) return;
+        } else if (lastId > 0) {
             try {
                 const latestRemoteId = await this.remoteStore.getLatestUpdateId(documentId);
-                if (latestRemoteId <= lastId) {
-                    return; 
-                }
-            } catch (err: unknown) {
-                // Flag the error and abort the pull gracefully
+                if (latestRemoteId <= lastId) return; 
+            } catch (err) {
                 this.hasConnectionError = true;
                 this.lastErrorMessage = 'Connection failed';
                 return; 
             }
         }
+
         const taskName = path || 'System Index';
         if (!isSilent) this.addActiveTask(taskName);
 
         const start = performance.now();
         try {
             const result = await this.pullUseCase.execute(
-                documentId,
-                path,
-                lastId,
-                this.activeKey,
+                documentId, path, lastId, this.activeKey,
                 () => { this.isApplyingRemoteChanges = true; },
                 () => { this.isApplyingRemoteChanges = false; }
             );
@@ -363,8 +340,7 @@ export class SyncOrchestrator {
                 this.pushUseCase.forceCompact(documentId, this.activeKey).catch(() => {});
                 this.fileUpdateCounters.set(documentId, 0);
             }
-
-        } catch (err: unknown) {
+        } catch (err) {
             this.hasConnectionError = true;
             this.lastErrorMessage = 'Connection failed';
         } finally {
@@ -381,8 +357,7 @@ export class SyncOrchestrator {
             await this.pushUseCase.pushRawUpdate(documentId, updateBinary, this.activeKey, path);
             this.lastPingMs = Math.round(performance.now() - start);
             this.hasConnectionError = false;
-        } catch (err: unknown) {
-            console.error(`pushDocumentUpdate failed for ${documentId}:`, err);
+        } catch (err) {
             this.hasConnectionError = true;
             this.lastErrorMessage = 'Connection failed';
         } finally {
@@ -391,14 +366,10 @@ export class SyncOrchestrator {
     }
 
     public stopAll() {
-        for (const unsubscribe of this.activeSubscriptions.values()) {
-            unsubscribe();
-        }
+        for (const unsubscribe of this.activeSubscriptions.values()) unsubscribe();
         this.activeSubscriptions.clear();
         
-        for (const timer of this.localChangeDebounceTimers.values()) {
-            clearTimeout(timer);
-        }
+        for (const timer of this.localChangeDebounceTimers.values()) clearTimeout(timer);
         if (this.statusIdleTimer) {
             clearTimeout(this.statusIdleTimer);
             this.statusIdleTimer = null;
@@ -411,22 +382,14 @@ export class SyncOrchestrator {
         this.triggerStatusUpdate();
     }
 
-    public acquireRemoteLock() {
-        this.isApplyingRemoteChanges = true;
-    }
-
-    public releaseRemoteLock() {
-        this.isApplyingRemoteChanges = false;
-    }
+    public acquireRemoteLock() { this.isApplyingRemoteChanges = true; }
+    public releaseRemoteLock() { this.isApplyingRemoteChanges = false; }
+    
     public async deleteRemoteSnapshot(documentId: string): Promise<void> {
         if (!this.activeKey) return;
-        
         try {
             await this.remoteStore.deleteSnapshot(documentId);
-            // Optionally, also purge local IndexedDB state to stay tidy
             await this.crdtEngine.localStore.deleteDocumentState(documentId);
-        } catch (err: unknown) {
-            console.error(`Failed to physically purge database for ${documentId}:`, err);
-        }
+        } catch (err) {}
     }
 }

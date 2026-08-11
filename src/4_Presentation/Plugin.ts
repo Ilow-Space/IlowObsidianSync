@@ -13,13 +13,15 @@ interface PluginSettings {
     headers: Record<string, string>;
     salt: string;
     adminToken: string;
+    syncDebounceMs: number; // NEW
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
     serverUrl: '',
     headers: {},
     salt: '',
-    adminToken: ''
+    adminToken: '',
+    syncDebounceMs: 1000 // NEW DEFAULT
 }
 
 export default class MyPlugin extends Plugin {
@@ -271,7 +273,6 @@ export default class MyPlugin extends Plugin {
         if (this.settings.serverUrl) {
             this.remoteStore = new PostgresRemoteStore(this.settings.serverUrl, this.settings.headers);
             
-            // Derive WebSocket URL and connect realtime listener[cite: 3]
             const socketUrl = this.settings.serverUrl.replace(/^http/i, 'ws');
             this.remoteStore.connectWebSocket(socketUrl);
 
@@ -280,7 +281,8 @@ export default class MyPlugin extends Plugin {
                 this.cryptoService,
                 this.yjsEngine,
                 this.noteRepo,
-                (status, msg) => this.updateStatusBar(status, msg)
+                (status, msg) => this.updateStatusBar(status, msg),
+                this.settings.syncDebounceMs // INJECT SPEEDOVERRIDE
             );
             
             // Initialize TreeIndexManager instead of IndexManager

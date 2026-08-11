@@ -2,15 +2,29 @@
 import { ICryptography } from '@domain/Interfaces/ICryptography';
 import { YjsEngine } from '@infrastructure/Crdt/YjsEngine';
 import { INoteRepository } from '@domain/Interfaces/INoteRepository';
-import { EncryptedBlob } from '@domain/ValueObjects/CryptoTypes';
 import * as Y from 'yjs';
-import { gzipSync, gunzipSync } from 'fflate';
+import { gzip, gunzip } from 'fflate';
 
-function decompress(data: Uint8Array): Uint8Array {
-    if (data.length >= 2 && data[0] === 0x1f && data[1] === 0x8b) {
-        return gunzipSync(data);
-    }
-    return data;
+function decompressAsync(data: Uint8Array): Promise<Uint8Array> {
+    return new Promise((resolve, reject) => {
+        if (data.length >= 2 && data[0] === 0x1f && data[1] === 0x8b) {
+            gunzip(data, (err, decompressed) => {
+                if (err) reject(err);
+                else resolve(decompressed);
+            });
+        } else {
+            resolve(data);
+        }
+    });
+}
+
+function compressAsync(data: Uint8Array): Promise<Uint8Array> {
+    return new Promise((resolve, reject) => {
+        gzip(data, (err, compressed) => {
+            if (err) reject(err);
+            else resolve(compressed);
+        });
+    });
 }
 
 export class PushLocalChangesUseCase {
@@ -25,7 +39,7 @@ export class PushLocalChangesUseCase {
         const updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent);
 
         if (updateBinary && updateBinary.length > 0) {
-            const compressedBinary = gzipSync(updateBinary);
+            const compressedBinary = await compressAsync(updateBinary); // ASYNC
             const encryptedBlob = await this.crypto.encrypt(compressedBinary, key);
 
             let encryptedPath = null;
@@ -40,7 +54,7 @@ export class PushLocalChangesUseCase {
 
     public async pushRawUpdate(documentId: string, updateBinary: Uint8Array, key: CryptoKey, path?: string | null): Promise<void> {
         if ((updateBinary && updateBinary.length > 0) || path) {
-            const compressedBinary = (updateBinary && updateBinary.length > 0) ? gzipSync(updateBinary) : new Uint8Array();
+            const compressedBinary = (updateBinary && updateBinary.length > 0) ? await compressAsync(updateBinary) : new Uint8Array();
             const encryptedBlob = await this.crypto.encrypt(compressedBinary, key);
 
             let encryptedPath = null;
@@ -60,13 +74,11 @@ export class PushLocalChangesUseCase {
         if (encryptedSnapshot && encryptedSnapshot.ciphertext) {
             try {
                 const decryptedSnapshot = await this.crypto.decrypt(encryptedSnapshot, key);
-                const decompressed = decompress(decryptedSnapshot);
-                // 🛡️ BEST PRACTICE: Filter empty payloads during compaction
+                const decompressed = await decompressAsync(decryptedSnapshot); // ASYNC
                 if (decompressed.length > 0) {
                     await this.crdtEngine.applyUpdates(documentId, [decompressed]);
                 }
             } catch (err) {
-                console.error('Decryption of snapshot failed during compaction:', err);
                 throw new Error('Failed to decrypt snapshot during compaction. Aborting.');
             }
         }
@@ -78,14 +90,11 @@ export class PushLocalChangesUseCase {
             for (const update of remoteUpdates) {
                 try {
                     const decrypted = await this.crypto.decrypt(update.encryptedUpdate, key);
-                    const decompressed = decompress(decrypted);
-                    
-                    // 🛡️ BEST PRACTICE: Filter empty payloads during compaction
+                    const decompressed = await decompressAsync(decrypted); // ASYNC
                     if (decompressed.length > 0) {
                         decryptedUpdates.push(decompressed);
                     }
                 } catch (err) {
-                    console.error(`Decryption of update ${update.id} failed during compaction:`, err);
                     throw new Error(`Failed to decrypt update ${update.id} during compaction. Aborting.`);
                 }
                 maxId = Math.max(maxId, update.id);
@@ -96,7 +105,7 @@ export class PushLocalChangesUseCase {
         }
 
         const fullStateUpdate = Y.encodeStateAsUpdate(doc);
-        const compressedNewState = gzipSync(fullStateUpdate);
+        const compressedNewState = await compressAsync(fullStateUpdate); // ASYNC
         const encryptedNewState = await this.crypto.encrypt(compressedNewState, key);
 
         let encryptedPath = null;

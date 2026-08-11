@@ -19,7 +19,6 @@ import (
 	"github.com/lib/pq"
 )
 
-// Config variables
 var (
 	port        string
 	dbConnStr   string
@@ -28,7 +27,6 @@ var (
 	db          *sql.DB
 )
 
-// Telemetry & Metrics Globals
 var (
 	startTime        = time.Now()
 	dataTransferred  uint64
@@ -51,19 +49,16 @@ type ServerTelemetry struct {
 	SystemHealth         string  `json:"systemHealth"`
 }
 
-// Upgrader allows cross-origin connections (Obsidian acts as a local origin)
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-// Client represents a single connected Obsidian app
 type Client struct {
 	conn          *websocket.Conn
 	subscriptions map[string]bool
 	mu            sync.RWMutex
 }
 
-// Global Hub to track all connected clients safely
 type Hub struct {
 	clients map[*Client]bool
 	mu      sync.RWMutex
@@ -73,13 +68,11 @@ var globalHub = Hub{
 	clients: make(map[*Client]bool),
 }
 
-// Incoming plugin message format: {"action": "subscribe", "filter": "document_id=eq.XYZ"}
 type SubscribeMessage struct {
 	Action string `json:"action"`
 	Filter string `json:"filter"`
 }
 
-// Postgres NOTIFY payload format
 type PgPayload struct {
 	Type   string `json:"type"`
 	Table  string `json:"table"`
@@ -89,7 +82,6 @@ type PgPayload struct {
 	} `json:"record"`
 }
 
-// Structs for payload mappings
 type UpdatePayload struct {
 	DocumentID      string  `json:"document_id"`
 	EncryptedUpdate string  `json:"encrypted_update"`
@@ -123,7 +115,6 @@ func startTelemetryTracker() {
 }
 
 func main() {
-	// 1. Load .env file
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, relying on system environment variables")
 	}
@@ -132,7 +123,6 @@ func main() {
 	dbConnStr = getEnv("DATABASE_URL", "postgres://postgres:your_password@localhost:5432/your_db?sslmode=disable")
 	adminAPIKey = getEnv("ADMIN_API_KEY", "super-secret-admin-token")
 
-	// 2. Setup Database Connection
 	var err error
 	db, err = sql.Open("postgres", dbConnStr)
 	if err != nil {
@@ -147,10 +137,8 @@ func main() {
 	}
 	log.Println("Database connection established successfully.")
 
-	// 3. Auto-Migrations
 	runMigrations()
 
-	// 4. Setup Postgres Listener for Realtime updates
 	listener := pq.NewListener(dbConnStr, 10*time.Second, time.Minute, func(ev pq.ListenerEventType, err error) {
 		if err != nil {
 			log.Println("Postgres listener error:", err)
@@ -163,20 +151,19 @@ func main() {
 	}
 	log.Printf("Connected to PostgreSQL. Listening on channel: %s\n", channel)
 
-	// 5. Start Background Routines
 	go handleDatabaseNotifications(listener)
 	go startTelemetryTracker()
 
-	// 6. Setup Unified REST & WebSocket ServeMux
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", handleWebSocket)
 	mux.HandleFunc("GET /api/telemetry", handleGetTelemetry)
+	mux.HandleFunc("GET /api/vault/manifest", handleGetManifest)
+	mux.HandleFunc("GET /api/vault/latest_ids", handleGetBulkLatestUpdateIDs) // NEW BULK ENDPOINT
 	mux.HandleFunc("GET /api/snapshots/{id}", handleGetSnapshot)
 	mux.HandleFunc("GET /api/snapshots/{id}/updates", handleGetUpdates)
 	mux.HandleFunc("GET /api/snapshots/{id}/latest_id", handleGetLatestUpdateID)
 	mux.HandleFunc("POST /api/updates", handlePostUpdate)
 	mux.HandleFunc("POST /api/snapshots/{id}/compact", handlePostCompact)
-	mux.HandleFunc("GET /api/vault/manifest", handleGetManifest)
 	mux.HandleFunc("DELETE /api/snapshots/{id}", handleDeleteSnapshot)
 	mux.HandleFunc("POST /api/admin/truncate", handlePostTruncate)
 
@@ -239,13 +226,11 @@ func runMigrations() {
 	}
 
 	for idx, query := range migrations {
-		log.Printf("Executing migration step %d...", idx+1)
 		_, err := db.Exec(query)
 		if err != nil {
 			log.Fatalf("Failed to execute migration step %d: %v", idx+1, err)
 		}
 	}
-	log.Println("All database migrations executed successfully.")
 }
 
 func hexToBytea(hexStr string) ([]byte, error) {
@@ -286,6 +271,30 @@ func handleGetTelemetry(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// BULK OPTIMIZATION
+func handleGetBulkLatestUpdateIDs(w http.ResponseWriter, r *http.Request) {
+	rows, err := db.Query("SELECT document_id, MAX(id) as max_id FROM vault_updates GROUP BY document_id")
+	if err != nil {
+		log.Printf("Error fetching bulk latest IDs: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	result := make(map[string]int)
+	for rows.Next() {
+		var docID string
+		var maxID int
+		if err := rows.Scan(&docID, &maxID); err != nil {
+			continue
+		}
+		result[docID] = maxID
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
 func handleGetSnapshot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -305,7 +314,6 @@ func handleGetSnapshot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Snapshot not found", http.StatusNotFound)
 		return
 	} else if err != nil {
-		log.Printf("Error fetching snapshot %s: %v", id, err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -350,7 +358,6 @@ func handleGetUpdates(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := db.Query("SELECT id, document_id, encrypted_update, created_at FROM vault_updates WHERE document_id = $1 AND id > $2 ORDER BY id ASC", id, since)
 	if err != nil {
-		log.Printf("Error fetching updates for %s: %v", id, err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -371,7 +378,6 @@ func handleGetUpdates(w http.ResponseWriter, r *http.Request) {
 		var createdAt time.Time
 
 		if err := rows.Scan(&uID, &docID, &encUpdate, &createdAt); err != nil {
-			log.Printf("Error scanning update row: %v", err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
@@ -404,7 +410,6 @@ func handleGetLatestUpdateID(w http.ResponseWriter, r *http.Request) {
 	if err == sql.ErrNoRows {
 		lastID = 0
 	} else if err != nil {
-		log.Printf("Error getting latest update ID for %s: %v", id, err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -417,11 +422,6 @@ func handlePostUpdate(w http.ResponseWriter, r *http.Request) {
 	var payload UpdatePayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	if payload.DocumentID == "" {
-		http.Error(w, "Missing document_id", http.StatusBadRequest)
 		return
 	}
 
@@ -440,7 +440,6 @@ func handlePostUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 1. Ensure vault_snapshots row exists, update path if provided
 	if len(pathBytes) > 0 {
 		_, err = db.Exec(`
 			INSERT INTO vault_snapshots (document_id, encrypted_state, encrypted_path, is_deleted, updated_at)
@@ -458,19 +457,16 @@ func handlePostUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		log.Printf("Error ensuring snapshot for %s: %v", payload.DocumentID, err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
-	// 2. Insert into vault_updates
 	_, err = db.Exec(`
 		INSERT INTO vault_updates (document_id, encrypted_update, created_at)
 		VALUES ($1, $2, NOW());
 	`, payload.DocumentID, updateBytes)
 
 	if err != nil {
-		log.Printf("Error pushing update for %s: %v", payload.DocumentID, err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
@@ -509,13 +505,11 @@ func handlePostCompact(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := db.Begin()
 	if err != nil {
-		log.Printf("Error starting transaction: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 	defer tx.Rollback()
 
-	// 1. Update snapshot
 	if len(pathBytes) > 0 {
 		_, err = tx.Exec(`
 			INSERT INTO vault_snapshots (document_id, encrypted_state, encrypted_path, is_deleted, updated_at)
@@ -538,21 +532,17 @@ func handlePostCompact(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		log.Printf("Error updating snapshot in transaction: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
-	// 2. Delete updates with id <= max_id
 	_, err = tx.Exec("DELETE FROM vault_updates WHERE document_id = $1 AND id <= $2", id, payload.PMaxID)
 	if err != nil {
-		log.Printf("Error deleting updates in transaction: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
 	if err := tx.Commit(); err != nil {
-		log.Printf("Error committing transaction: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
@@ -564,7 +554,6 @@ func handlePostCompact(w http.ResponseWriter, r *http.Request) {
 func handleGetManifest(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query("SELECT document_id, encrypted_path, is_deleted, updated_at FROM vault_snapshots")
 	if err != nil {
-		log.Printf("Error fetching manifest: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -585,7 +574,6 @@ func handleGetManifest(w http.ResponseWriter, r *http.Request) {
 		var updatedAt time.Time
 
 		if err := rows.Scan(&docID, &encPath, &isDeleted, &updatedAt); err != nil {
-			log.Printf("Error scanning manifest row: %v", err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
@@ -615,29 +603,23 @@ func handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := db.Begin()
 	if err != nil {
-		log.Printf("Error starting transaction: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 	defer tx.Rollback()
 
-	// Update vault_snapshots
 	_, err = tx.Exec("UPDATE vault_snapshots SET is_deleted = true, updated_at = NOW() WHERE document_id = $1", id)
 	if err != nil {
-		log.Printf("Error marking snapshot as deleted: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
-	// Delete updates
 	_, err = tx.Exec("DELETE FROM vault_updates WHERE document_id = $1", id)
 	if err != nil {
-		log.Printf("Error deleting updates for %s: %v", id, err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
-	// Notify clients of the deletion via pg_notify
 	_, err = tx.Exec(`
 		SELECT pg_notify('vault_updates_channel', json_build_object(
 			'type', 'DELETE',
@@ -645,12 +627,8 @@ func handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 			'record', json_build_object('document_id', $1::text, 'id', 0)
 		)::text);
 	`, id)
-	if err != nil {
-		log.Printf("Error notifying deletion for %s: %v", id, err)
-	}
 
 	if err := tx.Commit(); err != nil {
-		log.Printf("Error committing delete transaction: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
@@ -670,7 +648,6 @@ func handlePostTruncate(w http.ResponseWriter, r *http.Request) {
 
 	_, err := db.Exec("TRUNCATE TABLE vault_updates, vault_snapshots CASCADE;")
 	if err != nil {
-		log.Printf("Error truncating tables: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
@@ -682,7 +659,6 @@ func handlePostTruncate(w http.ResponseWriter, r *http.Request) {
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("Upgrade error:", err)
 		return
 	}
 
@@ -691,7 +667,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		subscriptions: make(map[string]bool),
 	}
 
-	// Register client & increment telemetry WS count
 	globalHub.mu.Lock()
 	globalHub.clients[client] = true
 	globalHub.mu.Unlock()
@@ -709,7 +684,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	filterRegex := regexp.MustCompile(`document_id=eq\.(.+)`)
 
-	// Listen for incoming messages from the plugin
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
@@ -741,7 +715,6 @@ func handleDatabaseNotifications(l *pq.Listener) {
 
 			var payload PgPayload
 			if err := json.Unmarshal([]byte(notification.Extra), &payload); err != nil {
-				log.Println("Error parsing PG notification:", err)
 				continue
 			}
 
@@ -750,7 +723,6 @@ func handleDatabaseNotifications(l *pq.Listener) {
 				continue
 			}
 
-			// Broadcast to interested clients
 			globalHub.mu.RLock()
 			for client := range globalHub.clients {
 				client.mu.RLock()
@@ -758,7 +730,6 @@ func handleDatabaseNotifications(l *pq.Listener) {
 				client.mu.RUnlock()
 
 				if isSubscribed {
-					// Send raw JSON string directly to client
 					client.conn.WriteMessage(websocket.TextMessage, []byte(notification.Extra))
 				}
 			}

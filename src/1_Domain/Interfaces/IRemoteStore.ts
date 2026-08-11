@@ -3,7 +3,7 @@ import { CRDTUpdate } from '../Entities/Models';
 
 export interface RemoteManifestItem {
     document_id: string;
-    encrypted_path?: string; // hex string prefixed with \x
+    encrypted_path?: string;
     is_deleted: boolean;
     updated_at: string;
 }
@@ -21,6 +21,7 @@ export interface ServerTelemetry {
 
 export interface IRemoteStore {
     getLatestUpdateId(documentId: string): Promise<number>;
+    getBulkLatestUpdateIds(): Promise<Record<string, number>>; // NEW BULK METHOD
     fetchSnapshot(documentId: string): Promise<EncryptedBlob | null>;
     fetchUpdatesSince(documentId: string, lastId: number): Promise<CRDTUpdate[]>;
     pushUpdate(documentId: string, update: EncryptedBlob, encryptedPath?: EncryptedBlob | null): Promise<void>;
@@ -31,7 +32,6 @@ export interface IRemoteStore {
     testConnection(): Promise<boolean>;
     fetchTelemetry(): Promise<ServerTelemetry | null>;
     
-    // Realtime WebSocket support
     connectWebSocket(wssUrl: string): void;
     subscribeToUpdates(documentId: string, onUpdateDetected: () => void): () => void;
     disconnect(): void;

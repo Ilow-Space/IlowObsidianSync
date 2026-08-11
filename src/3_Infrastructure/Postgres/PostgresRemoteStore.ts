@@ -18,6 +18,26 @@ export class PostgresRemoteStore implements IRemoteStore {
         };
     }
 
+    // NEW BULK FETCH IMPLEMENTATION
+    public async getBulkLatestUpdateIds(): Promise<Record<string, number>> {
+        try {
+            const url = `${this.serverUrl}/api/vault/latest_ids`;
+            const res = await requestUrl({
+                url: url,
+                method: 'GET',
+                headers: this.headers,
+                throw: false
+            });
+
+            if (res.status >= 200 && res.status < 300) {
+                return res.json || {};
+            }
+            return {};
+        } catch (err) {
+            return {};
+        }
+    }
+
     public connectWebSocket(wssUrl: string) {
         try {
             this.socket = new WebSocket(wssUrl);
@@ -48,9 +68,7 @@ export class PostgresRemoteStore implements IRemoteStore {
                             callbacks.forEach(cb => cb());
                         }
                     }
-                } catch (err) {
-                    // Ignore non-JSON socket frame errors
-                }
+                } catch (err) {}
             };
 
             this.socket.onerror = (err) => {
@@ -58,7 +76,6 @@ export class PostgresRemoteStore implements IRemoteStore {
             };
 
             this.socket.onclose = () => {
-                console.log('WebSocket disconnected. Attempting to reconnect in 3 seconds...');
                 setTimeout(() => {
                     this.connectWebSocket(wssUrl);
                 }, 3000);

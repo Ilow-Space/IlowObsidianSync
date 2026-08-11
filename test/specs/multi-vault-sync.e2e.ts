@@ -98,6 +98,11 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD) {
         }
         const pluginId = Object.keys(app.plugins.plugins)[0];
         const plugin = app.plugins.plugins[pluginId];
+        if (!plugin) return;
+        
+        // E2E OVERRIDE: Speed up debounce timers massively
+        plugin.settings.syncDebounceMs = 100;
+        
         if (plugin?.deriveKeyFromPassword) {
             await plugin.deriveKeyFromPassword(pass);
         }
