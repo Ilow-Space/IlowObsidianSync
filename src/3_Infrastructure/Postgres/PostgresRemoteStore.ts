@@ -56,6 +56,13 @@ export class PostgresRemoteStore implements IRemoteStore {
             this.socket.onerror = (err) => {
                 console.warn('Postgres realtime WebSocket error:', err);
             };
+
+            this.socket.onclose = () => {
+                console.log('WebSocket disconnected. Attempting to reconnect in 3 seconds...');
+                setTimeout(() => {
+                    this.connectWebSocket(wssUrl);
+                }, 3000);
+            };
         } catch (err) {
             console.warn('Failed to establish realtime WebSocket connection:', err);
         }

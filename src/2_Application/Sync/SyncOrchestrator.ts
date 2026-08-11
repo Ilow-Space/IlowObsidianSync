@@ -335,10 +335,12 @@ export class SyncOrchestrator {
                     return; 
                 }
             } catch (err: unknown) {
-                // Suppress pre-flight warning trace when server is unreachable
+                // Flag the error and abort the pull gracefully
+                this.hasConnectionError = true;
+                this.lastErrorMessage = 'Connection failed';
+                return; 
             }
         }
-
         const taskName = path || 'System Index';
         if (!isSilent) this.addActiveTask(taskName);
 

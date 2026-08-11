@@ -1,4 +1,5 @@
 ﻿
+/// <reference types="vitest" />
 import { defineConfig } from 'vite';
 import path from 'path';
 
@@ -10,6 +11,12 @@ export default defineConfig(({ mode }) => {
       postcss: {
         plugins: [],
       },
+    },
+
+    test: {
+      environment: 'jsdom',
+      setupFiles: ['./tests/setup.ts'],
+      globals: true,
     },
 
     build: {
@@ -54,6 +61,7 @@ export default defineConfig(({ mode }) => {
         '@application': path.resolve(__dirname, 'src/2_Application'),
         '@infrastructure': path.resolve(__dirname, 'src/3_Infrastructure'),
         '@presentation': path.resolve(__dirname, 'src/4_Presentation'),
+        'obsidian': path.resolve(__dirname, 'tests/setup.ts') // Add this alias
       },
     },
   };
