@@ -73,10 +73,12 @@ export class TreeIndexManager {
         this.isReconciling = true;
         
         try {
-            // Deduplicate concurrent same-path offline creations
+            // FIX: Array.from() prevents Y.Map iterator mutation skipping
+            const dedupeEntries = Array.from(this.treeMap.entries());
             const seenPaths = new Set<string>();
+            
             await this.applyAndPushIndexTransaction(() => {
-                for (const [uuid, node] of this.treeMap.entries()) {
+                for (const [uuid, node] of dedupeEntries) {
                     if (node.isDeleted) continue;
                     
                     if (seenPaths.has(node.path)) {
@@ -101,15 +103,12 @@ export class TreeIndexManager {
 
             this.rebuildReverseLookup();
 
-            // Structure elements into a depth-sorted execution plan
             const entries = Array.from(this.treeMap.entries());
             
-            // Deletes must process deepest files first to avoid trashing a parent prematurely
             const toDelete = entries
                 .filter(e => e[1].isDeleted)
                 .sort((a, b) => b[1].path.split('/').length - a[1].path.split('/').length);
                 
-            // Creates and Renames must process shallowest (parent folders) first
             const toKeep = entries
                 .filter(e => !e[1].isDeleted)
                 .sort((a, b) => a[1].path.split('/').length - b[1].path.split('/').length);
@@ -142,19 +141,14 @@ export class TreeIndexManager {
                         if (node.type === 'folder') {
                             await this.ensureFolderExists(node.path, true);
                         } else if (node.type === 'file') {
-                            // RESTORED: We must ensure the parent directory tree exists 
-                            // so the file has a place to go when SyncOrchestrator pulls it!
                             await this.ensureFolderExists(node.path, false);
-                            
-                            // We deliberately do NOT create empty files here anymore.
-                            // SyncOrchestrator will catch missing files and safely reconstruct them atomically.
                         }
                     }
                 }
                 this.uuidToLastKnownPath.set(uuid, node.path);
             }
 
-            // Phase 3: Scan for untracked local files/folders
+            // Phase 3: Scan for untracked
             const allFiles = this.app.vault.getAllLoadedFiles();
             await this.applyAndPushIndexTransaction(() => {
                 for (const file of allFiles) {
@@ -222,37 +216,52 @@ export class TreeIndexManager {
         if (this.isReconciling) return;
 
         const targetUuid = this.pathToUuid.get(oldPath);
-        if (!targetUuid) return; 
-
-        let finalNewPath = newPath;
         
-        const isPathTaken = (p: string) => {
-            for (const [uuid, node] of this.treeMap.entries()) {
-                if (uuid === targetUuid) continue; 
-                if (node.path === p && !node.isDeleted) return true;
-            }
-            return false;
-        };
-
-        if (isPathTaken(finalNewPath)) {
-            let collisionCount = 1;
-            const extMatch = newPath.match(/(\.[^.]+)$/);
-            const ext = extMatch ? extMatch[0] : '';
-            const base = extMatch ? newPath.slice(0, -ext.length) : newPath;
-            
-            do {
-                finalNewPath = `${base} (${collisionCount})${ext}`;
-                collisionCount++;
-            } while (isPathTaken(finalNewPath));
-            
-            const file = this.app.vault.getAbstractFileByPath(newPath);
-            if (file) {
-                try { await this.app.fileManager.renameFile(file, finalNewPath); } catch (e) {}
+        // FIX: Ensure cascades happen even if the parent folder isn't explicitly tracked
+        let hasChildren = false;
+        for (const [, node] of this.treeMap.entries()) {
+            if (!node.isDeleted && node.path.startsWith(oldPath + '/')) {
+                hasChildren = true;
+                break;
             }
         }
 
+        if (!targetUuid && !hasChildren) return; 
+
+        let finalNewPath = newPath;
+        
+        if (targetUuid) {
+            const isPathTaken = (p: string) => {
+                for (const [uuid, node] of this.treeMap.entries()) {
+                    if (uuid === targetUuid) continue; 
+                    if (node.path === p && !node.isDeleted) return true;
+                }
+                return false;
+            };
+
+            if (isPathTaken(finalNewPath)) {
+                let collisionCount = 1;
+                const extMatch = newPath.match(/(\.[^.]+)$/);
+                const ext = extMatch ? extMatch[0] : '';
+                const base = extMatch ? newPath.slice(0, -ext.length) : newPath;
+                
+                do {
+                    finalNewPath = `${base} (${collisionCount})${ext}`;
+                    collisionCount++;
+                } while (isPathTaken(finalNewPath));
+                
+                const file = this.app.vault.getAbstractFileByPath(newPath);
+                if (file) {
+                    try { await this.app.fileManager.renameFile(file, finalNewPath); } catch (e) {}
+                }
+            }
+        }
+
+        // FIX: Array.from() snapshot prevents mutation skipping
+        const entries = Array.from(this.treeMap.entries());
+
         await this.applyAndPushIndexTransaction(() => {
-            for (const [uuid, node] of this.treeMap.entries()) {
+            for (const [uuid, node] of entries) {
                 if (node.isDeleted) continue;
 
                 if (node.path === oldPath) {
@@ -273,9 +282,11 @@ export class TreeIndexManager {
         if (this.isReconciling) return;
 
         const purgedUuids: string[] = [];
+        // FIX: Array.from() snapshot prevents mutation skipping
+        const entries = Array.from(this.treeMap.entries());
 
         await this.applyAndPushIndexTransaction(() => {
-            for (const [uuid, node] of this.treeMap.entries()) {
+            for (const [uuid, node] of entries) {
                 if (node.isDeleted) continue;
 
                 if (node.path === path || node.path.startsWith(path + '/')) {

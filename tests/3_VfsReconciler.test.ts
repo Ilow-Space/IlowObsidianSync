@@ -7,8 +7,6 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     let engineMock: any;
     let syncMock: any;
     let manager: TreeIndexManager;
-    
-    // Use a real Yjs document instead of a mock so Y.encodeStateAsUpdate works natively
     let testDoc: Y.Doc;
     let testMap: Y.Map<any>;
 
@@ -31,7 +29,6 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
         };
 
         engineMock = {
-            // Hand the real CRDT document to the manager
             getOrCreateDoc: vi.fn().mockResolvedValue(testDoc),
             localStore: { saveDocumentState: vi.fn() }
         };
@@ -304,6 +301,40 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
         await manager.reconcileFilesystem();
 
         expect(order[0]).toBe('OldFolder');
+    });
+
+    it('Misalignment 14: Y.Map Iteration Mutation skips cascaded child file updates', async () => {
+        await manager.initialize();
+        
+        // Setup a folder with multiple children
+        testMap.set('uuid-parent', { type: 'folder', path: 'BatchFolder', isDeleted: false });
+        testMap.set('uuid-c1', { type: 'file', path: 'BatchFolder/F1.md', isDeleted: false });
+        testMap.set('uuid-c2', { type: 'file', path: 'BatchFolder/F2.md', isDeleted: false });
+        testMap.set('uuid-c3', { type: 'file', path: 'BatchFolder/F3.md', isDeleted: false });
+        (manager as any).rebuildReverseLookup();
+
+        // Rename the parent folder
+        await manager.handleRename('BatchFolder', 'RenamedFolder');
+
+        // Verify ALL children were successfully updated in the CRDT (none were skipped by a mutated iterator)
+        expect((testMap.get('uuid-c1') as any).path).toBe('RenamedFolder/F1.md');
+        expect((testMap.get('uuid-c2') as any).path).toBe('RenamedFolder/F2.md');
+        expect((testMap.get('uuid-c3') as any).path).toBe('RenamedFolder/F3.md');
+    });
+
+    it('Misalignment 15: Untracked Parent Folder Cascade', async () => {
+        await manager.initialize();
+        
+        // The children are tracked, but the parent folder UUID is missing
+        testMap.set('uuid-orphan1', { type: 'file', path: 'UntrackedParent/1.md', isDeleted: false });
+        testMap.set('uuid-orphan2', { type: 'file', path: 'UntrackedParent/2.md', isDeleted: false });
+        (manager as any).rebuildReverseLookup();
+
+        await manager.handleRename('UntrackedParent', 'NewParent');
+
+        // Even though 'UntrackedParent' isn't in pathToUuid, it should still successfully cascade to the children
+        expect((testMap.get('uuid-orphan1') as any).path).toBe('NewParent/1.md');
+        expect((testMap.get('uuid-orphan2') as any).path).toBe('NewParent/2.md');
     });
 
     // -------------------------------------------------------------------------

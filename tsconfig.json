@@ -1,5 +1,4 @@
-﻿
-{
+﻿{
   "compilerOptions": {
     "target": "ES2020",
     "module": "ESNext",
@@ -11,7 +10,12 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "baseUrl": ".",
-    "ignoreDeprecations": "6.0",
+    "types": [
+      "node",
+      "@wdio/globals/types",
+      "@wdio/mocha-framework",
+      "wdio-obsidian-service"
+    ],
     "paths": {
       "@domain/*": ["src/1_Domain/*"],
       "@application/*": ["src/2_Application/*"],
@@ -19,5 +23,5 @@
       "@presentation/*": ["src/4_Presentation/*"]
     }
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*", "test/**/*", "wdio.conf.mts"]
 }
