@@ -14,6 +14,9 @@ export class TreeIndexManager {
     private treeMap!: Y.Map<VaultNode>;
     private doc!: Y.Doc;
     private pathToUuid = new Map<string, string>();
+    private uuidToLastKnownPath = new Map<string, string>();
+    
+    private isReconciling = false;
 
     constructor(
         private app: App,
@@ -24,6 +27,12 @@ export class TreeIndexManager {
     public async initialize(): Promise<void> {
         this.doc = await this.crdtEngine.getOrCreateDoc(this.INDEX_DOC_ID);
         this.treeMap = this.doc.getMap<VaultNode>('vault-tree');
+
+        for (const [uuid, node] of this.treeMap.entries()) {
+            if (!node.isDeleted) {
+                this.uuidToLastKnownPath.set(uuid, node.path);
+            }
+        }
 
         this.rebuildReverseLookup();
 
@@ -43,10 +52,6 @@ export class TreeIndexManager {
         }
     }
 
-    /**
-     * Executes a transaction on the index document, capturing the Yjs update delta,
-     * saving it to local storage, and pushing it to the remote server.
-     */
     private async applyAndPushIndexTransaction(transaction: () => void): Promise<void> {
         let update: Uint8Array | null = null;
         
@@ -55,60 +60,118 @@ export class TreeIndexManager {
         
         this.doc.transact(transaction);
         
-        // Type assertion informs TypeScript that the closure mutated 'update'
         const payload = update as Uint8Array | null;
         if (payload && payload.length > 0) {
-            // 1. Persist new VFS state locally
             const state = Y.encodeStateAsUpdate(this.doc);
             await this.crdtEngine.localStore.saveDocumentState(this.INDEX_DOC_ID, state);
-            
-            // 2. Push structural changes to the server
             await this.syncOrchestrator.pushDocumentUpdate(this.INDEX_DOC_ID, payload, null);
         }
     }
 
     public async reconcileFilesystem(): Promise<void> {
-        // 1. Enforce remote state onto local filesystem
-        for (const [uuid, node] of this.treeMap.entries()) {
-            const localFile = this.app.vault.getAbstractFileByPath(node.path);
-
-            if (node.isDeleted) {
-                if (localFile && !this.pathToUuid.has(node.path)) {
-                    try { 
-                        await this.app.vault.trash(localFile, true); 
-                    } catch (e) {
-                        console.warn(`Failed to move ${localFile.path} to system trash. Attempting local vault trash.`, e);
-                        try { await this.app.vault.trash(localFile, false); } catch(e2) {}
-                    }
-                }
-            } else {
-                if (node.type === 'folder') {
-                    if (!localFile) await this.ensureFolderExists(node.path, true);
-                } else if (node.type === 'file') {
-                    if (!localFile) {
-                        await this.ensureFolderExists(node.path, false);
-                        await this.app.vault.create(node.path, '');
-                        this.syncOrchestrator.pullDocument(uuid, node.path, true).catch(() => {});
-                    }
-                }
-            }
-        }
-
-        // 2. Scan for untracked local files/folders
-        const allFiles = this.app.vault.getAllLoadedFiles();
+        if (this.isReconciling) return;
+        this.isReconciling = true;
         
-        await this.applyAndPushIndexTransaction(() => {
-            for (const file of allFiles) {
-                if (file.path === '/' || file.path.startsWith('.')) continue; 
+        try {
+            // Deduplicate concurrent same-path offline creations
+            const seenPaths = new Set<string>();
+            await this.applyAndPushIndexTransaction(() => {
+                for (const [uuid, node] of this.treeMap.entries()) {
+                    if (node.isDeleted) continue;
+                    
+                    if (seenPaths.has(node.path)) {
+                        let collisionCount = 1;
+                        let newPath = '';
+                        const extMatch = node.path.match(/(\.[^.]+)$/);
+                        const ext = extMatch ? extMatch[0] : '';
+                        const base = extMatch ? node.path.slice(0, -ext.length) : node.path;
+                        
+                        do {
+                            newPath = `${base} (Conflict ${collisionCount})${ext}`;
+                            collisionCount++;
+                        } while (seenPaths.has(newPath));
+                        
+                        this.treeMap.set(uuid, { ...node, path: newPath });
+                        seenPaths.add(newPath);
+                    } else {
+                        seenPaths.add(node.path);
+                    }
+                }
+            });
+
+            this.rebuildReverseLookup();
+
+            // Structure elements into a depth-sorted execution plan
+            const entries = Array.from(this.treeMap.entries());
+            
+            // Deletes must process deepest files first to avoid trashing a parent prematurely
+            const toDelete = entries
+                .filter(e => e[1].isDeleted)
+                .sort((a, b) => b[1].path.split('/').length - a[1].path.split('/').length);
                 
-                if (!this.pathToUuid.has(file.path)) {
-                    const type = file instanceof TFolder ? 'folder' : 'file';
-                    const uuid = window.crypto.randomUUID();
-                    this.treeMap.set(uuid, { type, path: file.path, isDeleted: false });
-                    this.pathToUuid.set(file.path, uuid);
+            // Creates and Renames must process shallowest (parent folders) first
+            const toKeep = entries
+                .filter(e => !e[1].isDeleted)
+                .sort((a, b) => a[1].path.split('/').length - b[1].path.split('/').length);
+
+            // Phase 1: Deletions
+            for (const [uuid, node] of toDelete) {
+                const localFile = this.app.vault.getAbstractFileByPath(node.path);
+                this.uuidToLastKnownPath.delete(uuid);
+                if (localFile && !this.pathToUuid.has(node.path)) {
+                    try { await this.app.vault.trash(localFile, true); } 
+                    catch (e) { try { await this.app.vault.trash(localFile, false); } catch(e2) {} }
                 }
             }
-        });
+
+            // Phase 2: Creations & Renames
+            for (const [uuid, node] of toKeep) {
+                const localFile = this.app.vault.getAbstractFileByPath(node.path);
+                if (!localFile) {
+                    const lastKnownPath = this.uuidToLastKnownPath.get(uuid);
+                    const oldLocalFile = lastKnownPath ? this.app.vault.getAbstractFileByPath(lastKnownPath) : null;
+
+                    if (oldLocalFile) {
+                        await this.ensureFolderExists(node.path, false);
+                        try {
+                            await this.app.fileManager.renameFile(oldLocalFile, node.path);
+                        } catch (e) {
+                            console.warn(`Failed to move local file from ${lastKnownPath} to ${node.path}:`, e);
+                        }
+                    } else {
+                        if (node.type === 'folder') {
+                            await this.ensureFolderExists(node.path, true);
+                        } else if (node.type === 'file') {
+                            // RESTORED: We must ensure the parent directory tree exists 
+                            // so the file has a place to go when SyncOrchestrator pulls it!
+                            await this.ensureFolderExists(node.path, false);
+                            
+                            // We deliberately do NOT create empty files here anymore.
+                            // SyncOrchestrator will catch missing files and safely reconstruct them atomically.
+                        }
+                    }
+                }
+                this.uuidToLastKnownPath.set(uuid, node.path);
+            }
+
+            // Phase 3: Scan for untracked local files/folders
+            const allFiles = this.app.vault.getAllLoadedFiles();
+            await this.applyAndPushIndexTransaction(() => {
+                for (const file of allFiles) {
+                    if (file.path === '/' || file.path.startsWith('.')) continue; 
+                    
+                    if (!this.pathToUuid.has(file.path)) {
+                        const type = file instanceof TFolder ? 'folder' : 'file';
+                        const uuid = window.crypto.randomUUID() as string;
+                        this.treeMap.set(uuid, { type, path: file.path, isDeleted: false });
+                        this.pathToUuid.set(file.path, uuid);
+                        this.uuidToLastKnownPath.set(uuid, file.path);
+                    }
+                }
+            });
+        } finally {
+            this.isReconciling = false;
+        }
     }
 
     private async ensureFolderExists(path: string, isFolderItself: boolean): Promise<void> {
@@ -126,10 +189,19 @@ export class TreeIndexManager {
     }
 
     public async handleCreate(file: TAbstractFile): Promise<void> {
+        if (this.isReconciling) return;
+        
         if (file.path.startsWith('.') || file.path === '/') return;
         if (this.pathToUuid.has(file.path)) return;
 
-        const uuid = window.crypto.randomUUID();
+        let uuid: string = window.crypto.randomUUID() as string;
+        for (const [existingUuid, node] of this.treeMap.entries()) {
+            if (node.path === file.path && node.isDeleted) {
+                uuid = existingUuid;
+                break;
+            }
+        }
+
         const type = file instanceof TFolder ? 'folder' : 'file';
 
         await this.applyAndPushIndexTransaction(() => {
@@ -137,6 +209,7 @@ export class TreeIndexManager {
         });
         
         this.pathToUuid.set(file.path, uuid);
+        this.uuidToLastKnownPath.set(uuid, file.path);
         
         if (type === 'file' && file instanceof TFile) {
             const content = await this.app.vault.read(file);
@@ -146,15 +219,49 @@ export class TreeIndexManager {
     }
 
     public async handleRename(oldPath: string, newPath: string): Promise<void> {
+        if (this.isReconciling) return;
+
+        const targetUuid = this.pathToUuid.get(oldPath);
+        if (!targetUuid) return; 
+
+        let finalNewPath = newPath;
+        
+        const isPathTaken = (p: string) => {
+            for (const [uuid, node] of this.treeMap.entries()) {
+                if (uuid === targetUuid) continue; 
+                if (node.path === p && !node.isDeleted) return true;
+            }
+            return false;
+        };
+
+        if (isPathTaken(finalNewPath)) {
+            let collisionCount = 1;
+            const extMatch = newPath.match(/(\.[^.]+)$/);
+            const ext = extMatch ? extMatch[0] : '';
+            const base = extMatch ? newPath.slice(0, -ext.length) : newPath;
+            
+            do {
+                finalNewPath = `${base} (${collisionCount})${ext}`;
+                collisionCount++;
+            } while (isPathTaken(finalNewPath));
+            
+            const file = this.app.vault.getAbstractFileByPath(newPath);
+            if (file) {
+                try { await this.app.fileManager.renameFile(file, finalNewPath); } catch (e) {}
+            }
+        }
+
         await this.applyAndPushIndexTransaction(() => {
             for (const [uuid, node] of this.treeMap.entries()) {
                 if (node.isDeleted) continue;
 
                 if (node.path === oldPath) {
-                    this.treeMap.set(uuid, { ...node, path: newPath });
+                    this.treeMap.set(uuid, { ...node, path: finalNewPath });
+                    this.uuidToLastKnownPath.set(uuid, finalNewPath); 
                 } else if (node.path.startsWith(oldPath + '/')) {
-                    const updatedPath = node.path.replace(oldPath, newPath);
+                    const updatedPath = node.path.replace(oldPath, finalNewPath);
                     this.treeMap.set(uuid, { ...node, path: updatedPath });
+                    this.uuidToLastKnownPath.set(uuid, updatedPath); 
                 }
             }
         });
@@ -163,17 +270,29 @@ export class TreeIndexManager {
     }
 
     public async handleDelete(path: string): Promise<void> {
+        if (this.isReconciling) return;
+
+        const purgedUuids: string[] = [];
+
         await this.applyAndPushIndexTransaction(() => {
             for (const [uuid, node] of this.treeMap.entries()) {
                 if (node.isDeleted) continue;
 
                 if (node.path === path || node.path.startsWith(path + '/')) {
                     this.treeMap.set(uuid, { ...node, isDeleted: true });
+                    this.uuidToLastKnownPath.delete(uuid); 
+                    purgedUuids.push(uuid);
                 }
             }
         });
 
         this.rebuildReverseLookup();
+
+        for (const uuid of purgedUuids) {
+            if ((this.syncOrchestrator as any).deleteRemoteSnapshot) {
+                (this.syncOrchestrator as any).deleteRemoteSnapshot(uuid).catch(() => {});
+            }
+        }
     }
 
     public getUuidForPath(path: string): string | undefined {

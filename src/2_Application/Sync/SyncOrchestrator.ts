@@ -418,4 +418,15 @@ export class SyncOrchestrator {
     public releaseRemoteLock() {
         this.isApplyingRemoteChanges = false;
     }
+    public async deleteRemoteSnapshot(documentId: string): Promise<void> {
+        if (!this.activeKey) return;
+        
+        try {
+            await this.remoteStore.deleteSnapshot(documentId);
+            // Optionally, also purge local IndexedDB state to stay tidy
+            await this.crdtEngine.localStore.deleteDocumentState(documentId);
+        } catch (err: unknown) {
+            console.error(`Failed to physically purge database for ${documentId}:`, err);
+        }
+    }
 }
