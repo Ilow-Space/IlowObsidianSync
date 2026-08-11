@@ -9,10 +9,8 @@ const MASTER_PASSWORD = '1';
 const vaultAPath = path.join(process.cwd(), 'test', 'vaults', 'vaultA').replace(/\\/g, '/');
 const vaultBPath = path.join(process.cwd(), 'test', 'vaults', 'vaultB').replace(/\\/g, '/');
 
-// --- HELPERS ---
-
 async function hardResetDatabase() {
-    const result = await browser.executeAsync(async (url, token, done) => {
+    await browser.executeAsync(async (url, token, done) => {
         try {
             const res = await fetch(`${url}/api/admin/truncate`, {
                 method: 'POST',
@@ -26,7 +24,6 @@ async function hardResetDatabase() {
             done({ error: String(e) });
         }
     }, BACKEND_URL, ADMIN_TOKEN);
-    console.log('\n--- [DB RESET RESULT] ---', result, '\n');
 }
 
 function wipeVaultDiskFiles(vPath: string) {
@@ -65,6 +62,7 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD) {
         });
     }, { timeout: 30000, timeoutMsg: 'Plugin failed to initialize in memory.' });
 
+    // Patch console.log to capture background sync logs
     await browser.execute(() => {
         if ((window as any).__logsAttached) return;
         (window as any).__logsAttached = true;
@@ -86,6 +84,10 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD) {
         }
         const pluginId = Object.keys(app.plugins.plugins)[0];
         const plugin = app.plugins.plugins[pluginId];
+        if (!plugin) return;
+
+        plugin.settings.syncDebounceMs = 100;
+
         if (plugin?.deriveKeyFromPassword) {
             await plugin.deriveKeyFromPassword(pass);
         }
@@ -99,14 +101,20 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD) {
     }, { timeout: 15000, timeoutMsg: 'Plugin failed to complete initial background sync.' });
 }
 
-// --- REALTIME SYNC TEST SUITE ---
-
 describe('Strict Real-Time CRDT Convergence', () => {
 
     beforeEach(async () => {
         await hardResetDatabase();
         wipeVaultDiskFiles(vaultAPath);
         wipeVaultDiskFiles(vaultBPath);
+
+        // Clear local IndexedDB cache between test runs
+        await browser.executeAsync((done) => {
+            const req = indexedDB.deleteDatabase('obsidian-crdt-sync-db');
+            req.onsuccess = () => done(true);
+            req.onerror = () => done(false);
+            req.onblocked = () => done(false);
+        });
     });
 
     afterEach(async function () {
@@ -122,39 +130,34 @@ describe('Strict Real-Time CRDT Convergence', () => {
                 }
             } catch (e) {}
         });
-        
-        await browser.pause(500); 
+
+        await browser.pause(500);
     });
 
     it('Converges concurrent modifications safely without overwriting data', async () => {
-        // Step 1: Establish baseline on Vault A
         await browser.reloadObsidian({ vault: vaultAPath });
         await ensurePluginUnlocked();
         await browser.execute(async () => {
             await (window as any).app.vault.create('LiveSync.md', 'Base Document\n');
         });
-        await browser.pause(2500);
+        await browser.pause(800);
 
-        // Step 2: Establish baseline on Vault B
         await browser.reloadObsidian({ vault: vaultBPath });
         await ensurePluginUnlocked();
         await browser.waitUntil(async () => {
             return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('LiveSync.md') !== null);
         }, { timeout: 25000 });
 
-        // Step 3: Vault B modifies the end of the file
         await browser.execute(async () => {
             const app = (window as any).app;
             const file = app.vault.getAbstractFileByPath('LiveSync.md');
             await app.vault.modify(file, 'Base Document\nAppended by Vault B');
         });
-        await browser.pause(2500);
+        await browser.pause(800);
 
-        // Step 4: Vault A simultaneously modifies the start of the file
         await browser.reloadObsidian({ vault: vaultAPath });
         await ensurePluginUnlocked();
         
-        // Ensure A has received B's change, then A modifies the start
         await browser.waitUntil(async () => {
             return await browser.execute(async () => {
                 const file = (window as any).app.vault.getAbstractFileByPath('LiveSync.md');
@@ -169,9 +172,8 @@ describe('Strict Real-Time CRDT Convergence', () => {
             const current = await app.vault.read(file);
             await app.vault.modify(file, 'Prepended by Vault A\n' + current);
         });
-        await browser.pause(2500);
+        await browser.pause(800);
 
-        // Step 5: Verify Vault B converges to the exact same text
         await browser.reloadObsidian({ vault: vaultBPath });
         await ensurePluginUnlocked();
         
@@ -188,7 +190,6 @@ describe('Strict Real-Time CRDT Convergence', () => {
             return await (window as any).app.vault.read(file);
         });
 
-        // The CRDT must perfectly weave both edits together
         expect(finalContent).toBe('Prepended by Vault A\nBase Document\nAppended by Vault B');
     });
 
@@ -196,11 +197,10 @@ describe('Strict Real-Time CRDT Convergence', () => {
         await browser.reloadObsidian({ vault: vaultAPath });
         await ensurePluginUnlocked();
         
-        // Vault A creates a list
         await browser.execute(async () => {
             await (window as any).app.vault.create('RapidTyping.md', '- Item 1\n');
         });
-        await browser.pause(2500);
+        await browser.pause(800);
 
         await browser.reloadObsidian({ vault: vaultBPath });
         await ensurePluginUnlocked();
@@ -208,7 +208,6 @@ describe('Strict Real-Time CRDT Convergence', () => {
             return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('RapidTyping.md') !== null);
         }, { timeout: 25000 });
 
-        // Vault B types rapidly
         await browser.execute(async () => {
             const app = (window as any).app;
             const file = app.vault.getAbstractFileByPath('RapidTyping.md');
@@ -218,9 +217,8 @@ describe('Strict Real-Time CRDT Convergence', () => {
             content += '- Item 3\n';
             await app.vault.modify(file, content);
         });
-        await browser.pause(2500);
+        await browser.pause(800);
 
-        // Verify Vault A receives the fully structured rapid input
         await browser.reloadObsidian({ vault: vaultAPath });
         await ensurePluginUnlocked();
         
@@ -238,5 +236,60 @@ describe('Strict Real-Time CRDT Convergence', () => {
         });
 
         expect(finalContent).toBe('- Item 1\n- Item 2\n- Item 3\n');
+    });
+
+    it('Propagates file edits in real-time and measures propagation latency', async () => {
+        await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked();
+
+        await browser.execute(async () => {
+            await (window as any).app.vault.create('LatencyTest.md', 'Initial Content');
+        });
+        await browser.pause(500);
+
+        await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked();
+
+        await browser.waitUntil(async () => {
+            return await browser.execute(() => {
+                return (window as any).app.vault.getAbstractFileByPath('LatencyTest.md') !== null;
+            });
+        }, { timeout: 25000 });
+
+        await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked();
+
+        const updatedText = 'Initial Content\n[REALTIME EDIT PROPAGATION TEST PASS]';
+        const startTime = Date.now();
+
+        await browser.execute(async (text) => {
+            const app = (window as any).app;
+            const file = app.vault.getAbstractFileByPath('LatencyTest.md');
+            await app.vault.modify(file, text);
+        }, updatedText);
+
+        await browser.pause(500);
+
+        await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked();
+
+        await browser.waitUntil(async () => {
+            return await browser.execute(async (expected) => {
+                const app = (window as any).app;
+                const file = app.vault.getAbstractFileByPath('LatencyTest.md');
+                if (!file) return false;
+                const content = await app.vault.read(file);
+                return content === expected;
+            }, updatedText);
+        }, { timeout: 25000, timeoutMsg: 'Vault B failed to receive real-time edit propagation' });
+
+        const endTime = Date.now();
+        const propagationTimeMs = endTime - startTime;
+
+        console.log(`\n==================================================`);
+        console.log(`⏱️ REAL-TIME PROPAGATION TIME: ${propagationTimeMs} ms`);
+        console.log(`==================================================\n`);
+
+        expect(propagationTimeMs).toBeLessThan(10000);
     });
 });
