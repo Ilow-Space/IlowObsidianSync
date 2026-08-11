@@ -1,20 +1,20 @@
 ﻿import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TreeIndexManager } from '../src/2_Application/Sync/TreeIndexManager';
-
-// A lightweight fake to accurately simulate Y.Map behavior in memory during tests
-class FakeYMap extends Map {
-    observe = vi.fn();
-}
+import * as Y from 'yjs';
 
 describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     let appMock: any;
     let engineMock: any;
     let syncMock: any;
     let manager: TreeIndexManager;
-    let fakeTreeMap: FakeYMap;
+    
+    // Use a real Yjs document instead of a mock so Y.encodeStateAsUpdate works natively
+    let testDoc: Y.Doc;
+    let testMap: Y.Map<any>;
 
     beforeEach(() => {
-        fakeTreeMap = new FakeYMap();
+        testDoc = new Y.Doc();
+        testMap = testDoc.getMap('vault-tree');
 
         appMock = {
             vault: {
@@ -23,6 +23,7 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
                 createFolder: vi.fn().mockResolvedValue(undefined),
                 create: vi.fn().mockResolvedValue(undefined),
                 getAllLoadedFiles: vi.fn().mockReturnValue([]),
+                read: vi.fn().mockResolvedValue('Mock Content')
             },
             fileManager: {
                 renameFile: vi.fn().mockResolvedValue(undefined)
@@ -30,11 +31,8 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
         };
 
         engineMock = {
-            getOrCreateDoc: vi.fn().mockResolvedValue({
-                getMap: vi.fn().mockReturnValue(fakeTreeMap),
-                once: vi.fn(),
-                transact: vi.fn((cb: any) => cb())
-            }),
+            // Hand the real CRDT document to the manager
+            getOrCreateDoc: vi.fn().mockResolvedValue(testDoc),
             localStore: { saveDocumentState: vi.fn() }
         };
 
@@ -51,8 +49,8 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     it('The "Ghost Node" Edge Case', async () => {
         await manager.initialize();
         
-        fakeTreeMap.set('uuid-deleted-ghost', { type: 'file', path: 'Notes/Meeting.md', isDeleted: true });
-        fakeTreeMap.set('uuid-active-node', { type: 'file', path: 'Notes/Meeting.md', isDeleted: false });
+        testMap.set('uuid-deleted-ghost', { type: 'file', path: 'Notes/Meeting.md', isDeleted: true });
+        testMap.set('uuid-active-node', { type: 'file', path: 'Notes/Meeting.md', isDeleted: false });
         
         (manager as any).rebuildReverseLookup();
         appMock.vault.getAbstractFileByPath.mockReturnValue({ path: 'Notes/Meeting.md' });
@@ -65,7 +63,7 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     it('Deep Folder Recreation', async () => {
         await manager.initialize();
         
-        fakeTreeMap.set('uuid-deep-file', { type: 'file', path: 'Projects/2026/Q3/Launch.md', isDeleted: false });
+        testMap.set('uuid-deep-file', { type: 'file', path: 'Projects/2026/Q3/Launch.md', isDeleted: false });
         (manager as any).rebuildReverseLookup();
         
         appMock.vault.getAbstractFileByPath.mockReturnValue(null);
@@ -74,14 +72,13 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
         expect(appMock.vault.createFolder).toHaveBeenCalledWith('Projects');
         expect(appMock.vault.createFolder).toHaveBeenCalledWith('Projects/2026');
         expect(appMock.vault.createFolder).toHaveBeenCalledWith('Projects/2026/Q3');
-        // FIX: The file should NOT be created empty locally anymore
         expect(appMock.vault.create).not.toHaveBeenCalled();
     });
 
     it('Fallback Trashing', async () => {
         await manager.initialize();
         
-        fakeTreeMap.set('uuid-deleted-doc', { type: 'file', path: 'Legacy.md', isDeleted: true });
+        testMap.set('uuid-deleted-doc', { type: 'file', path: 'Legacy.md', isDeleted: true });
         (manager as any).rebuildReverseLookup();
         
         const mockFile = { path: 'Legacy.md' };
@@ -100,8 +97,7 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     it('Vault Event Feedback Loop Prevention', async () => {
         await manager.initialize();
         
-        const transactSpy = vi.fn();
-        (manager as any).doc.transact = transactSpy;
+        const transactSpy = vi.spyOn(testDoc, 'transact');
         (manager as any).isReconciling = true;
 
         await manager.handleDelete('OldFolder/File.md');
@@ -131,7 +127,7 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     it('Bug 2: Runaway UUID Duplication (Phase 2 Untracked Race Condition)', async () => {
         await manager.initialize();
         
-        fakeTreeMap.set('existing-uuid', { type: 'file', path: 'Renamed.md', isDeleted: false });
+        testMap.set('existing-uuid', { type: 'file', path: 'Renamed.md', isDeleted: false });
         appMock.vault.getAllLoadedFiles.mockReturnValue([{ path: 'Renamed.md' }]);
 
         await manager.reconcileFilesystem();
@@ -142,7 +138,7 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     it('Feature 3: File Deletion Triggers Physical DB Purge', async () => {
         await manager.initialize();
         
-        fakeTreeMap.set('uuid-to-delete', { type: 'file', path: 'Old.md', isDeleted: false });
+        testMap.set('uuid-to-delete', { type: 'file', path: 'Old.md', isDeleted: false });
         (manager as any).rebuildReverseLookup();
 
         await manager.handleDelete('Old.md');
@@ -153,9 +149,9 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     it('Feature 4: Folder Deletion Cascades DB Purges to Children', async () => {
         await manager.initialize();
         
-        fakeTreeMap.set('folder-uuid', { type: 'folder', path: 'SecretProject', isDeleted: false });
-        fakeTreeMap.set('file-uuid-1', { type: 'file', path: 'SecretProject/Plans.md', isDeleted: false });
-        fakeTreeMap.set('file-uuid-2', { type: 'file', path: 'SecretProject/Code.md', isDeleted: false });
+        testMap.set('folder-uuid', { type: 'folder', path: 'SecretProject', isDeleted: false });
+        testMap.set('file-uuid-1', { type: 'file', path: 'SecretProject/Plans.md', isDeleted: false });
+        testMap.set('file-uuid-2', { type: 'file', path: 'SecretProject/Code.md', isDeleted: false });
 
         await manager.handleDelete('SecretProject');
 
@@ -166,7 +162,7 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     it('Misalignment 5: Case-Only Renames (Mac/Windows Edge Case)', async () => {
         await manager.initialize();
         
-        fakeTreeMap.set('uuid-case', { type: 'file', path: 'note.md', isDeleted: false });
+        testMap.set('uuid-case', { type: 'file', path: 'note.md', isDeleted: false });
         (manager as any).rebuildReverseLookup();
         
         await manager.handleRename('note.md', 'Note.md');
@@ -177,8 +173,8 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     it('Misalignment 6: Concurrent Same-Path Offline Creation (Orphaned UUIDs)', async () => {
         await manager.initialize();
         
-        fakeTreeMap.set('uuid-dev-a', { type: 'file', path: 'Daily.md', isDeleted: false });
-        fakeTreeMap.set('uuid-dev-b', { type: 'file', path: 'Daily.md', isDeleted: false });
+        testMap.set('uuid-dev-a', { type: 'file', path: 'Daily.md', isDeleted: false });
+        testMap.set('uuid-dev-b', { type: 'file', path: 'Daily.md', isDeleted: false });
         
         (manager as any).uuidToLastKnownPath.set('uuid-dev-a', 'Daily.md');
         (manager as any).uuidToLastKnownPath.set('uuid-dev-b', 'Daily.md');
@@ -196,25 +192,25 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     it('Misalignment 7: Rename Target Collision', async () => {
         await manager.initialize();
         
-        fakeTreeMap.set('uuid-1', { type: 'file', path: 'A.md', isDeleted: false });
-        fakeTreeMap.set('uuid-2', { type: 'file', path: 'B.md', isDeleted: false });
+        testMap.set('uuid-1', { type: 'file', path: 'A.md', isDeleted: false });
+        testMap.set('uuid-2', { type: 'file', path: 'B.md', isDeleted: false });
         (manager as any).rebuildReverseLookup();
 
         await manager.handleRename('A.md', 'B.md');
 
-        const updatedNode = fakeTreeMap.get('uuid-1') as any;
+        const updatedNode = testMap.get('uuid-1') as any;
         expect(updatedNode.path).not.toBe('B.md');
     });
 
     it('Misalignment 8: Recreating a previously deleted file (Tombstone Override)', async () => {
         await manager.initialize();
         
-        fakeTreeMap.set('uuid-dead', { type: 'file', path: 'Resurrect.md', isDeleted: true });
+        testMap.set('uuid-dead', { type: 'file', path: 'Resurrect.md', isDeleted: true });
         (manager as any).rebuildReverseLookup();
 
         await manager.handleCreate({ path: 'Resurrect.md' } as any);
 
-        const node = fakeTreeMap.get('uuid-dead') as any;
+        const node = testMap.get('uuid-dead') as any;
         expect(node.isDeleted).toBe(false);
         expect((manager as any).pathToUuid.size).toBe(1);
     });
@@ -222,8 +218,8 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     it('Misalignment 9: Moving a file out of a remotely deleted folder', async () => {
         await manager.initialize();
         
-        fakeTreeMap.set('uuid-folder', { type: 'folder', path: 'DropFolder', isDeleted: true }); 
-        fakeTreeMap.set('uuid-file', { type: 'file', path: 'DropFolder/Keep.md', isDeleted: false }); 
+        testMap.set('uuid-folder', { type: 'folder', path: 'DropFolder', isDeleted: true }); 
+        testMap.set('uuid-file', { type: 'file', path: 'DropFolder/Keep.md', isDeleted: false }); 
         
         appMock.vault.getAbstractFileByPath.mockImplementation((path: string) => {
             if (path === 'Root/Keep.md') return { path: 'Root/Keep.md' };
@@ -247,7 +243,7 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
         expect((manager as any).pathToUuid.has('Temp.md')).toBe(false);
         expect((manager as any).pathToUuid.has('Temp2.md')).toBe(false);
         
-        const uuid = Array.from(fakeTreeMap.keys())[0];
+        const uuid = Array.from(testMap.keys())[0];
         if (uuid) {
             expect((manager as any).uuidToLastKnownPath.has(uuid)).toBe(false);
         }
@@ -256,8 +252,8 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     it('Misalignment 11: Prevent (1) postfix self-collision during native nested file rename events', async () => {
         await manager.initialize();
 
-        fakeTreeMap.set('uuid-folder', { type: 'folder', path: 'OldFolder', isDeleted: false });
-        fakeTreeMap.set('uuid-file', { type: 'file', path: 'OldFolder/File.md', isDeleted: false });
+        testMap.set('uuid-folder', { type: 'folder', path: 'OldFolder', isDeleted: false });
+        testMap.set('uuid-file', { type: 'file', path: 'OldFolder/File.md', isDeleted: false });
         (manager as any).rebuildReverseLookup();
 
         appMock.vault.getAbstractFileByPath.mockImplementation((path: string) => {
@@ -277,21 +273,19 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     it('Misalignment 12: Prevents empty file creation overriding contents', async () => {
         await manager.initialize();
         
-        fakeTreeMap.set('uuid-file', { type: 'file', path: 'Missing.md', isDeleted: false });
+        testMap.set('uuid-file', { type: 'file', path: 'Missing.md', isDeleted: false });
         appMock.vault.getAbstractFileByPath.mockReturnValue(null);
 
         await manager.reconcileFilesystem();
 
-        // Must rely on SyncOrchestrator to pull full atomic contents, not locally wipe via vault.create
         expect(appMock.vault.create).not.toHaveBeenCalled();
     });
 
     it('Misalignment 13: Prevents folder duplication by depth-sorting renames', async () => {
         await manager.initialize();
         
-        // Simulating the exact state where a child file and its parent folder both move
-        fakeTreeMap.set('uuid-child', { type: 'file', path: 'NewFolder/File.md', isDeleted: false });
-        fakeTreeMap.set('uuid-parent', { type: 'folder', path: 'NewFolder', isDeleted: false });
+        testMap.set('uuid-child', { type: 'file', path: 'NewFolder/File.md', isDeleted: false });
+        testMap.set('uuid-parent', { type: 'folder', path: 'NewFolder', isDeleted: false });
         
         (manager as any).uuidToLastKnownPath.set('uuid-parent', 'OldFolder');
         (manager as any).uuidToLastKnownPath.set('uuid-child', 'OldFolder/File.md');
@@ -309,7 +303,70 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
 
         await manager.reconcileFilesystem();
 
-        // Depth sorting guarantees the parent folder is moved FIRST, inherently moving the children.
         expect(order[0]).toBe('OldFolder');
+    });
+
+    // -------------------------------------------------------------------------
+    // NETWORK EVENT VALIDATION TESTS
+    // -------------------------------------------------------------------------
+
+    it('Network 1: handleCreate triggers WS broadcast', async () => {
+        await manager.initialize();
+        syncMock.pushDocumentUpdate.mockClear();
+
+        await manager.handleCreate({ path: 'BroadcastCreate.md' } as any);
+
+        expect(syncMock.pushDocumentUpdate).toHaveBeenCalledWith(
+            manager.INDEX_DOC_ID, 
+            expect.any(Uint8Array), 
+            null
+        );
+    });
+
+    it('Network 2: handleRename triggers WS broadcast', async () => {
+        await manager.initialize();
+        
+        testMap.set('uuid-rename', { type: 'file', path: 'OldName.md', isDeleted: false });
+        (manager as any).rebuildReverseLookup();
+        syncMock.pushDocumentUpdate.mockClear();
+
+        await manager.handleRename('OldName.md', 'NewName.md');
+
+        expect(syncMock.pushDocumentUpdate).toHaveBeenCalledWith(
+            manager.INDEX_DOC_ID, 
+            expect.any(Uint8Array), 
+            null
+        );
+    });
+
+    it('Network 3: handleDelete triggers WS broadcast', async () => {
+        await manager.initialize();
+        
+        testMap.set('uuid-delete', { type: 'file', path: 'ToDelete.md', isDeleted: false });
+        (manager as any).rebuildReverseLookup();
+        syncMock.pushDocumentUpdate.mockClear();
+
+        await manager.handleDelete('ToDelete.md');
+
+        expect(syncMock.pushDocumentUpdate).toHaveBeenCalledWith(
+            manager.INDEX_DOC_ID, 
+            expect.any(Uint8Array), 
+            null
+        );
+    });
+
+    it('Network 4: Offline Reconcile triggers WS broadcast for newly discovered files', async () => {
+        await manager.initialize();
+        syncMock.pushDocumentUpdate.mockClear();
+
+        appMock.vault.getAllLoadedFiles.mockReturnValue([{ path: 'OfflineDiscovered.md' }]);
+
+        await manager.reconcileFilesystem();
+
+        expect(syncMock.pushDocumentUpdate).toHaveBeenCalledWith(
+            manager.INDEX_DOC_ID, 
+            expect.any(Uint8Array), 
+            null
+        );
     });
 });
