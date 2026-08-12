@@ -1,5 +1,7 @@
 ﻿import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TreeIndexManager } from '../src/2_Application/Sync/TreeIndexManager';
+import { VfsCollisionResolver } from '../src/2_Application/Sync/VfsCollisionResolver';
+import { VfsUntrackedScanner } from '../src/2_Application/Sync/VfsUntrackedScanner';
 import * as Y from 'yjs';
 
 describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
@@ -23,7 +25,6 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
                 getAllLoadedFiles: vi.fn().mockReturnValue([]),
                 read: vi.fn().mockResolvedValue('Mock Content'),
                 adapter: {
-                    // FIX: Use !! to ensure undefined safely evaluates to false, preventing infinite loops
                     exists: vi.fn().mockImplementation(async (p: string) => {
                         return !!appMock.vault.getAbstractFileByPath(p);
                     }),
@@ -57,7 +58,6 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
         testMap.set('uuid-deleted-ghost', { type: 'file', path: 'Notes/Meeting.md', isDeleted: true });
         testMap.set('uuid-active-node', { type: 'file', path: 'Notes/Meeting.md', isDeleted: false });
         
-        // FIX: Register as a known tracked file to bypass offline collision renaming
         (manager as any).uuidToLastKnownPath.set('uuid-active-node', 'Notes/Meeting.md');
         
         (manager as any).rebuildReverseLookup();
@@ -112,10 +112,6 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
 
         expect(transactSpy).not.toHaveBeenCalled();
     });
-
-    // -------------------------------------------------------------------------
-    // EDGE CASE TESTS
-    // -------------------------------------------------------------------------
 
     it('Bug 1: "Untitled" Ghost Duplication (Missing Last Known Path Update)', async () => {
         await manager.initialize();
@@ -317,17 +313,14 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     it('Misalignment 14: Y.Map Iteration Mutation skips cascaded child file updates', async () => {
         await manager.initialize();
         
-        // Setup a folder with multiple children
         testMap.set('uuid-parent', { type: 'folder', path: 'BatchFolder', isDeleted: false });
         testMap.set('uuid-c1', { type: 'file', path: 'BatchFolder/F1.md', isDeleted: false });
         testMap.set('uuid-c2', { type: 'file', path: 'BatchFolder/F2.md', isDeleted: false });
         testMap.set('uuid-c3', { type: 'file', path: 'BatchFolder/F3.md', isDeleted: false });
         (manager as any).rebuildReverseLookup();
 
-        // Rename the parent folder
         await manager.handleRename('BatchFolder', 'RenamedFolder');
 
-        // Verify ALL children were successfully updated in the CRDT (none were skipped by a mutated iterator)
         expect((testMap.get('uuid-c1') as any).path).toBe('RenamedFolder/F1.md');
         expect((testMap.get('uuid-c2') as any).path).toBe('RenamedFolder/F2.md');
         expect((testMap.get('uuid-c3') as any).path).toBe('RenamedFolder/F3.md');
@@ -336,21 +329,15 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
     it('Misalignment 15: Untracked Parent Folder Cascade', async () => {
         await manager.initialize();
         
-        // The children are tracked, but the parent folder UUID is missing
         testMap.set('uuid-orphan1', { type: 'file', path: 'UntrackedParent/1.md', isDeleted: false });
         testMap.set('uuid-orphan2', { type: 'file', path: 'UntrackedParent/2.md', isDeleted: false });
         (manager as any).rebuildReverseLookup();
 
         await manager.handleRename('UntrackedParent', 'NewParent');
 
-        // Even though 'UntrackedParent' isn't in pathToUuid, it should still successfully cascade to the children
         expect((testMap.get('uuid-orphan1') as any).path).toBe('NewParent/1.md');
         expect((testMap.get('uuid-orphan2') as any).path).toBe('NewParent/2.md');
     });
-
-    // -------------------------------------------------------------------------
-    // NETWORK EVENT VALIDATION TESTS
-    // -------------------------------------------------------------------------
 
     it('Network 1: handleCreate triggers WS broadcast', async () => {
         await manager.initialize();
@@ -409,6 +396,62 @@ describe('Virtual File System (VFS) Reconciler & Edge Cases', () => {
             manager.INDEX_DOC_ID, 
             expect.any(Uint8Array), 
             null
+        );
+    });
+
+    it('BUG REGRESSION: Collision resolver must not mangle folder names containing periods', async () => {
+        const resolver = new VfsCollisionResolver(appMock as any);
+        const seenPaths = new Set(['Releases/App v1.0.0']);
+        const safeExists = vi.fn().mockResolvedValue(false);
+        
+        appMock.vault.getAbstractFileByPath.mockReturnValue(null);
+
+        const resolved = await resolver.resolveCollision('Releases/App v1.0.0', seenPaths, safeExists);
+
+        expect(resolved).toBe('Releases/App v1.0.0 (Conflict 1)');
+    });
+
+    it('BUG REGRESSION: Untracked scanner must ignore files inside deeply nested hidden folders', () => {
+        const scanner = new VfsUntrackedScanner(appMock as any);
+        
+        appMock.vault.getAllLoadedFiles.mockReturnValue([
+            { path: 'Normal.md', extension: 'md' },
+            { path: '.git/config', extension: '' },
+            { path: 'Project/.obsidian/workspace.json', extension: 'json' }
+        ]);
+
+        const newFiles = scanner.scan(new Map(), new Set());
+
+        expect(newFiles.length).toBe(1);
+        expect(newFiles[0].path).toBe('Normal.md');
+    });
+
+    it('BUG REGRESSION: Resolving a collision must suppress the resulting native rename event', async () => {
+        await manager.initialize();
+        
+        const uuid = 'collision-uuid';
+        testMap.set(uuid, { type: 'file', path: 'Docs/Guide (Conflict 1).md', isDeleted: false });
+        (manager as any).rebuildReverseLookup();
+
+        await manager.handleRename('Docs/Guide.md', 'Docs/Guide (Conflict 1).md');
+        await manager.handleRename('Docs/Guide.md', 'Docs/Guide (Conflict 1).md');
+
+        expect(appMock.fileManager.renameFile).toHaveBeenCalledTimes(1);
+    });
+
+    it('BUG REGRESSION: Untracked scanner must ingest physical file contents into CRDT state', async () => {
+        await manager.initialize();
+        
+        const mockFile = { path: 'OfflineDiscovered.md' };
+        appMock.vault.getAllLoadedFiles.mockReturnValue([mockFile]);
+        
+        appMock.vault.read.mockResolvedValue('Physical Offline Content');
+
+        await manager.reconcileFilesystem();
+
+        expect(engineMock.getOrCreateDoc).toHaveBeenCalledWith(
+            expect.any(String), 
+            'Physical Offline Content'
         );
     });
 });

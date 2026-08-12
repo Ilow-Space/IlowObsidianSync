@@ -1,5 +1,4 @@
-﻿
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+﻿import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { YjsEngine } from '../src/3_Infrastructure/Crdt/YjsEngine';
 import * as Y from 'yjs';
 
@@ -71,5 +70,41 @@ describe('CRDT Engine & Conflict Resolution', () => {
         expect(engine.localStore.loadDocumentState).toHaveBeenCalledWith(docId);
         expect(hydratedDoc.getText('markdown').toString()).toBe('Restored from history');
     });
-});
 
+    it('BUG REGRESSION: Engine must not eject active documents during async operations (Split-Brain Prevention)', async () => {
+        const docId = 'split-brain-doc';
+        const doc1 = await engine.getOrCreateDoc(docId, 'Initial Content');
+        
+        // Simulate file close while asynchronous network/sync task holds a reference
+        engine.removeDoc(docId);
+        
+        // File re-opened immediately
+        const doc2 = await engine.getOrCreateDoc(docId);
+        
+        // Modifying the doc should reflect across active references rather than diverging
+        doc2.getText('markdown').insert(0, 'Prefix ');
+        
+        expect(doc1).toBe(doc2);
+    });
+
+    it('BUG REGRESSION: handleLocalChange must be idempotent when text is identical', async () => {
+        const docId = 'idempotent-doc';
+        await engine.getOrCreateDoc(docId, 'Static Content');
+
+        // Apply identical content
+        const updateBinary = await engine.handleLocalChange(docId, 'Static Content');
+
+        expect(updateBinary).toBeNull();
+    });
+
+    it('BUG REGRESSION: applyUpdates must gracefully handle corrupted binary updates without crashing', async () => {
+        const docId = 'corrupt-update-doc';
+        const doc = await engine.getOrCreateDoc(docId, 'Valid Baseline');
+        
+        const invalidUpdate = new Uint8Array([255, 255, 255, 255, 0, 0]);
+
+        // Should catch errors gracefully and preserve baseline doc
+        await expect(engine.applyUpdates(docId, [invalidUpdate])).resolves.toBeDefined();
+        expect(doc.getText('markdown').toString()).toBe('Valid Baseline');
+    });
+});
