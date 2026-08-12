@@ -5,6 +5,7 @@ export class LocalHistoryStore {
     private dbName = 'obsidian-crdt-sync-db';
     private storeName = 'document-history';
     private dbPromise: Promise<IDBDatabase> | null = null;
+    private dbInstance: IDBDatabase | null = null;
 
     private getDB(): Promise<IDBDatabase> {
         if (this.dbPromise) return this.dbPromise;
@@ -12,7 +13,10 @@ export class LocalHistoryStore {
         this.dbPromise = new Promise((resolve, reject) => {
             const request = indexedDB.open(this.dbName, 1);
             request.onerror = () => reject(request.error);
-            request.onsuccess = () => resolve(request.result);
+            request.onsuccess = () => {
+                this.dbInstance = request.result;
+                resolve(request.result);
+            };
             request.onupgradeneeded = () => {
                 const db = request.result;
                 if (!db.objectStoreNames.contains(this.storeName)) {
@@ -60,6 +64,25 @@ export class LocalHistoryStore {
             const tx = db.transaction(this.storeName, 'readwrite');
             const store = tx.objectStore(this.storeName);
             const request = store.delete(documentId);
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    public close(): void {
+        if (this.dbInstance) {
+            this.dbInstance.close();
+            this.dbInstance = null;
+        }
+        this.dbPromise = null;
+    }
+
+    public async clearAll(): Promise<void> {
+        const db = await this.getDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(this.storeName, 'readwrite');
+            const store = tx.objectStore(this.storeName);
+            const request = store.clear();
             request.onsuccess = () => resolve();
             request.onerror = () => reject(request.error);
         });

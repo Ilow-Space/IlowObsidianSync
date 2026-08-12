@@ -109,4 +109,9 @@ export class YjsEngine {
     public removeDoc(documentId: string) {
         this.activeDocs.delete(documentId);
     }
+
+    public destroy(): void {
+        this.activeDocs.clear();
+        this.localStore.close();
+    }
 }

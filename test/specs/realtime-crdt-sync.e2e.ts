@@ -54,7 +54,7 @@ async function dumpObsidianLogs(tag: string) {
     } catch (e) {}
 }
 
-async function ensurePluginUnlocked(pwd = MASTER_PASSWORD) {
+async function ensurePluginUnlocked(pwd = MASTER_PASSWORD, wipeDb = false) {
     await browser.waitUntil(async () => {
         return await browser.execute(() => {
             const app = (window as any).app;
@@ -108,12 +108,54 @@ describe('Strict Real-Time CRDT Convergence', () => {
         wipeVaultDiskFiles(vaultAPath);
         wipeVaultDiskFiles(vaultBPath);
 
-        // Clear local IndexedDB cache between test runs
-        await browser.executeAsync((done) => {
-            const req = indexedDB.deleteDatabase('obsidian-crdt-sync-db');
-            req.onsuccess = () => done(true);
-            req.onerror = () => done(false);
-            req.onblocked = () => done(false);
+        // 1. Wipe Vault A cleanly using clearAll() and unloadKey()
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await browser.execute(async () => {
+            const app = (window as any).app;
+            const pluginId = 'obsidian-crdt-sync';
+            if (app.plugins.enabledPlugins.has(pluginId)) {
+                const plugin = app.plugins.plugins[pluginId];
+                if (plugin) {
+                    if (plugin.yjsEngine && plugin.yjsEngine.localStore) {
+                        await plugin.yjsEngine.localStore.clearAll();
+                    }
+                    await plugin.unloadKey();
+                }
+            } else {
+                await app.plugins.enablePlugin(pluginId);
+                const plugin = app.plugins.plugins[pluginId];
+                if (plugin) {
+                    if (plugin.yjsEngine && plugin.yjsEngine.localStore) {
+                        await plugin.yjsEngine.localStore.clearAll();
+                    }
+                    await plugin.unloadKey();
+                }
+            }
+        });
+
+        // 2. Wipe Vault B cleanly using clearAll() and unloadKey()
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await browser.execute(async () => {
+            const app = (window as any).app;
+            const pluginId = 'obsidian-crdt-sync';
+            if (app.plugins.enabledPlugins.has(pluginId)) {
+                const plugin = app.plugins.plugins[pluginId];
+                if (plugin) {
+                    if (plugin.yjsEngine && plugin.yjsEngine.localStore) {
+                        await plugin.yjsEngine.localStore.clearAll();
+                    }
+                    await plugin.unloadKey();
+                }
+            } else {
+                await app.plugins.enablePlugin(pluginId);
+                const plugin = app.plugins.plugins[pluginId];
+                if (plugin) {
+                    if (plugin.yjsEngine && plugin.yjsEngine.localStore) {
+                        await plugin.yjsEngine.localStore.clearAll();
+                    }
+                    await plugin.unloadKey();
+                }
+            }
         });
     });
 
@@ -135,15 +177,15 @@ describe('Strict Real-Time CRDT Convergence', () => {
     });
 
     it('Converges concurrent modifications safely without overwriting data', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
         await browser.execute(async () => {
             await (window as any).app.vault.create('LiveSync.md', 'Base Document\n');
         });
         await browser.pause(800);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
         await browser.waitUntil(async () => {
             return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('LiveSync.md') !== null);
         }, { timeout: 25000 });
@@ -155,8 +197,8 @@ describe('Strict Real-Time CRDT Convergence', () => {
         });
         await browser.pause(800);
 
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
         
         await browser.waitUntil(async () => {
             return await browser.execute(async () => {
@@ -174,8 +216,8 @@ describe('Strict Real-Time CRDT Convergence', () => {
         });
         await browser.pause(800);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
         
         await browser.waitUntil(async () => {
             return await browser.execute(async () => {
@@ -194,16 +236,16 @@ describe('Strict Real-Time CRDT Convergence', () => {
     });
 
     it('Safely handles multi-line rapid typing sequences', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
         
         await browser.execute(async () => {
             await (window as any).app.vault.create('RapidTyping.md', '- Item 1\n');
         });
         await browser.pause(800);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
         await browser.waitUntil(async () => {
             return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('RapidTyping.md') !== null);
         }, { timeout: 25000 });
@@ -219,8 +261,8 @@ describe('Strict Real-Time CRDT Convergence', () => {
         });
         await browser.pause(800);
 
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
         
         await browser.waitUntil(async () => {
             return await browser.execute(async () => {
@@ -239,16 +281,16 @@ describe('Strict Real-Time CRDT Convergence', () => {
     });
 
     it('Propagates file edits in real-time and measures propagation latency', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.execute(async () => {
             await (window as any).app.vault.create('LatencyTest.md', 'Initial Content');
         });
         await browser.pause(500);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.waitUntil(async () => {
             return await browser.execute(() => {
@@ -256,8 +298,8 @@ describe('Strict Real-Time CRDT Convergence', () => {
             });
         }, { timeout: 25000 });
 
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
 
         const updatedText = 'Initial Content\n[REALTIME EDIT PROPAGATION TEST PASS]';
         const startTime = Date.now();
@@ -270,8 +312,8 @@ describe('Strict Real-Time CRDT Convergence', () => {
 
         await browser.pause(500);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
 
         await browser.waitUntil(async () => {
             return await browser.execute(async (expected) => {

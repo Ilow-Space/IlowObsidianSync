@@ -34,6 +34,7 @@ export default class MyPlugin extends Plugin {
     private treeIndexManager: TreeIndexManager | null = null;
     private derivedKey: CryptoKey | null = null;
     private statusBarItem!: HTMLElement;
+    private isBootstrapping = false;
 
     get isKeyDerived(): boolean {
         return this.derivedKey !== null;
@@ -112,9 +113,11 @@ export default class MyPlugin extends Plugin {
         );
 
         this.registerEvent(
-            this.app.vault.on('create', async (file: TAbstractFile) => {
+            this.app.vault.on('create', (file: TAbstractFile) => {
                 if (this.treeIndexManager) {
-                    await this.treeIndexManager.handleCreate(file);
+                    const path = file.path;
+                    const isFolder = file instanceof TFolder;
+                    this.treeIndexManager.handleCreate(path, isFolder, file).catch(console.error);
                 }
             })
         );
@@ -145,7 +148,7 @@ export default class MyPlugin extends Plugin {
         );
     }
 
-    async onunload() {
+    onunload() {
         console.log('Unloading Obsidian CRDT Sync Plugin');
         if (this.syncOrchestrator) {
             this.syncOrchestrator.stopAll();
@@ -153,6 +156,7 @@ export default class MyPlugin extends Plugin {
         if (this.remoteStore) {
             this.remoteStore.disconnect();
         }
+        this.yjsEngine.destroy();
     }
 
     async loadSettings() {
@@ -209,6 +213,9 @@ export default class MyPlugin extends Plugin {
             const exportedKey = await this.cryptoService.exportKey(this.derivedKey);
             await (this.app as any).secretStorage.setSecret('crdt-master-key', exportedKey);
 
+            // Re-initialize to ensure latest settings (like syncDebounceMs) are active!
+            this.initializeSyncOrchestrator();
+
             if (this.syncOrchestrator && this.treeIndexManager) {
                 this.syncOrchestrator.setCryptoKey(this.derivedKey);
                 this.runBackgroundBootstrap().catch(console.error);
@@ -220,16 +227,24 @@ export default class MyPlugin extends Plugin {
     }
 
     private async runBackgroundBootstrap() {
+        if (this.isBootstrapping) return;
         if (!this.treeIndexManager || !this.syncOrchestrator || !this.remoteStore) return;
         
+        this.isBootstrapping = true;
         this.updateStatusBar('syncing', 'Bootstrapping VFS index...');
         try {
             await this.treeIndexManager.initialize();
 
-            // Subscribe to real-time updates specifically for the VFS index
-            const INDEX_DOC_ID = this.treeIndexManager.INDEX_DOC_ID;
-            this.remoteStore.subscribeToUpdates(INDEX_DOC_ID, () => {
-                this.syncOrchestrator?.runFullSync().catch(console.error);
+            // Subscribe to real-time updates for all documents via manifest
+            this.remoteStore.subscribeToUpdates('manifest', (docId, action) => {
+                if (!docId) return;
+
+                if (docId === this.treeIndexManager!.INDEX_DOC_ID) {
+                    this.syncOrchestrator?.runFullSync().catch(console.error);
+                } else {
+                    const path = this.treeIndexManager!.getPathForUuid(docId);
+                    this.syncOrchestrator?.pullDocument(docId, path, true).catch(console.error);
+                }
             });
 
             await this.syncOrchestrator.runFullSync();
@@ -243,6 +258,8 @@ export default class MyPlugin extends Plugin {
         } catch (err) {
             this.updateStatusBar('error', 'Bootstrap failed');
             console.error('Background bootstrap failed:', err);
+        } finally {
+            this.isBootstrapping = false;
         }
     }
 
@@ -255,7 +272,7 @@ export default class MyPlugin extends Plugin {
         this.updateStatusBar('offline', 'Disconnected');
 
         try {
-            await (this.app as any).secretStorage.deleteSecret('crdt_master_key');
+            await (this.app as any).secretStorage.deleteSecret('crdt-master-key');
         } catch (err) {
             console.error('Failed to remove persisted sync key:', err);
         }

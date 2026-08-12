@@ -8,7 +8,7 @@ export class PostgresRemoteStore implements IRemoteStore {
     private serverUrl: string;
     private headers: Record<string, string>;
     private socket: WebSocket | null = null;
-    private subscriptions = new Map<string, Array<() => void>>();
+    private subscriptions = new Map<string, Array<(docId?: string, action?: string) => void>>();
 
     constructor(serverUrl: string, headers: Record<string, string>) {
         this.serverUrl = serverUrl.replace(/\/$/, '');
@@ -54,18 +54,27 @@ export class PostgresRemoteStore implements IRemoteStore {
             this.socket.onmessage = (event) => {
                 try {
                     const payload = JSON.parse(event.data);
+                    const action = payload.type === 'DELETE' ? 'delete' : 'insert';
 
                     if (payload.type === 'INSERT' && payload.table === 'vault_updates') {
                         const docId = payload.record.document_id;
                         const callbacks = this.subscriptions.get(docId);
                         if (callbacks) {
-                            callbacks.forEach(cb => cb());
+                            callbacks.forEach(cb => cb(docId, action));
+                        }
+                        const manifestCallbacks = this.subscriptions.get('manifest');
+                        if (manifestCallbacks) {
+                            manifestCallbacks.forEach(cb => cb(docId, action));
                         }
                     } else if (payload.type === 'DELETE' && payload.table === 'vault_snapshots') {
                         const docId = payload.record.document_id;
                         const callbacks = this.subscriptions.get(docId);
                         if (callbacks) {
-                            callbacks.forEach(cb => cb());
+                            callbacks.forEach(cb => cb(docId, action));
+                        }
+                        const manifestCallbacks = this.subscriptions.get('manifest');
+                        if (manifestCallbacks) {
+                            manifestCallbacks.forEach(cb => cb(docId, action));
                         }
                     }
                 } catch (err) {}
@@ -76,6 +85,7 @@ export class PostgresRemoteStore implements IRemoteStore {
             };
 
             this.socket.onclose = () => {
+                if (this.socket === null) return;
                 setTimeout(() => {
                     this.connectWebSocket(wssUrl);
                 }, 3000);
@@ -85,7 +95,7 @@ export class PostgresRemoteStore implements IRemoteStore {
         }
     }
 
-    public subscribeToUpdates(documentId: string, onUpdateDetected: () => void): () => void {
+    public subscribeToUpdates(documentId: string, onUpdateDetected: (docId?: string, action?: string) => void): () => void {
         if (!this.subscriptions.has(documentId)) {
             this.subscriptions.set(documentId, []);
         }
@@ -111,8 +121,9 @@ export class PostgresRemoteStore implements IRemoteStore {
 
     public disconnect() {
         if (this.socket) {
-            this.socket.close();
+            const temp = this.socket;
             this.socket = null;
+            temp.close();
         }
         this.subscriptions.clear();
     }

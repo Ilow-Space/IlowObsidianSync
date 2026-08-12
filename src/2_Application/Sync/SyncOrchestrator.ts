@@ -308,7 +308,7 @@ export class SyncOrchestrator {
         const lastId = this.fileLastSyncIds.get(documentId) || 0;
 
         // BULK OPTIMIZATION: Skip fetching if we already know the remote ID matches local
-        if (knownLatestRemoteId !== undefined) {
+        if (lastId > 0 && knownLatestRemoteId !== undefined) {
             if (knownLatestRemoteId <= lastId) return;
         } else if (lastId > 0) {
             try {
@@ -341,6 +341,7 @@ export class SyncOrchestrator {
                 this.fileUpdateCounters.set(documentId, 0);
             }
         } catch (err) {
+            console.error('[SyncOrchestrator] pullDocument failed for ' + documentId + ':', err);
             this.hasConnectionError = true;
             this.lastErrorMessage = 'Connection failed';
         } finally {

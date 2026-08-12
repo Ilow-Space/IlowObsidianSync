@@ -69,7 +69,7 @@ async function dumpObsidianLogs(tag: string) {
     } catch (e) {}
 }
 
-async function ensurePluginUnlocked(pwd = MASTER_PASSWORD) {
+async function ensurePluginUnlocked(pwd = MASTER_PASSWORD, wipeDb = false) {
     await browser.waitUntil(async () => {
         return await browser.execute(() => {
             const app = (window as any).app;
@@ -125,12 +125,54 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         wipeVaultDiskFiles(vaultAPath);
         wipeVaultDiskFiles(vaultBPath);
         
-        // Ensure browser IndexedDB is wiped so local CRDT history doesn't leak between tests
-        await browser.executeAsync((done) => {
-            const req = indexedDB.deleteDatabase('obsidian-crdt-sync-db');
-            req.onsuccess = () => done(true);
-            req.onerror = () => done(false);
-            req.onblocked = () => done(false);
+        // 1. Wipe Vault A cleanly using clearAll() and unloadKey()
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await browser.execute(async () => {
+            const app = (window as any).app;
+            const pluginId = 'obsidian-crdt-sync';
+            if (app.plugins.enabledPlugins.has(pluginId)) {
+                const plugin = app.plugins.plugins[pluginId];
+                if (plugin) {
+                    if (plugin.yjsEngine && plugin.yjsEngine.localStore) {
+                        await plugin.yjsEngine.localStore.clearAll();
+                    }
+                    await plugin.unloadKey();
+                }
+            } else {
+                await app.plugins.enablePlugin(pluginId);
+                const plugin = app.plugins.plugins[pluginId];
+                if (plugin) {
+                    if (plugin.yjsEngine && plugin.yjsEngine.localStore) {
+                        await plugin.yjsEngine.localStore.clearAll();
+                    }
+                    await plugin.unloadKey();
+                }
+            }
+        });
+
+        // 2. Wipe Vault B cleanly using clearAll() and unloadKey()
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await browser.execute(async () => {
+            const app = (window as any).app;
+            const pluginId = 'obsidian-crdt-sync';
+            if (app.plugins.enabledPlugins.has(pluginId)) {
+                const plugin = app.plugins.plugins[pluginId];
+                if (plugin) {
+                    if (plugin.yjsEngine && plugin.yjsEngine.localStore) {
+                        await plugin.yjsEngine.localStore.clearAll();
+                    }
+                    await plugin.unloadKey();
+                }
+            } else {
+                await app.plugins.enablePlugin(pluginId);
+                const plugin = app.plugins.plugins[pluginId];
+                if (plugin) {
+                    if (plugin.yjsEngine && plugin.yjsEngine.localStore) {
+                        await plugin.yjsEngine.localStore.clearAll();
+                    }
+                    await plugin.unloadKey();
+                }
+            }
         });
     });
 
@@ -153,8 +195,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
     // 1. Basic Create & Sync
     it('Propagates file creation and exact text content from Vault A to Vault B', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.execute(async () => {
             const app = (window as any).app;
@@ -163,8 +205,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
         await browser.pause(2500);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.waitUntil(async () => {
             return await browser.execute(async () => {
@@ -187,8 +229,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
     // 2. Folder Rename
     it('Propagates folder renames without deleting nested files or spawning duplicates', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.execute(async () => {
             const app = (window as any).app;
@@ -198,8 +240,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
         await browser.pause(2500);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.waitUntil(async () => {
             return await browser.execute(() => {
@@ -217,8 +259,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
         await browser.pause(2500);
 
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
 
         await browser.waitUntil(async () => {
             return await browser.execute(() => {
@@ -244,8 +286,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
     // 3. Deep Nested File Creation and Middle Folder Rename
     it('Handles deep nested file creation and parent folder rename without ghosts or duplicates', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
         
         await browser.execute(async () => {
             const app = (window as any).app;
@@ -256,8 +298,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         });
         await browser.pause(3000);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
         
         await browser.waitUntil(async () => {
             return await browser.execute(() => {
@@ -266,8 +308,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         }, { timeout: 25000 });
 
         // Rename the middle folder in Vault A
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
         
         await browser.execute(async () => {
             const app = (window as any).app;
@@ -277,8 +319,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         await browser.pause(3000);
 
         // Verify Vault B
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
         
         await browser.waitUntil(async () => {
             return await browser.execute(() => {
@@ -304,8 +346,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
     // 4. File Create and Rename (Rapid Sequence)
     it('Handles rapid file creation and immediate rename accurately', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.execute(async () => {
             const app = (window as any).app;
@@ -317,8 +359,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         
         await browser.pause(2500);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.waitUntil(async () => {
             return await browser.execute(() => {
@@ -340,8 +382,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
     // 5. Nested File Rename
     it('Propagates nested file renames accurately', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.execute(async () => {
             const app = (window as any).app;
@@ -350,8 +392,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         });
         await browser.pause(2500);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.waitUntil(async () => {
             return await browser.execute(() => {
@@ -360,8 +402,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         }, { timeout: 25000 });
 
         // Rename file on Vault A
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
 
         await browser.execute(async () => {
             const app = (window as any).app;
@@ -370,8 +412,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         });
         await browser.pause(2500);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
 
         await browser.waitUntil(async () => {
             return await browser.execute(() => {
@@ -394,8 +436,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
     // 6. Cross-Vault Bidirectional Rename
     it('Handles bidirectional file renames across vaults', async () => {
         // Vault A creates file
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
         await browser.execute(async () => {
             const app = (window as any).app;
             await app.vault.create('Shared.md', 'Shared text');
@@ -403,8 +445,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         await browser.pause(2500);
 
         // Vault B receives and renames file
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
         await browser.waitUntil(async () => {
             return await browser.execute(() => {
                 return (window as any).app.vault.getAbstractFileByPath('Shared.md') !== null;
@@ -419,8 +461,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         await browser.pause(2500);
 
         // Vault A receives rename
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked();
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
         await browser.waitUntil(async () => {
             return await browser.execute(() => {
                 const app = (window as any).app;
@@ -450,8 +492,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
     // 5. Offline File Creation Collision (Path Conflict)
     it('Resolves offline path collisions by preserving both files via conflict renaming', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         // Vault A creates a file online
         await browser.execute(async () => {
@@ -463,8 +505,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         fs.writeFileSync(path.join(vaultBPath, 'Collision.md'), 'Vault B Offline Content');
 
         // Vault B boots up, tracks its local file, then pulls Vault A's file
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         try {
             await browser.waitUntil(async () => {
@@ -496,8 +538,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
     // 6. Offline Folder Merging
     it('Merges offline folders gracefully without duplicating the directory', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.execute(async () => {
             const app = (window as any).app;
@@ -510,8 +552,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         fs.mkdirSync(path.join(vaultBPath, 'SharedFolder'));
         fs.writeFileSync(path.join(vaultBPath, 'SharedFolder', 'B.md'), 'File B');
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.waitUntil(async () => {
             return await browser.execute(() => {
@@ -533,8 +575,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
     // 7. Deep Folder Cascade Deletion
     it('Cascades deletion through deeply nested folders efficiently', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.execute(async () => {
             const app = (window as any).app;
@@ -544,15 +586,15 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         });
         await browser.pause(2500);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
         await browser.waitUntil(async () => {
             return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('Level1/Level2/Deep.md') !== null);
         }, { timeout: 25000 });
 
         // Delete top level folder on A
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
         await browser.execute(async () => {
             const app = (window as any).app;
             const folder = app.vault.getAbstractFileByPath('Level1');
@@ -561,8 +603,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         await browser.pause(2500);
 
         // Vault B should prune the entire tree
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
         await browser.waitUntil(async () => {
             return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('Level1') === null);
         }, { timeout: 25000 });
@@ -574,8 +616,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
     // 8. Re-creating a Deleted File Path (Resurrection)
     it('Allows recreating a file at a previously deleted path without ghosting', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         // Create and delete
         await browser.execute(async () => {
@@ -591,8 +633,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         });
         await browser.pause(2500);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.waitUntil(async () => {
             return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('Ghost.md') !== null);
@@ -608,16 +650,16 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
     // 9. Empty File Hydration
     it('Syncs completely empty files seamlessly', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.execute(async () => {
             await (window as any).app.vault.create('Empty.md', '');
         });
         await browser.pause(2500);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.waitUntil(async () => {
             return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('Empty.md') !== null);
@@ -633,22 +675,22 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
     // 10. Edit vs Delete Conflict (Offline)
     it('Prioritizes remote deletion over offline local edits to maintain consistency', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.execute(async () => {
             await (window as any).app.vault.create('ConflictDelete.md', 'Base');
         });
         await browser.pause(2500);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
         await browser.waitUntil(async () => {
             return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('ConflictDelete.md') !== null);
         }, { timeout: 25000 });
 
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
         await browser.execute(async () => {
             const file = (window as any).app.vault.getAbstractFileByPath('ConflictDelete.md');
             await (window as any).app.vault.trash(file, true);
@@ -657,37 +699,55 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
         fs.writeFileSync(path.join(vaultBPath, 'ConflictDelete.md'), 'Offline Edit');
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
 
-        // FIX: Await physical deletion directly via Node's fs module
+        // FIX: Await physical deletion directly via Node's fs module in the browser's temporary vault context
         await browser.waitUntil(async () => {
-            return !fs.existsSync(path.join(vaultBPath, 'ConflictDelete.md'));
+            return await browser.execute(() => {
+                try {
+                    const fsNode = require('fs');
+                    const pathNode = require('path');
+                    const basePath = (window as any).app.vault.adapter.getBasePath();
+                    return !fsNode.existsSync(pathNode.join(basePath, 'ConflictDelete.md'));
+                } catch (e) {
+                    return false;
+                }
+            });
         }, { timeout: 25000, timeoutMsg: 'File was not physically deleted by Phase 1' });
 
-        const exists = fs.existsSync(path.join(vaultBPath, 'ConflictDelete.md'));
+        const exists = await browser.execute(() => {
+            try {
+                const fsNode = require('fs');
+                const pathNode = require('path');
+                const basePath = (window as any).app.vault.adapter.getBasePath();
+                return fsNode.existsSync(pathNode.join(basePath, 'ConflictDelete.md'));
+            } catch (e) {
+                return true;
+            }
+        });
         expect(exists).toBe(false);
     });
 
     // 11. Case-Sensitivity Rename
     it('Accurately tracks case-only renames (Mac/Windows compatibility)', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.execute(async () => {
             await (window as any).app.vault.create('case.md', 'Data');
         });
         await browser.pause(2500);
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
         await browser.waitUntil(async () => {
             return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('case.md') !== null);
         }, { timeout: 25000 });
 
         // A performs case-only rename
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
         await browser.execute(async () => {
             const file = (window as any).app.vault.getAbstractFileByPath('case.md');
             await (window as any).app.fileManager.renameFile(file, 'Case.md');
@@ -695,8 +755,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         await browser.pause(2500);
 
         // B should apply the new casing
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
         await browser.waitUntil(async () => {
             return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('Case.md') !== null);
         }, { timeout: 25000 });
@@ -709,8 +769,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
     // 12. Move Offline File Out of Remotely Deleted Folder
     it('Preserves offline files moved out of a remotely deleted directory', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.execute(async () => {
             await (window as any).app.vault.createFolder('DropZone');
@@ -729,8 +789,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         fs.writeFileSync(path.join(vaultBPath, 'KeepMe.md'), 'Vital Data');
 
         // B boots. 'DropZone' is deleted by sync, but 'KeepMe.md' at root should be tracked as a new file.
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.waitUntil(async () => {
             return await browser.execute(() => {
@@ -755,8 +815,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
 
     // 13. High-Volume Batch Creation
     it('Handles rapid multi-file creation without dropping data', async () => {
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.execute(async () => {
             const app = (window as any).app;
@@ -766,8 +826,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         });
         await browser.pause(3000); // Give debounce timers time to flush all 5
 
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.waitUntil(async () => {
             return await browser.execute(() => {
@@ -787,16 +847,16 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
     // 14. Bidirectional Content Edits (CRDT Convergence)
     it('Converges sequential cross-vault content edits without data loss', async () => {
         // A creates
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
         await browser.execute(async () => {
             await (window as any).app.vault.create('Collab.md', 'Base');
         });
         await browser.pause(2500);
 
         // B appends
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, true);
         await browser.waitUntil(async () => await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('Collab.md') !== null), { timeout: 25000 });
         
         await browser.execute(async () => {
@@ -807,8 +867,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         await browser.pause(2500);
 
         // A appends
-        await browser.reloadObsidian({ vault: vaultAPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
         await browser.waitUntil(async () => {
             return await browser.execute(async () => {
                 const file = (window as any).app.vault.getAbstractFileByPath('Collab.md');
@@ -825,8 +885,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         await browser.pause(2500);
 
         // Verify B gets final state
-        await browser.reloadObsidian({ vault: vaultBPath });
-        await ensurePluginUnlocked(MASTER_PASSWORD);
+        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await ensurePluginUnlocked(MASTER_PASSWORD, false);
         await browser.waitUntil(async () => {
             return await browser.execute(async () => {
                 const file = (window as any).app.vault.getAbstractFileByPath('Collab.md');

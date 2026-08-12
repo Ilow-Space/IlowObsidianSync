@@ -33,6 +33,6 @@ export interface IRemoteStore {
     fetchTelemetry(): Promise<ServerTelemetry | null>;
     
     connectWebSocket(wssUrl: string): void;
-    subscribeToUpdates(documentId: string, onUpdateDetected: () => void): () => void;
+    subscribeToUpdates(documentId: string, onUpdateDetected: (docId?: string, action?: string) => void): () => void;
     disconnect(): void;
 }
