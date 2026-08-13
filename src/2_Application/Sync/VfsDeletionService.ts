@@ -20,8 +20,13 @@ export class VfsDeletionService {
                 continue;
             }
 
-            justDeletedPaths.add(node.path);
             const localFile = this.app.vault.getAbstractFileByPath(node.path);
+            const existsOnDisk = !!localFile || await safeExists(node.path);
+            if (!existsOnDisk) {
+                continue;
+            }
+
+            justDeletedPaths.add(node.path);
             console.log('[VfsDeletionService] Removing path:', node.path, 'localFile exists:', !!localFile);
             await this.safeRemove(node.path, localFile, safeExists);
             console.log('[VfsDeletionService] After safeRemove, safeExists:', await safeExists(node.path));

@@ -6,11 +6,12 @@ export class VfsCollisionResolver {
     public async resolveCollision(
         path: string,
         seenPaths: Set<string>,
-        safeExists: (p: string) => Promise<boolean>
+        safeExists: (p: string) => Promise<boolean>,
+        isFolder = false
     ): Promise<string> {
         let collisionCount = 1;
         let newPath = '';
-        const extMatch = path.match(/(\.[^.]+)$/);
+        const extMatch = !isFolder ? path.match(/(\.[a-zA-Z][a-zA-Z0-9]{1,4})$/) : null;
         const ext = extMatch ? extMatch[0] : '';
         const base = extMatch ? path.slice(0, -ext.length) : path;
 
@@ -24,11 +25,12 @@ export class VfsCollisionResolver {
 
     public resolveRenameCollision(
         newPath: string,
-        isPathTaken: (p: string) => boolean
+        isPathTaken: (p: string) => boolean,
+        isFolder = false
     ): string {
         let collisionCount = 1;
         let finalPath = newPath;
-        const extMatch = newPath.match(/(\.[^.]+)$/);
+        const extMatch = !isFolder ? newPath.match(/(\.[a-zA-Z][a-zA-Z0-9]{1,4})$/) : null;
         const ext = extMatch ? extMatch[0] : '';
         const base = extMatch ? newPath.slice(0, -ext.length) : newPath;
 

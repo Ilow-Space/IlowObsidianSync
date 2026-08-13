@@ -41,6 +41,7 @@ describe('Sync Orchestrator & Network Resilience', () => {
         statusCb = vi.fn();
 
         orchestrator = new SyncOrchestrator(remoteMock, cryptoMock, engineMock, repoMock, statusCb);
+        orchestrator['isInitialized'] = true;
         
         const mockKey = { type: 'secret' } as unknown as CryptoKey;
         orchestrator.setCryptoKey(mockKey);

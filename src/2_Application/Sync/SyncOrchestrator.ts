@@ -17,6 +17,7 @@ export class SyncOrchestrator {
     private fileUpdateCounters = new Map<string, number>();
     private activeSubscriptions = new Map<string, () => void>();
     private activeKey: CryptoKey | null = null;
+    private isInitialized = false;
     
     private activeDocumentId: string | null = null;
     private activePath: string | null = null;
@@ -103,11 +104,18 @@ export class SyncOrchestrator {
 
     public registerRemoteWrite(path: string, content: string) {
         this.remoteWriteHashes.set(path, content);
-        setTimeout(() => {
-            if (this.remoteWriteHashes.get(path) === content) {
-                this.remoteWriteHashes.delete(path);
-            }
-        }, 2000);
+    }
+
+    public isRemoteWriteActive(path: string): boolean {
+        return this.remoteWriteHashes.has(path);
+    }
+
+    public clearRemoteWrite(path: string) {
+        this.remoteWriteHashes.delete(path);
+    }
+
+    public isSyncInitialized(): boolean {
+        return this.isInitialized;
     }
 
     public async handleFileOpen(path: string): Promise<void> {
@@ -191,15 +199,21 @@ export class SyncOrchestrator {
     }
 
     public async handleLocalChange(path: string, content: string): Promise<void> {
-        if (!this.activeKey || !this.treeIndexManager) return;
+        if (!this.activeKey || !this.treeIndexManager || !this.isInitialized) return;
+
+        const documentId = this.treeIndexManager.getUuidForPath(path);
+        if (!documentId) return;
+
+        // IDEMPOTENCY CHECK: If text content is already identical to Yjs state, do not trigger a push!
+        const doc = await this.crdtEngine.getOrCreateDoc(documentId);
+        if (doc.getText('markdown').toString() === content) {
+            return;
+        }
         
         if (this.remoteWriteHashes.get(path) === content) {
             this.remoteWriteHashes.delete(path);
             return;
         }
-
-        const documentId = this.treeIndexManager.getUuidForPath(path);
-        if (!documentId) return;
 
         if (this.isApplyingRemoteChanges) return;
 
@@ -246,6 +260,7 @@ export class SyncOrchestrator {
         
         if (this.isSyncingFull) return;
         this.isSyncingFull = true;
+        this.addActiveTask('System Index');
 
         try {
             console.log('[SyncOrchestrator] Starting VFS Index Sync...');
@@ -258,7 +273,8 @@ export class SyncOrchestrator {
                 console.warn('[SyncOrchestrator] Bulk fetch failed, falling back to sequential checks.');
             }
 
-            const indexLatest = bulkUpdates[this.treeIndexManager.INDEX_DOC_ID];
+            const indexLatest = bulkUpdates[this.treeIndexManager.INDEX_DOC_ID] || 0;
+            console.log(`[runFullSync] INDEX_DOC_ID=${this.treeIndexManager.INDEX_DOC_ID} indexLatest=${indexLatest} lastId=${this.fileLastSyncIds.get(this.treeIndexManager.INDEX_DOC_ID) || 0}`);
             await this.pullDocument(this.treeIndexManager.INDEX_DOC_ID, null, true, indexLatest);
 
             await this.treeIndexManager.reconcileFilesystem();
@@ -267,16 +283,18 @@ export class SyncOrchestrator {
             for (const file of activeFiles) {
                 if (this.hasConnectionError) break;
                 
-                const latestRemoteId = bulkUpdates[file.uuid];
+                const latestRemoteId = bulkUpdates[file.uuid] || 0;
                 await this.pullDocument(file.uuid, file.path, true, latestRemoteId);
             }
 
+            this.isInitialized = true;
             console.log('[SyncOrchestrator] Full Sync Complete.');
         } catch (error) {
             console.error('[SyncOrchestrator] Sync failed:', error);
             this.hasConnectionError = true;
             this.lastErrorMessage = 'Sync failed';
         } finally {
+            this.removeActiveTask('System Index');
             this.isSyncingFull = false;
         }
     }
@@ -308,7 +326,7 @@ export class SyncOrchestrator {
         const lastId = this.fileLastSyncIds.get(documentId) || 0;
 
         // BULK OPTIMIZATION: Skip fetching if we already know the remote ID matches local
-        if (lastId > 0 && knownLatestRemoteId !== undefined) {
+        if (knownLatestRemoteId !== undefined) {
             if (knownLatestRemoteId <= lastId) return;
         } else if (lastId > 0) {
             try {
@@ -337,7 +355,8 @@ export class SyncOrchestrator {
             this.hasConnectionError = false;
 
             if (result.appliedCount > 50) {
-                this.pushUseCase.forceCompact(documentId, this.activeKey).catch(() => {});
+                const resolvedPath = path || (this.treeIndexManager ? this.treeIndexManager.getPathForUuid(documentId) : null);
+                this.pushUseCase.forceCompact(documentId, this.activeKey, resolvedPath).catch(() => {});
                 this.fileUpdateCounters.set(documentId, 0);
             }
         } catch (err) {
@@ -380,6 +399,7 @@ export class SyncOrchestrator {
         this.activeTasks.clear();
         this.hasConnectionError = false;
         this.isSyncingFull = false;
+        this.isInitialized = false;
         this.triggerStatusUpdate();
     }
 
@@ -387,6 +407,15 @@ export class SyncOrchestrator {
     public releaseRemoteLock() { this.isApplyingRemoteChanges = false; }
     
     public async deleteRemoteSnapshot(documentId: string): Promise<void> {
+        this.fileLastSyncIds.delete(documentId);
+        this.fileUpdateCounters.delete(documentId);
+        const timer = this.localChangeDebounceTimers.get(documentId);
+        if (timer) {
+            clearTimeout(timer);
+            this.localChangeDebounceTimers.delete(documentId);
+        }
+        this.pendingContents.delete(documentId);
+
         if (!this.activeKey) return;
         try {
             await this.remoteStore.deleteSnapshot(documentId);

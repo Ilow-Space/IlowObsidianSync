@@ -2,7 +2,7 @@ import { browser, expect } from '@wdio/globals';
 import path from 'path';
 import fs from 'fs';
 
-const BACKEND_URL = 'https://obsidian.ilow.io';
+const BACKEND_URL = 'http://obsidian.ilow.io';
 const ADMIN_TOKEN = 'A547245O7B57F75A7U7B4F7U57I75E7D27b4A5U75IEFBaszsjbuif32772525b?';
 const MASTER_PASSWORD = '1';
 

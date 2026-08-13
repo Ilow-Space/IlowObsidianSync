@@ -2,7 +2,7 @@ import { browser, expect } from '@wdio/globals';
 import path from 'path';
 import fs from 'fs';
 
-const BACKEND_URL = 'https://obsidian.ilow.io';
+const BACKEND_URL = 'http://obsidian.ilow.io';
 const ADMIN_TOKEN = 'A547245O7B57F75A7U7B4F7U57I75E7D27b4A5U75IEFBaszsjbuif32772525b?';
 const MASTER_PASSWORD = '1';
 
@@ -10,6 +10,17 @@ const vaultAPath = path.join(process.cwd(), 'test', 'vaults', 'vaultA').replace(
 const vaultBPath = path.join(process.cwd(), 'test', 'vaults', 'vaultB').replace(/\\/g, '/');
 
 // --- HELPERS ---
+
+async function disableActivePlugin() {
+    try {
+        await browser.execute(async () => {
+            const app = (window as any).app;
+            if (app?.plugins?.plugins['obsidian-crdt-sync']) {
+                await app.plugins.disablePlugin('obsidian-crdt-sync');
+            }
+        });
+    } catch (e) {}
+}
 
 async function validateServerManifest() {
     return await browser.executeAsync(async (url, done) => {
@@ -84,10 +95,16 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD, wipeDb = false) {
 
         const formatArg = (a: any) => typeof a === 'object' ? JSON.stringify(a) : String(a);
         const origLog = console.log;
+        const origErr = console.error;
 
         console.log = (...args: any[]) => {
             (window as any).__obsidianLogs.push(`[LOG] ${args.map(formatArg).join(' ')}`);
             origLog.apply(console, args);
+        };
+
+        console.error = (...args: any[]) => {
+            (window as any).__obsidianLogs.push(`[ERROR] ${args.map(formatArg).join(' ')}`);
+            origErr.apply(console, args);
         };
     });
 

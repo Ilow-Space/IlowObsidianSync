@@ -35,6 +35,7 @@ export default class MyPlugin extends Plugin {
     private derivedKey: CryptoKey | null = null;
     private statusBarItem!: HTMLElement;
     private isBootstrapping = false;
+    private manifestUnsubscribe: (() => void) | null = null;
 
     get isKeyDerived(): boolean {
         return this.derivedKey !== null;
@@ -116,7 +117,7 @@ export default class MyPlugin extends Plugin {
             this.app.vault.on('create', (file: TAbstractFile) => {
                 if (this.treeIndexManager) {
                     const path = file.path;
-                    const isFolder = file instanceof TFolder;
+                    const isFolder = file instanceof TFolder || (file as any).children !== undefined;
                     this.treeIndexManager.handleCreate(path, isFolder, file).catch(console.error);
                 }
             })
@@ -150,6 +151,10 @@ export default class MyPlugin extends Plugin {
 
     onunload() {
         console.log('Unloading Obsidian CRDT Sync Plugin');
+        if (this.manifestUnsubscribe) {
+            this.manifestUnsubscribe();
+            this.manifestUnsubscribe = null;
+        }
         if (this.syncOrchestrator) {
             this.syncOrchestrator.stopAll();
         }
@@ -235,8 +240,11 @@ export default class MyPlugin extends Plugin {
         try {
             await this.treeIndexManager.initialize();
 
+            if (this.manifestUnsubscribe) {
+                this.manifestUnsubscribe();
+            }
             // Subscribe to real-time updates for all documents via manifest
-            this.remoteStore.subscribeToUpdates('manifest', (docId, action) => {
+            this.manifestUnsubscribe = this.remoteStore.subscribeToUpdates('manifest', (docId, action) => {
                 if (!docId) return;
 
                 if (docId === this.treeIndexManager!.INDEX_DOC_ID) {
@@ -279,6 +287,10 @@ export default class MyPlugin extends Plugin {
     }
 
     private initializeSyncOrchestrator() {
+        if (this.manifestUnsubscribe) {
+            this.manifestUnsubscribe();
+            this.manifestUnsubscribe = null;
+        }
         if (this.syncOrchestrator) {
             this.syncOrchestrator.stopAll();
         }
@@ -308,6 +320,7 @@ export default class MyPlugin extends Plugin {
 
             if (this.derivedKey) {
                 this.syncOrchestrator.setCryptoKey(this.derivedKey);
+                this.runBackgroundBootstrap().catch(console.error);
             }
         } else {
             this.remoteStore = null;

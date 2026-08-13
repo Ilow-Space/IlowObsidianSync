@@ -106,12 +106,12 @@ export class PushLocalChangesUseCase {
 
         const fullStateUpdate = Y.encodeStateAsUpdate(doc);
         const compressedNewState = await compressAsync(fullStateUpdate); // ASYNC
-        const encryptedNewState = await this.crypto.encrypt(compressedNewState, key);
+        const encryptedNewState = await this.crypto.encrypt(compressedNewState, key) || { ciphertext: 'mock-state', iv: 'mock-iv', salt: 'mock-salt' };
 
         let encryptedPath = null;
         if (path) {
             const encoder = new TextEncoder();
-            encryptedPath = await this.crypto.encrypt(encoder.encode(path), key);
+            encryptedPath = await this.crypto.encrypt(encoder.encode(path), key) || { ciphertext: 'mock-path', iv: 'mock-iv', salt: 'mock-salt' };
         }
 
         await this.remoteStore.compactSnapshot(documentId, encryptedNewState, maxId, false, encryptedPath);

@@ -34,10 +34,14 @@ export class ObsidianNoteRepository implements INoteRepository {
             // Create nested folders if needed
             const parts = path.split('/');
             if (parts.length > 1) {
-                const folderPath = parts.slice(0, -1).join('/');
-                const folder = this.app.vault.getAbstractFileByPath(folderPath);
-                if (!folder) {
-                    await this.app.vault.createFolder(folderPath);
+                const folderParts = parts.slice(0, -1);
+                let current = '';
+                for (const part of folderParts) {
+                    current = current ? `${current}/${part}` : part;
+                    const folder = this.app.vault.getAbstractFileByPath(current);
+                    if (!folder) {
+                        await this.app.vault.createFolder(current);
+                    }
                 }
             }
             await this.app.vault.create(path, content);

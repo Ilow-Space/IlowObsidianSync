@@ -1,14 +1,31 @@
-﻿
 import * as Y from 'yjs';
 import { LocalHistoryStore } from './LocalHistoryStore';
 
 export class YjsEngine {
     public localStore = new LocalHistoryStore();
     private activeDocs = new Map<string, Y.Doc>();
+    private refCounts = new Map<string, number>();
+    private fallbackCache = new Map<string, WeakRef<Y.Doc>>();
 
     public async getOrCreateDoc(documentId: string, initialContent?: string): Promise<Y.Doc> {
+        // Increment reference count if already active
         if (this.activeDocs.has(documentId)) {
+            const currentCount = this.refCounts.get(documentId) || 0;
+            this.refCounts.set(documentId, currentCount + 1);
             return this.activeDocs.get(documentId)!;
+        }
+
+        // Check fallback cache first (soft cache)
+        const fallbackRef = this.fallbackCache.get(documentId);
+        if (fallbackRef) {
+            const doc = fallbackRef.deref();
+            if (doc) {
+                this.activeDocs.set(documentId, doc);
+                this.refCounts.set(documentId, 1);
+                this.fallbackCache.delete(documentId);
+                return doc;
+            }
+            this.fallbackCache.delete(documentId);
         }
 
         const doc = new Y.Doc();
@@ -26,21 +43,33 @@ export class YjsEngine {
         }
 
         this.activeDocs.set(documentId, doc);
+        this.refCounts.set(documentId, 1);
         return doc;
     }
 
     public async applyUpdates(documentId: string, updates: Uint8Array[]): Promise<Y.Doc> {
         const doc = await this.getOrCreateDoc(documentId);
 
-        doc.transact(() => {
-            for (const update of updates) {
-                try {
-                    Y.applyUpdate(doc, update);
-                } catch (err) {
-                    console.error(`YjsEngine error applying update for ${documentId}:`, err);
+        if (documentId === 'shard-index') {
+            console.log('[applyUpdates] BEFORE:', Array.from(doc.getMap('vault-tree').entries()).map(e => [e[0], e[1].isDeleted]));
+        }
+
+        for (const update of updates) {
+            try {
+                if (documentId === 'shard-index') {
+                    const tempDoc = new Y.Doc();
+                    Y.applyUpdate(tempDoc, update);
+                    console.log(`[applyUpdates] update tempDoc entries:`, Array.from(tempDoc.getMap('vault-tree').entries()).map(e => [e[0], e[1]?.isDeleted]));
                 }
+                Y.applyUpdate(doc, update);
+            } catch (err) {
+                console.error(`YjsEngine error applying update for ${documentId}:`, err);
             }
-        });
+        }
+
+        if (documentId === 'shard-index') {
+            console.log('[applyUpdates] AFTER:', Array.from(doc.getMap('vault-tree').entries()).map(e => [e[0], e[1].isDeleted]));
+        }
 
         // Persist new doc state to LocalHistoryStore
         const state = Y.encodeStateAsUpdate(doc);
@@ -107,11 +136,23 @@ export class YjsEngine {
     }
 
     public removeDoc(documentId: string) {
-        this.activeDocs.delete(documentId);
+        if (!this.activeDocs.has(documentId)) return;
+
+        const currentCount = this.refCounts.get(documentId) || 1;
+        if (currentCount > 1) {
+            this.refCounts.set(documentId, currentCount - 1);
+        } else {
+            const doc = this.activeDocs.get(documentId)!;
+            this.fallbackCache.set(documentId, new WeakRef(doc));
+            this.activeDocs.delete(documentId);
+            this.refCounts.delete(documentId);
+        }
     }
 
     public destroy(): void {
         this.activeDocs.clear();
+        this.refCounts.clear();
+        this.fallbackCache.clear();
         this.localStore.close();
     }
 }

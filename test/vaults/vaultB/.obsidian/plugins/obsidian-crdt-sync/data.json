@@ -1,6 +1,6 @@
 {
-  "serverUrl": "https://obsidian.ilow.io",
-  "postgrestUrl": "https://obsidian.ilow.io",
+  "serverUrl": "http://obsidian.ilow.io",
+  "postgrestUrl": "http://obsidian.ilow.io",
   "adminToken": "A547245O7B57F75A7U7B4F7U57I75E7D27b4A5U75IEFBaszsjbuif32772525b?",
   "salt": "973c0f939ca2c4db1750589044bbccd8"
 }
