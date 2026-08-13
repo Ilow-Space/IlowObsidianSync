@@ -1,0 +1,14 @@
+{
+    "threshold": 0,
+    "minLines": 5,
+    "minTokens": 50,
+    "reporters": [
+        "console"
+    ],
+    "ignore": [
+        "**/node_modules/**",
+        "**/dist/**",
+        "**/*.test.ts"
+    ],
+    "absolute": true
+}
