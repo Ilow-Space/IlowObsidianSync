@@ -171,4 +171,41 @@ describe('Sync Orchestrator & Network Resilience', () => {
             expect.not.stringMatching(/undefined|null/)
         );
     });
+    it('BUG REGRESSION: Silent background pull failure must notify statusCallback of error', async () => {
+        statusCb.mockClear();
+
+        // Simulate HTTP 502 / network error during snapshot fetch
+        remoteMock.fetchSnapshot.mockRejectedValue(new Error('Failed to fetch snapshot: 502'));
+
+        // Execute silent pull (isSilent = true, as done for shard-index during background sync)
+        await orchestrator.pullDocument('shard-index', null, true);
+
+        // Internal connection error state must be set
+        expect(orchestrator['hasConnectionError']).toBe(true);
+
+        // UI Status callback MUST be triggered with error status despite being a silent pull
+        expect(statusCb).toHaveBeenCalledWith('error', expect.stringMatching(/Connection failed/i));
+    });
+
+    it('BUG REGRESSION: runFullSync failure must trigger UI error status and suppress completion log', async () => {
+        statusCb.mockClear();
+
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+        // Fail index pull during runFullSync
+        remoteMock.fetchSnapshot.mockRejectedValue(new Error('Failed to fetch snapshot: 502'));
+
+        await orchestrator.runFullSync();
+
+        // 1. Must notify UI statusCallback of failure
+        expect(statusCb).toHaveBeenCalledWith('error', expect.anything());
+
+        // 2. Must NOT falsely log "Full Sync Complete." when errors occur
+        const logMessages = logSpy.mock.calls.map(call => call.join(' '));
+        expect(logMessages.some(msg => msg.includes('Full Sync Complete'))).toBe(false);
+
+        logSpy.mockRestore();
+        warnSpy.mockRestore();
+    });
 });
