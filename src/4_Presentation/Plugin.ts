@@ -1,11 +1,15 @@
-﻿import { Plugin, Notice, TFile, TAbstractFile, WorkspaceLeaf, TFolder } from 'obsidian';
+import { Plugin, Notice, TFile, TAbstractFile, WorkspaceLeaf, TFolder } from 'obsidian';
 import { SettingsTab } from './SettingsTab';
 import { WebCryptoService } from '@infrastructure/Crypto/WebCryptoService';
 import { PostgresRemoteStore } from '@infrastructure/Postgres/PostgresRemoteStore';
 import { ObsidianNoteRepository } from '@infrastructure/Obsidian/ObsidianNoteRepository';
-import { YjsEngine } from '@infrastructure/Crdt/YjsEngine';
-import { SyncOrchestrator, SyncStatus } from '@application/Sync/SyncOrchestrator';
-import { TreeIndexManager } from '@application/Sync/TreeIndexManager';
+import { LoroSyncEngine } from '@infrastructure/Crdt/LoroSyncEngine';
+import { LoroMigrationManager } from '@infrastructure/Crdt/LoroMigrationManager';
+import { NetworkOrchestrator, SyncStatus } from '@application/Sync/NetworkOrchestrator';
+import { SyncEventBus } from '@application/Sync/SyncEventBus';
+import { VaultEventWatcher } from '@application/Sync/VaultEventWatcher';
+import { LoroVfsController } from '@application/Sync/LoroVfsController';
+import { ObsidianDiskReconciler } from '@application/Sync/ObsidianDiskReconciler';
 import { SyncSidebarView, SYNC_SIDEBAR_VIEW_TYPE } from './Views/SyncSidebarView';
 
 interface PluginSettings {
@@ -13,7 +17,7 @@ interface PluginSettings {
     headers: Record<string, string>;
     salt: string;
     adminToken: string;
-    syncDebounceMs: number; // NEW
+    syncDebounceMs: number;
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
@@ -21,17 +25,23 @@ const DEFAULT_SETTINGS: PluginSettings = {
 	headers: {},
 	salt: '',
 	adminToken: '',
-	syncDebounceMs: 1000 // NEW DEFAULT
-}
+	syncDebounceMs: 1000
+};
 
 export default class MyPlugin extends Plugin {
 	public settings!: PluginSettings;
 	public cryptoService!: WebCryptoService;
 	private noteRepo!: ObsidianNoteRepository;
-	private yjsEngine!: YjsEngine;
 	private remoteStore: PostgresRemoteStore | null = null;
-	private syncOrchestrator: SyncOrchestrator | null = null;
-	private treeIndexManager: TreeIndexManager | null = null;
+
+	// New Reactive Stack
+	private eventBus!: SyncEventBus;
+	private syncEngine!: LoroSyncEngine;
+	private vfsController: LoroVfsController | null = null;
+	private diskReconciler: ObsidianDiskReconciler | null = null;
+	private vaultEventWatcher: VaultEventWatcher | null = null;
+	private networkOrchestrator: NetworkOrchestrator | null = null;
+
 	private derivedKey: CryptoKey | null = null;
 	private statusBarItem!: HTMLElement;
 	private isBootstrapping = false;
@@ -42,25 +52,23 @@ export default class MyPlugin extends Plugin {
 	}
 
 	async onload() {
-		console.log('Loading Obsidian CRDT Sync Plugin (VFS Edition)');
+		console.log('Loading Obsidian CRDT Sync Plugin (Loro Reactive VFS Edition)');
+
+		// 1. Perform Yjs -> Loro Migration schema check and purge on boot
+		await LoroMigrationManager.performLibraryMigrationCheck();
 
 		await this.loadSettings();
 
+		this.eventBus = new SyncEventBus();
+		this.syncEngine = new LoroSyncEngine();
 		this.cryptoService = new WebCryptoService();
 		this.noteRepo = new ObsidianNoteRepository(this.app);
-		this.yjsEngine = new YjsEngine();
 
 		// Ensure salt is initialized if missing
 		if (!this.settings.salt) {
 			this.settings.salt = this.cryptoService.generateSalt();
 			await this.saveSettings();
 		}
-
-		this.noteRepo.onNoteChange(async (path, content) => {
-			if (this.syncOrchestrator) {
-				await this.syncOrchestrator.handleLocalChange(path, content);
-			}
-		});
 
 		// Register Sidebar View
 		this.registerView(
@@ -84,66 +92,40 @@ export default class MyPlugin extends Plugin {
 
 		this.initializeSyncOrchestrator();
 
-		// Auto-load persisted key from secure secret storage[cite: 3]
+		// Auto-load master sync key from secret storage
 		try {
 			const keyData = await (this.app as any).secretStorage.getSecret('crdt-master-key');
 			if (keyData) {
 				this.updateStatusBar('syncing', 'Loading key...');
 				this.derivedKey = await this.cryptoService.importKey(keyData);
 
-				if (this.syncOrchestrator && this.treeIndexManager) {
-					this.syncOrchestrator.setCryptoKey(this.derivedKey);
+				if (this.networkOrchestrator) {
+					this.networkOrchestrator.setCryptoKey(this.derivedKey);
 					this.runBackgroundBootstrap().catch(console.error);
 				}
 			}
 		} catch (err) {
-			console.error('Failed to auto-load persisted sync key:', err);
+			console.error('Failed to auto-load master sync key:', err);
 			this.updateStatusBar('error', 'Failed to load key');
 		}
 
-		// Add settings tab[cite: 3]
+		// Add settings tab
 		this.addSettingTab(new SettingsTab(this.app, this));
 
-		// Register workspace & vault event listeners[cite: 3]
+		// Register file open hook
 		this.registerEvent(
 			this.app.workspace.on('file-open', async (file: TFile | null) => {
-				if (file && file.extension === 'md' && this.syncOrchestrator) {
-					await this.syncOrchestrator.handleFileOpen(file.path);
+				if (file && file.extension === 'md' && this.networkOrchestrator) {
+					await this.networkOrchestrator.pullDocument(file.path);
 				}
 			})
 		);
 
-		this.registerEvent(
-			this.app.vault.on('create', (file: TAbstractFile) => {
-				if (this.treeIndexManager) {
-					const path = file.path;
-					const isFolder = file instanceof TFolder || (file as any).children !== undefined;
-					this.treeIndexManager.handleCreate(path, isFolder, file).catch(console.error);
-				}
-			})
-		);
-
-		this.registerEvent(
-			this.app.vault.on('rename', async (file: TAbstractFile, oldPath: string) => {
-				if (this.treeIndexManager) {
-					await this.treeIndexManager.handleRename(oldPath, file.path);
-				}
-			})
-		);
-
-		this.registerEvent(
-			this.app.vault.on('delete', async (file: TAbstractFile) => {
-				if (this.treeIndexManager) {
-					await this.treeIndexManager.handleDelete(file.path);
-				}
-			})
-		);
-
-		// Run full VFS synchronization interval[cite: 3]
+		// Full synchronization sync interval
 		this.registerInterval(
 			window.setInterval(async () => {
-				if (this.isKeyDerived && this.syncOrchestrator) {
-					await this.syncOrchestrator.runFullSync();
+				if (this.isKeyDerived && this.networkOrchestrator) {
+					await this.networkOrchestrator.runFullSync();
 				}
 			}, 10000)
 		);
@@ -155,13 +137,27 @@ export default class MyPlugin extends Plugin {
 			this.manifestUnsubscribe();
 			this.manifestUnsubscribe = null;
 		}
-		if (this.syncOrchestrator) {
-			this.syncOrchestrator.stopAll();
+		if (this.vaultEventWatcher) {
+			this.vaultEventWatcher.destroy();
+		}
+		if (this.vfsController) {
+			this.vfsController.destroy();
+		}
+		if (this.diskReconciler) {
+			this.diskReconciler.destroy();
+		}
+		if (this.networkOrchestrator) {
+			this.networkOrchestrator.stopAll();
 		}
 		if (this.remoteStore) {
 			this.remoteStore.disconnect();
 		}
-		this.yjsEngine.destroy();
+		if (this.eventBus) {
+			this.eventBus.destroy();
+		}
+		if (this.syncEngine) {
+			this.syncEngine.destroy();
+		}
 	}
 
 	async loadSettings() {
@@ -177,8 +173,8 @@ export default class MyPlugin extends Plugin {
 		return this.remoteStore;
 	}
 
-	public getSyncOrchestrator(): SyncOrchestrator | null {
-		return this.syncOrchestrator;
+	public getSyncOrchestrator(): NetworkOrchestrator | null {
+		return this.networkOrchestrator;
 	}
 
 	public updateStatusBar(status: SyncStatus, msg: string) {
@@ -214,15 +210,13 @@ export default class MyPlugin extends Plugin {
 		try {
 			this.derivedKey = await this.cryptoService.deriveKey(password, this.settings.salt);
 
-			// Save the derived key securely to native secret storage[cite: 3]
 			const exportedKey = await this.cryptoService.exportKey(this.derivedKey);
 			await (this.app as any).secretStorage.setSecret('crdt-master-key', exportedKey);
 
-			// Re-initialize to ensure latest settings (like syncDebounceMs) are active!
 			this.initializeSyncOrchestrator();
 
-			if (this.syncOrchestrator && this.treeIndexManager) {
-				this.syncOrchestrator.setCryptoKey(this.derivedKey);
+			if (this.networkOrchestrator) {
+				this.networkOrchestrator.setCryptoKey(this.derivedKey);
 				this.runBackgroundBootstrap().catch(console.error);
 			}
 		} catch (err) {
@@ -233,33 +227,33 @@ export default class MyPlugin extends Plugin {
 
 	private async runBackgroundBootstrap() {
 		if (this.isBootstrapping) return;
-		if (!this.treeIndexManager || !this.syncOrchestrator || !this.remoteStore) return;
+		if (!this.vfsController || !this.networkOrchestrator || !this.remoteStore) return;
         
 		this.isBootstrapping = true;
 		this.updateStatusBar('syncing', 'Bootstrapping VFS index...');
 		try {
-			await this.treeIndexManager.initialize();
+			await this.vfsController.initialize();
 
 			if (this.manifestUnsubscribe) {
 				this.manifestUnsubscribe();
 			}
-			// Subscribe to real-time updates for all documents via manifest
+
 			this.manifestUnsubscribe = this.remoteStore.subscribeToUpdates('manifest', (docId, action) => {
 				if (!docId) return;
 
-				if (docId === this.treeIndexManager!.INDEX_DOC_ID) {
-					this.syncOrchestrator?.runFullSync().catch(console.error);
+				if (docId === 'shard-index') {
+					this.networkOrchestrator?.runFullSync().catch(console.error);
 				} else {
-					const path = this.treeIndexManager!.getPathForUuid(docId);
-					this.syncOrchestrator?.pullDocument(docId, path, true).catch(console.error);
+					const path = this.vfsController!.getPathForUuid(docId);
+					this.networkOrchestrator?.pullDocument(docId, path, true).catch(console.error);
 				}
 			});
 
-			await this.syncOrchestrator.runFullSync();
+			await this.networkOrchestrator.runFullSync();
 
 			const activeFile = this.app.workspace.getActiveFile();
 			if (activeFile && activeFile.extension === 'md') {
-				await this.syncOrchestrator.handleFileOpen(activeFile.path);
+				await this.networkOrchestrator.pullDocument(activeFile.path);
 			}
 
 			this.updateStatusBar('synced', 'Fully synced');
@@ -273,16 +267,16 @@ export default class MyPlugin extends Plugin {
 
 	public async unloadKey(): Promise<void> {
 		this.derivedKey = null;
-		if (this.syncOrchestrator) {
-			this.syncOrchestrator.setCryptoKey(null);
-			this.syncOrchestrator.stopAll();
+		if (this.networkOrchestrator) {
+			this.networkOrchestrator.setCryptoKey(null);
+			this.networkOrchestrator.stopAll();
 		}
 		this.updateStatusBar('offline', 'Disconnected');
 
 		try {
 			await (this.app as any).secretStorage.deleteSecret('crdt-master-key');
 		} catch (err) {
-			console.error('Failed to remove persisted sync key:', err);
+			console.error('Failed to remove master sync key:', err);
 		}
 	}
 
@@ -291,41 +285,55 @@ export default class MyPlugin extends Plugin {
 			this.manifestUnsubscribe();
 			this.manifestUnsubscribe = null;
 		}
-		if (this.syncOrchestrator) {
-			this.syncOrchestrator.stopAll();
+		if (this.vaultEventWatcher) {
+			this.vaultEventWatcher.destroy();
+			this.vaultEventWatcher = null;
 		}
-        
+		if (this.vfsController) {
+			this.vfsController.destroy();
+			this.vfsController = null;
+		}
+		if (this.diskReconciler) {
+			this.diskReconciler.destroy();
+			this.diskReconciler = null;
+		}
+		if (this.networkOrchestrator) {
+			this.networkOrchestrator.stopAll();
+			this.networkOrchestrator = null;
+		}
 		if (this.remoteStore) {
 			this.remoteStore.disconnect();
+			this.remoteStore = null;
 		}
 
 		if (this.settings.serverUrl) {
 			this.remoteStore = new PostgresRemoteStore(this.settings.serverUrl, this.settings.headers);
-            
 			const socketUrl = this.settings.serverUrl.replace(/^http/i, 'ws');
-			this.remoteStore.connectWebSocket(socketUrl);
 
-			this.syncOrchestrator = new SyncOrchestrator(
+			this.vfsController = new LoroVfsController(this.syncEngine, this.eventBus);
+			this.diskReconciler = new ObsidianDiskReconciler(this.app, this.syncEngine, this.eventBus);
+			this.vaultEventWatcher = new VaultEventWatcher(this.app, this.eventBus);
+			this.networkOrchestrator = new NetworkOrchestrator(
 				this.remoteStore,
 				this.cryptoService,
-				this.yjsEngine,
+				this.syncEngine,
 				this.noteRepo,
+				this.vfsController,
+				this.eventBus,
 				(status, msg) => this.updateStatusBar(status, msg),
-				this.settings.syncDebounceMs // INJECT SPEEDOVERRIDE
+				this.settings.syncDebounceMs
 			);
-            
-			// Initialize TreeIndexManager instead of IndexManager
-			this.treeIndexManager = new TreeIndexManager(this.app, this.yjsEngine, this.syncOrchestrator);
-			this.syncOrchestrator.setTreeIndexManager(this.treeIndexManager);
+
+			this.vfsController.initialize();
+			this.diskReconciler.initialize();
+			this.vaultEventWatcher.initialize();
+			this.networkOrchestrator.initialize();
+			this.networkOrchestrator.connectWebSocket(socketUrl);
 
 			if (this.derivedKey) {
-				this.syncOrchestrator.setCryptoKey(this.derivedKey);
+				this.networkOrchestrator.setCryptoKey(this.derivedKey);
 				this.runBackgroundBootstrap().catch(console.error);
 			}
-		} else {
-			this.remoteStore = null;
-			this.syncOrchestrator = null;
-			this.treeIndexManager = null;
 		}
 	}
 }
