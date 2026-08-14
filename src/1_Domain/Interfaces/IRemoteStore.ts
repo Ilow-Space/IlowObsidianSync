@@ -19,10 +19,17 @@ export interface ServerTelemetry {
     systemHealth: 'healthy' | 'degraded' | 'critical';
 }
 
+export interface SnapshotDetails {
+    encryptedState: EncryptedBlob | null;
+    maxCompactedId: number;
+    isDeleted: boolean;
+}
+
 export interface IRemoteStore {
     getLatestUpdateId(documentId: string): Promise<number>;
     getBulkLatestUpdateIds(): Promise<Record<string, number>>; // NEW BULK METHOD
     fetchSnapshot(documentId: string): Promise<EncryptedBlob | null>;
+    fetchSnapshotDetails(documentId: string): Promise<SnapshotDetails | null>;
     fetchUpdatesSince(documentId: string, lastId: number): Promise<CRDTUpdate[]>;
     pushUpdate(documentId: string, update: EncryptedBlob, encryptedPath?: EncryptedBlob | null): Promise<void>;
     compactSnapshot(documentId: string, newState: EncryptedBlob, maxId: number, isDeleted: boolean, encryptedPath?: EncryptedBlob | null): Promise<void>;

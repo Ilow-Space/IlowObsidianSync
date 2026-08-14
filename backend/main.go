@@ -199,8 +199,10 @@ func runMigrations() {
 			encrypted_state BYTEA,
 			encrypted_path BYTEA,
 			is_deleted BOOLEAN DEFAULT false,
+			max_compacted_id INT DEFAULT 0,
 			updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 		);`,
+		`ALTER TABLE vault_snapshots ADD COLUMN IF NOT EXISTS max_compacted_id INT DEFAULT 0;`,
 		`CREATE TABLE IF NOT EXISTS vault_updates (
 			id SERIAL PRIMARY KEY,
 			document_id TEXT NOT NULL REFERENCES vault_snapshots(document_id) ON DELETE CASCADE,
@@ -305,10 +307,11 @@ func handleGetSnapshot(w http.ResponseWriter, r *http.Request) {
 	var encState []byte
 	var encPath []byte
 	var isDeleted bool
+	var maxCompactedID int
 	var updatedAt time.Time
 
-	err := db.QueryRow("SELECT encrypted_state, encrypted_path, is_deleted, updated_at FROM vault_snapshots WHERE document_id = $1", id).
-		Scan(&encState, &encPath, &isDeleted, &updatedAt)
+	err := db.QueryRow("SELECT encrypted_state, encrypted_path, is_deleted, max_compacted_id, updated_at FROM vault_snapshots WHERE document_id = $1", id).
+		Scan(&encState, &encPath, &isDeleted, &maxCompactedID, &updatedAt)
 
 	if err == sql.ErrNoRows {
 		http.Error(w, "Snapshot not found", http.StatusNotFound)
@@ -323,6 +326,7 @@ func handleGetSnapshot(w http.ResponseWriter, r *http.Request) {
 		EncryptedState string `json:"encrypted_state,omitempty"`
 		EncryptedPath  string `json:"encrypted_path,omitempty"`
 		IsDeleted      bool   `json:"is_deleted"`
+		MaxCompactedID int    `json:"max_compacted_id"`
 		UpdatedAt      string `json:"updated_at"`
 	}
 
@@ -331,6 +335,7 @@ func handleGetSnapshot(w http.ResponseWriter, r *http.Request) {
 		EncryptedState: byteaToHex(encState),
 		EncryptedPath:  byteaToHex(encPath),
 		IsDeleted:      isDeleted,
+		MaxCompactedID: maxCompactedID,
 		UpdatedAt:      updatedAt.Format(time.RFC3339),
 	}
 
@@ -512,23 +517,25 @@ func handlePostCompact(w http.ResponseWriter, r *http.Request) {
 
 	if len(pathBytes) > 0 {
 		_, err = tx.Exec(`
-			INSERT INTO vault_snapshots (document_id, encrypted_state, encrypted_path, is_deleted, updated_at)
-			VALUES ($1, $2, $3, $4, NOW())
+			INSERT INTO vault_snapshots (document_id, encrypted_state, encrypted_path, is_deleted, max_compacted_id, updated_at)
+			VALUES ($1, $2, $3, $4, $5, NOW())
 			ON CONFLICT (document_id) DO UPDATE
 			SET encrypted_state = EXCLUDED.encrypted_state,
 				encrypted_path = EXCLUDED.encrypted_path,
 				is_deleted = EXCLUDED.is_deleted,
+				max_compacted_id = EXCLUDED.max_compacted_id,
 				updated_at = NOW();
-		`, id, stateBytes, pathBytes, payload.PIsDeleted)
+		`, id, stateBytes, pathBytes, payload.PIsDeleted, payload.PMaxID)
 	} else {
 		_, err = tx.Exec(`
-			INSERT INTO vault_snapshots (document_id, encrypted_state, is_deleted, updated_at)
-			VALUES ($1, $2, $3, NOW())
+			INSERT INTO vault_snapshots (document_id, encrypted_state, is_deleted, max_compacted_id, updated_at)
+			VALUES ($1, $2, $3, $4, NOW())
 			ON CONFLICT (document_id) DO UPDATE
 			SET encrypted_state = EXCLUDED.encrypted_state,
 				is_deleted = EXCLUDED.is_deleted,
+				max_compacted_id = EXCLUDED.max_compacted_id,
 				updated_at = NOW();
-		`, id, stateBytes, payload.PIsDeleted)
+		`, id, stateBytes, payload.PIsDeleted, payload.PMaxID)
 	}
 
 	if err != nil {

@@ -2,7 +2,7 @@ import { browser, expect } from '@wdio/globals';
 import path from 'path';
 import fs from 'fs';
 
-const BACKEND_URL = 'http://obsidian.ilow.io';
+const BACKEND_URL = 'http://localhost:3001';
 const ADMIN_TOKEN = 'A547245O7B57F75A7U7B4F7U57I75E7D27b4A5U75IEFBaszsjbuif32772525b?';
 const MASTER_PASSWORD = '1';
 
@@ -21,20 +21,18 @@ async function disableActivePlugin() {
 }
 
 async function hardResetDatabase() {
-    await browser.executeAsync(async (url, token, done) => {
-        try {
-            const res = await fetch(`${url}/api/admin/truncate`, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json'
-                }
-            });
-            done({ status: res.status });
-        } catch (e) {
-            done({ error: String(e) });
-        }
-    }, BACKEND_URL, ADMIN_TOKEN);
+    try {
+        const res = await fetch(`${BACKEND_URL}/api/admin/truncate`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${ADMIN_TOKEN}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        console.log('\n--- [DB RESET STATUS] ---', res.status, '\n');
+    } catch (e) {
+        console.error('\n--- [DB RESET ERROR] ---', e, '\n');
+    }
 }
 
 function wipeVaultDiskFiles(vPath: string) {

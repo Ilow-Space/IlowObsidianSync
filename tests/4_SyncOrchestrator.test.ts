@@ -17,6 +17,7 @@ describe('Sync Orchestrator & Network Resilience', () => {
         remoteMock = {
             getLatestUpdateId: vi.fn(),
             fetchSnapshot: vi.fn().mockResolvedValue(null),
+            fetchSnapshotDetails: vi.fn().mockResolvedValue(null),
             fetchUpdatesSince: vi.fn().mockResolvedValue([]),
             pushUpdate: vi.fn().mockResolvedValue(undefined),
             compactSnapshot: vi.fn().mockResolvedValue(undefined),
@@ -176,7 +177,7 @@ describe('Sync Orchestrator & Network Resilience', () => {
         statusCb.mockClear();
 
         // Simulate HTTP 502 / network error during snapshot fetch
-        remoteMock.fetchSnapshot.mockRejectedValue(new Error('Failed to fetch snapshot: 502'));
+        remoteMock.fetchSnapshotDetails.mockRejectedValue(new Error('Failed to fetch snapshot: 502'));
 
         // Execute silent pull (isSilent = true, as done for shard-index during background sync)
         await orchestrator.pullDocument('shard-index', null, true);
@@ -195,7 +196,7 @@ describe('Sync Orchestrator & Network Resilience', () => {
         const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
         // Fail index pull during runFullSync
-        remoteMock.fetchSnapshot.mockRejectedValue(new Error('Failed to fetch snapshot: 502'));
+        remoteMock.fetchSnapshotDetails.mockRejectedValue(new Error('Failed to fetch snapshot: 502'));
 
         await orchestrator.runFullSync();
 

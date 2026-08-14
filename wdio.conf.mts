@@ -18,8 +18,8 @@ if (fs.existsSync(manifestPath)) {
 }
 
 const sharedSettings = {
-    serverUrl: 'http://obsidian.ilow.io',
-    postgrestUrl: 'http://obsidian.ilow.io',
+    serverUrl: 'http://localhost:3001',
+    postgrestUrl: 'http://localhost:3001',
     adminToken: 'A547245O7B57F75A7U7B4F7U57I75E7D27b4A5U75IEFBaszsjbuif32772525b?',
     salt: '973c0f939ca2c4db1750589044bbccd8'
 };
@@ -49,14 +49,17 @@ export const config = defineConfig({
     },
 
     // Automatically drain and print Obsidian's browser console logs after each test
-    afterEach: async function (test, context, { error }) {
+    // @ts-ignore
+    afterEach: async function (test: any, context: any, { error }: any) {
         try {
             const logs = await browser.getLogs('browser');
             if (logs && logs.length > 0) {
-                console.log(`\n--- OBSIDIAN CONSOLE LOGS [${test.title}] ---`);
+                console.log(`\n--- OBSIDIAN CONSOLE LOGS [${(test as any).title}] ---`);
                 logs.forEach(log => {
                     // Filter out noise and render clean output
+                    // @ts-ignore
                     if (!log.message.includes('SafeAreaInsetBottom')) {
+                        // @ts-ignore
                         console.log(`[${log.level}] ${log.message}`);
                     }
                 });

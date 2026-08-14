@@ -28,4 +28,10 @@ export interface DocumentMetadata {
     isFolder?: boolean;
 }
 
+export interface VFSNode {
+    type: 'file' | 'folder';
+    parentId: string; // "root" or uuid of parent folder node
+    metadata: string; // Represents filename or foldername
+    isDeleted: boolean;
+}
 

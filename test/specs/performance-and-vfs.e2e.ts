@@ -2,7 +2,7 @@ import { browser, expect } from '@wdio/globals';
 import path from 'path';
 import fs from 'fs';
 
-const BACKEND_URL = 'http://obsidian.ilow.io';
+const BACKEND_URL = 'http://localhost:3001';
 const ADMIN_TOKEN = 'A547245O7B57F75A7U7B4F7U57I75E7D27b4A5U75IEFBaszsjbuif32772525b?';
 const MASTER_PASSWORD = '1';
 
@@ -21,21 +21,18 @@ async function disableActivePlugin() {
 }
 
 async function hardResetDatabase() {
-    const result = await browser.executeAsync(async (url, token, done) => {
-        try {
-            const res = await fetch(`${url}/api/admin/truncate`, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json'
-                }
-            });
-            done({ status: res.status });
-        } catch (e) {
-            done({ error: String(e) });
-        }
-    }, BACKEND_URL, ADMIN_TOKEN);
-    console.log('\n--- [DB RESET RESULT] ---', result, '\n');
+    try {
+        const res = await fetch(`${BACKEND_URL}/api/admin/truncate`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${ADMIN_TOKEN}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        console.log('\n--- [DB RESET STATUS] ---', res.status, '\n');
+    } catch (e) {
+        console.error('\n--- [DB RESET ERROR] ---', e, '\n');
+    }
 }
 
 function wipeVaultDiskFiles(vPath: string) {
@@ -104,12 +101,20 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD, wipeDb = false) {
         }
     }, pwd);
 
-    await browser.waitUntil(async () => {
-        return await browser.execute(() => {
-            const logs = (window as any).__obsidianLogs || [];
-            return logs.some((l: string) => l.includes('[SyncOrchestrator] Full Sync Complete.'));
-        });
-    }, { timeout: 15000, timeoutMsg: 'Plugin failed to complete initial background sync.' });
+    try {
+        await browser.waitUntil(async () => {
+            return await browser.execute(() => {
+                const logs = (window as any).__obsidianLogs || [];
+                return logs.some((l: string) => l.includes('[SyncOrchestrator] Full Sync Complete.'));
+            });
+        }, { timeout: 15000, timeoutMsg: 'Plugin failed to complete initial background sync.' });
+    } catch (e) {
+        const logs = await browser.execute(() => (window as any).__obsidianLogs || []);
+        console.log('\n--- OBSIDIAN INITIAL SYNC LOGS ON FAILURE ---');
+        logs.forEach((log: string) => console.log(log));
+        console.log('---------------------------------------------\n');
+        throw e;
+    }
 }
 
 describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
@@ -339,7 +344,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         });
 
         // 4. Cycle 2: Second reconciliation (Files are ALREADY gone from disk)
-        const cycle2RemovalLogs = await browser.executeAsync(async (done) => {
+        const cycle2RemovalLogs = (await browser.executeAsync(async (done) => {
             (window as any).__obsidianLogs = [];
             const plugin = (window as any).app.plugins.plugins['obsidian-crdt-sync'];
             if (plugin?.treeIndexManager) {
@@ -349,7 +354,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
             const logs: string[] = (window as any).__obsidianLogs || [];
             const removalLogs = logs.filter(l => l.includes('[VfsDeletionService] Removing path:'));
             done(removalLogs);
-        });
+        })) as any;
 
         console.log(`\n--- Cycle 2 VfsDeletionService Removal Logs Count: ${cycle2RemovalLogs.length} ---\n`);
 
@@ -466,7 +471,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         
         await browser.pause(3000); // Allow debounce and compaction to fire
 
-        const snapshotData = await browser.executeAsync(async (url, done) => {
+        const snapshotData = (await browser.executeAsync(async (url, done) => {
             const app = (window as any).app;
             const plugin = app.plugins.plugins['obsidian-crdt-sync'];
             const uuid = plugin.treeIndexManager.getUuidForPath('CompactionTest.md');
@@ -475,7 +480,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
             const res = await fetch(`${url}/api/snapshots/${uuid}`);
             const data = await res.json();
             done(data[0]);
-        }, BACKEND_URL);
+        }, BACKEND_URL)) as any;
 
         // FAILS ON CURRENT CODE: Pull-triggered compactions pass `undefined` for path, setting it to NULL in DB.
         expect(snapshotData.encrypted_path).not.toBeNull();
@@ -617,7 +622,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
         await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
-        const leakedKeys = await browser.executeAsync(async (done) => {
+        const leakedKeys = (await browser.executeAsync(async (done) => {
             const app = (window as any).app;
             const plugin = app.plugins.plugins['obsidian-crdt-sync'];
             
@@ -637,7 +642,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
                     hasCounter: plugin.syncOrchestrator.fileUpdateCounters.has(uuid)
                 });
             }, 1000);
-        });
+        })) as any;
 
         // FAILS ON CURRENT CODE: Maps hold onto deleted UUIDs forever, leaking memory.
         expect(leakedKeys.hasLastSync).toBe(false);
