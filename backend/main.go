@@ -1,15 +1,18 @@
 package main
 
 import (
+	"compress/gzip"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -69,8 +72,9 @@ var globalHub = Hub{
 }
 
 type SubscribeMessage struct {
-	Action string `json:"action"`
-	Filter string `json:"filter"`
+	Action  string   `json:"action"`
+	Filter  string   `json:"filter"`
+	Filters []string `json:"filters"`
 }
 
 type PgPayload struct {
@@ -173,6 +177,15 @@ func main() {
 	}
 }
 
+type gzipResponseWriter struct {
+	io.Writer
+	http.ResponseWriter
+}
+
+func (g gzipResponseWriter) Write(b []byte) (int, error) {
+	return g.Writer.Write(b)
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddUint64(&reqsLastSecond, 1)
@@ -188,6 +201,16 @@ func corsMiddleware(next http.Handler) http.Handler {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") && r.Header.Get("Upgrade") != "websocket" {
+			w.Header().Set("Content-Encoding", "gzip")
+			gz := gzip.NewWriter(w)
+			defer gz.Close()
+			gzw := gzipResponseWriter{Writer: gz, ResponseWriter: w}
+			next.ServeHTTP(gzw, r)
+			return
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }
@@ -258,7 +281,10 @@ func handleGetTelemetry(w http.ResponseWriter, r *http.Request) {
 	rpm := currentRPM
 	telemetryMux.Unlock()
 
-	dbStats := db.Stats()
+	openConns := 0
+	if db != nil {
+		openConns = db.Stats().OpenConnections
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ServerTelemetry{
@@ -268,7 +294,7 @@ func handleGetTelemetry(w http.ResponseWriter, r *http.Request) {
 		ActiveWebSockets:     atomic.LoadInt64(&activeWebSockets),
 		UptimeSeconds:        int64(time.Since(startTime).Seconds()),
 		MemoryAllocMB:        float64(memStats.Alloc) / 1024 / 1024,
-		DBConnections:        dbStats.OpenConnections,
+		DBConnections:        openConns,
 		SystemHealth:         "healthy",
 	})
 }
@@ -707,6 +733,16 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					client.subscriptions[docID] = true
 					client.mu.Unlock()
 				}
+			} else if subMsg.Action == "subscribe_bulk" && len(subMsg.Filters) > 0 {
+				client.mu.Lock()
+				for _, filterStr := range subMsg.Filters {
+					matches := filterRegex.FindStringSubmatch(filterStr)
+					if len(matches) > 1 {
+						docID := matches[1]
+						client.subscriptions[docID] = true
+					}
+				}
+				client.mu.Unlock()
 			}
 		}
 	}

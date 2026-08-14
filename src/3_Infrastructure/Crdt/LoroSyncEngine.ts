@@ -57,55 +57,64 @@ export class LoroSyncEngine {
 	public async applyUpdates(documentId: string, updates: Uint8Array[]): Promise<LoroDoc> {
 		const doc = await this.getOrCreateDoc(documentId);
 
-		for (const update of updates) {
-			try {
-				doc.import(update);
-			} catch (err) {
-				console.error(`LoroSyncEngine error applying update for ${documentId}:`, err);
+		try {
+			for (const update of updates) {
+				try {
+					doc.import(update);
+				} catch (err) {
+					console.error(`LoroSyncEngine error applying update for ${documentId}:`, err);
+				}
 			}
+
+			const snapshot = doc.export({ mode: 'snapshot' });
+			await this.localStore.saveDocumentState(documentId, snapshot);
+
+			return doc;
+		} finally {
+			this.removeDoc(documentId);
 		}
-
-		const snapshot = doc.export({ mode: 'snapshot' });
-		await this.localStore.saveDocumentState(documentId, snapshot);
-
-		return doc;
 	}
 
 	public async handleLocalChange(documentId: string, newContent: string): Promise<Uint8Array | null> {
 		const doc = await this.getOrCreateDoc(documentId);
-		const text = doc.getText('markdown');
-		const currentText = text.toString();
 
-		if (currentText === newContent) {
-			return null;
-		}
+		try {
+			const text = doc.getText('markdown');
+			const currentText = text.toString();
 
-		let update: Uint8Array | null = null;
-
-		// Run fast-diff to apply minimal changes to preserve character anchors and cursor stability
-		const diffs = diff(currentText, newContent);
-		let index = 0;
-
-		doc.setPeerId(doc.peerId);
-
-		for (const [op, value] of diffs) {
-			if (op === 0) { // EQUAL
-				index += value.length;
-			} else if (op === 1) { // INSERT
-				text.insert(index, value);
-				index += value.length;
-			} else if (op === -1) { // DELETE
-				text.delete(index, value.length);
+			if (currentText === newContent) {
+				return null;
 			}
+
+			let update: Uint8Array | null = null;
+
+			// Run fast-diff to apply minimal changes to preserve character anchors and cursor stability
+			const diffs = diff(currentText, newContent);
+			let index = 0;
+
+			doc.setPeerId(doc.peerId);
+
+			for (const [op, value] of diffs) {
+				if (op === 0) { // EQUAL
+					index += value.length;
+				} else if (op === 1) { // INSERT
+					text.insert(index, value);
+					index += value.length;
+				} else if (op === -1) { // DELETE
+					text.delete(index, value.length);
+				}
+			}
+
+			doc.commit();
+			update = doc.export({ mode: 'update' });
+
+			const snapshot = doc.export({ mode: 'snapshot' });
+			await this.localStore.saveDocumentState(documentId, snapshot);
+
+			return update;
+		} finally {
+			this.removeDoc(documentId);
 		}
-
-		doc.commit();
-		update = doc.export({ mode: 'update' });
-
-		const snapshot = doc.export({ mode: 'snapshot' });
-		await this.localStore.saveDocumentState(documentId, snapshot);
-
-		return update;
 	}
 
 	public removeDoc(documentId: string) {

@@ -69,6 +69,44 @@ describe('NetworkOrchestrator & Sync Tests', () => {
 		expect(remoteStoreMock.pushUpdate).toHaveBeenCalled();
 	});
 
+	it('PERF REGRESSION: runFullSync must pull documents concurrently, not sequentially', async () => {
+		const dummyKey = {} as any;
+		orchestrator.setCryptoKey(dummyKey);
+
+		// Mock 50 active files
+		const mockFiles = Array.from({ length: 50 }).map((_, i) => ({ uuid: `doc-${i}`, path: `path-${i}.md`, type: 'file' }));
+		vfsController.getActiveFiles = vi.fn().mockReturnValue(mockFiles as any);
+
+		// Mock pullDocument to take exactly 10ms
+		const pullSpy = vi.spyOn(orchestrator, 'pullDocument').mockImplementation(async () => {
+			return new Promise(resolve => setTimeout(resolve, 10));
+		});
+
+		const start = performance.now();
+		await orchestrator.runFullSync();
+		const duration = performance.now() - start;
+
+		// 50 files * 10ms sequentially = ~500ms. With concurrency 20, it should take ~30ms.
+		expect(duration).toBeLessThan(100);
+	});
+
+	it('PERF REGRESSION: pullDocument must garbage collect LoroDocs when finished if not actively open', async () => {
+		const dummyKey = {} as any;
+		orchestrator.setCryptoKey(dummyKey);
+		orchestrator['activeDocumentId'] = 'doc-1'; // UI has doc-1 open
+
+		// Simulate background sync pulling updates for doc-2 and doc-3
+		remoteStoreMock.fetchSnapshotDetails.mockResolvedValue({ encryptedState: new Uint8Array([1]), maxCompactedId: 10, isDeleted: false });
+
+		await orchestrator.pullDocument('doc-2', 'Folder/doc-2.md', true);
+		await orchestrator.pullDocument('doc-3', 'Folder/doc-3.md', true);
+
+		// activeDocs should ONLY contain 'doc-1' (if loaded) or be empty. It should NOT retain doc-2 or doc-3.
+		const engineActiveDocs = (syncEngine as any).activeDocs;
+		expect(engineActiveDocs.has('doc-2')).toBe(false);
+		expect(engineActiveDocs.has('doc-3')).toBe(false);
+	});
+
 	it('Executes safe rehydration on lagging clients without wiping offline edits', async () => {
 		const dummyKey = {} as any;
 		orchestrator.setCryptoKey(dummyKey);

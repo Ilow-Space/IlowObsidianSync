@@ -1,10 +1,12 @@
 import { App, TAbstractFile, TFile, TFolder } from 'obsidian';
 import { Mutex } from 'async-mutex';
+import PQueue from 'p-queue';
 import { SyncEventBus } from './SyncEventBus';
 import { LoroSyncEngine } from '@infrastructure/Crdt/LoroSyncEngine';
 
 export class ObsidianDiskReconciler {
 	private fileLocks = new Map<string, Mutex>();
+	private diskQueue = new PQueue({ concurrency: 5 });
 
 	constructor(
 		private app: App,
@@ -29,90 +31,98 @@ export class ObsidianDiskReconciler {
 	}
 
 	private async handleCrdtNodeCreated(payload: { uuid: string; path: string; isFolder: boolean; content?: string }): Promise<void> {
-		const mutex = this.getFileMutex(payload.path);
-		await mutex.runExclusive(async () => {
-			const existing = this.app.vault.getAbstractFileByPath(payload.path);
-			if (existing) return;
+		return this.diskQueue.add(async () => {
+			const mutex = this.getFileMutex(payload.path);
+			await mutex.runExclusive(async () => {
+				const existing = this.app.vault.getAbstractFileByPath(payload.path);
+				if (existing) return;
 
-			if (payload.isFolder) {
-				try {
-					await this.app.vault.createFolder(payload.path);
-				} catch (e) {
-					console.error('[ObsidianDiskReconciler] Failed to create folder:', e);
+				if (payload.isFolder) {
+					try {
+						await this.app.vault.createFolder(payload.path);
+					} catch (e) {
+						console.error('[ObsidianDiskReconciler] Failed to create folder:', e);
+					}
+				} else {
+					try {
+						const parentPath = payload.path.substring(0, payload.path.lastIndexOf('/'));
+						if (parentPath && parentPath !== payload.path) {
+							const parentExists = this.app.vault.getAbstractFileByPath(parentPath);
+							if (!parentExists) {
+								await this.app.vault.createFolder(parentPath);
+							}
+						}
+						await this.app.vault.create(payload.path, payload.content || '');
+					} catch (e) {
+						console.error('[ObsidianDiskReconciler] Failed to create file:', e);
+					}
 				}
-			} else {
+			});
+		});
+	}
+
+	private async handleCrdtNodeMoved(payload: { uuid: string; oldPath: string; newPath: string }): Promise<void> {
+		return this.diskQueue.add(async () => {
+			const mutex = this.getFileMutex(payload.newPath);
+			await mutex.runExclusive(async () => {
+				const file = this.app.vault.getAbstractFileByPath(payload.oldPath);
+				if (!file) return;
+
+				const targetExists = this.app.vault.getAbstractFileByPath(payload.newPath);
+				if (targetExists) return;
+
 				try {
-					const parentPath = payload.path.substring(0, payload.path.lastIndexOf('/'));
-					if (parentPath && parentPath !== payload.path) {
+					const parentPath = payload.newPath.substring(0, payload.newPath.lastIndexOf('/'));
+					if (parentPath && parentPath !== payload.newPath) {
 						const parentExists = this.app.vault.getAbstractFileByPath(parentPath);
 						if (!parentExists) {
 							await this.app.vault.createFolder(parentPath);
 						}
 					}
-					await this.app.vault.create(payload.path, payload.content || '');
+					await this.app.fileManager.renameFile(file, payload.newPath);
 				} catch (e) {
-					console.error('[ObsidianDiskReconciler] Failed to create file:', e);
+					console.error('[ObsidianDiskReconciler] Failed to rename file on disk:', e);
 				}
-			}
-		});
-	}
-
-	private async handleCrdtNodeMoved(payload: { uuid: string; oldPath: string; newPath: string }): Promise<void> {
-		const mutex = this.getFileMutex(payload.newPath);
-		await mutex.runExclusive(async () => {
-			const file = this.app.vault.getAbstractFileByPath(payload.oldPath);
-			if (!file) return;
-
-			const targetExists = this.app.vault.getAbstractFileByPath(payload.newPath);
-			if (targetExists) return;
-
-			try {
-				const parentPath = payload.newPath.substring(0, payload.newPath.lastIndexOf('/'));
-				if (parentPath && parentPath !== payload.newPath) {
-					const parentExists = this.app.vault.getAbstractFileByPath(parentPath);
-					if (!parentExists) {
-						await this.app.vault.createFolder(parentPath);
-					}
-				}
-				await this.app.fileManager.renameFile(file, payload.newPath);
-			} catch (e) {
-				console.error('[ObsidianDiskReconciler] Failed to rename file on disk:', e);
-			}
+			});
 		});
 	}
 
 	private async handleCrdtNodeSoftDeleted(payload: { uuid: string; path: string }): Promise<void> {
-		const mutex = this.getFileMutex(payload.path);
-		await mutex.runExclusive(async () => {
-			const file = this.app.vault.getAbstractFileByPath(payload.path);
-			if (!file) return;
+		return this.diskQueue.add(async () => {
+			const mutex = this.getFileMutex(payload.path);
+			await mutex.runExclusive(async () => {
+				const file = this.app.vault.getAbstractFileByPath(payload.path);
+				if (!file) return;
 
-			try {
 				try {
-					await this.app.vault.trash(file, true);
+					try {
+						await this.app.vault.trash(file, true);
+					} catch (e) {
+						await this.app.vault.trash(file, false);
+					}
 				} catch (e) {
-					await this.app.vault.trash(file, false);
+					console.error('[ObsidianDiskReconciler] Failed to trash file/folder:', e);
 				}
-			} catch (e) {
-				console.error('[ObsidianDiskReconciler] Failed to trash file/folder:', e);
-			}
+			});
 		});
 	}
 
 	private async handleCrdtTextChanged(payload: { uuid: string; path: string; content: string }): Promise<void> {
-		const mutex = this.getFileMutex(payload.path);
-		await mutex.runExclusive(async () => {
-			const file = this.app.vault.getAbstractFileByPath(payload.path);
-			if (file && file instanceof TFile) {
-				try {
-					const currentDiskContent = await this.app.vault.read(file);
-					if (currentDiskContent !== payload.content) {
-						await this.app.vault.modify(file, payload.content);
+		return this.diskQueue.add(async () => {
+			const mutex = this.getFileMutex(payload.path);
+			await mutex.runExclusive(async () => {
+				const file = this.app.vault.getAbstractFileByPath(payload.path);
+				if (file && file instanceof TFile) {
+					try {
+						const currentDiskContent = await this.app.vault.read(file);
+						if (currentDiskContent !== payload.content) {
+							await this.app.vault.modify(file, payload.content);
+						}
+					} catch (e) {
+						console.error('[ObsidianDiskReconciler] Failed to write updated text to disk:', e);
 					}
-				} catch (e) {
-					console.error('[ObsidianDiskReconciler] Failed to write updated text to disk:', e);
 				}
-			}
+			});
 		});
 	}
 

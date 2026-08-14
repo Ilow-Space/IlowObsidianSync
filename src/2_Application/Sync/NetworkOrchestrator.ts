@@ -6,6 +6,7 @@ import { LoroVfsController } from './LoroVfsController';
 import { SyncEventBus } from './SyncEventBus';
 import { Mutex } from 'async-mutex';
 import { backOff } from 'exponential-backoff';
+import pLimit from 'p-limit';
 
 export type SyncStatus = 'synced' | 'syncing' | 'error' | 'offline';
 
@@ -51,6 +52,10 @@ export class NetworkOrchestrator {
 		this.activeKey = key;
 		this.hasConnectionError = false;
 		this.triggerStatusUpdate();
+	}
+
+	public setActiveDocumentId(docId: string | null): void {
+		this.activeDocumentId = docId;
 	}
 
 	public isSyncInitialized(): boolean {
@@ -155,12 +160,15 @@ export class NetworkOrchestrator {
 			this.vfsController.rebuildCache();
 
 			const activeFiles = this.vfsController.getActiveFiles();
-			for (const file of activeFiles) {
-				if (this.hasConnectionError) break;
-
-				const latestRemoteId = bulkUpdates[file.uuid] || 0;
-				await this.pullDocument(file.uuid, file.path, true, latestRemoteId);
-			}
+			const limit = pLimit(20);
+			const pullPromises = activeFiles.map(file =>
+				limit(async () => {
+					if (this.hasConnectionError) return;
+					const latestRemoteId = bulkUpdates[file.uuid] || 0;
+					await this.pullDocument(file.uuid, file.path, true, latestRemoteId);
+				})
+			);
+			await Promise.all(pullPromises);
 
 			this.isInitialized = true;
 			console.log('[NetworkOrchestrator] Full Sync Complete.');
@@ -196,65 +204,70 @@ export class NetworkOrchestrator {
 		const taskName = path || 'System Index';
 		if (!isSilent) this.addActiveTask(taskName);
 
-		await this.orchestratorMutex.runExclusive(async () => {
-			const start = performance.now();
-			try {
-				const details = await this.remoteStore.fetchSnapshotDetails(documentId);
-				if (details && lastId < details.maxCompactedId) {
-					console.log(`[NetworkOrchestrator] Lagging client detected for ${documentId}. Initiating snapshot rehydration...`);
+		try {
+			await this.orchestratorMutex.runExclusive(async () => {
+				const start = performance.now();
+				try {
+					const details = await this.remoteStore.fetchSnapshotDetails(documentId);
+					if (details && lastId < details.maxCompactedId) {
+						console.log(`[NetworkOrchestrator] Lagging client detected for ${documentId}. Initiating snapshot rehydration...`);
 
-					let offlineContent: string | null = null;
-					if (path) {
-						offlineContent = await this.noteRepo.readNote(path);
+						let offlineContent: string | null = null;
+						if (path) {
+							offlineContent = await this.noteRepo.readNote(path);
+						}
+
+						await this.crdtEngine.localStore.deleteDocumentState(documentId);
+						this.crdtEngine.forceEjectDoc(documentId);
+
+						if (details.encryptedState) {
+							const decryptedBytes = await this.crypto.decrypt(details.encryptedState, this.activeKey!);
+							await this.crdtEngine.applyUpdates(documentId, [decryptedBytes]);
+						}
+
+						this.fileLastSyncIds.set(documentId, details.maxCompactedId);
+
+						if (path && offlineContent !== null) {
+							await this.crdtEngine.handleLocalChange(documentId, offlineContent);
+						}
 					}
 
-					await this.crdtEngine.localStore.deleteDocumentState(documentId);
-					this.crdtEngine.forceEjectDoc(documentId);
+					const currentLastId = this.fileLastSyncIds.get(documentId) || 0;
+					const updates = await this.remoteStore.fetchUpdatesSince(documentId, currentLastId);
+					const decryptedUpdates: Uint8Array[] = [];
 
-					if (details.encryptedState) {
-						const decryptedBytes = await this.crypto.decrypt(details.encryptedState, this.activeKey!);
-						await this.crdtEngine.applyUpdates(documentId, [decryptedBytes]);
+					for (const update of updates) {
+						const decBytes = await this.crypto.decrypt(update.encryptedUpdate, this.activeKey!);
+						decryptedUpdates.push(decBytes);
 					}
 
-					this.fileLastSyncIds.set(documentId, details.maxCompactedId);
+					if (decryptedUpdates.length > 0) {
+					const doc = await this.crdtEngine.applyUpdates(documentId, decryptedUpdates);
+						const maxId = Math.max(...updates.map(u => u.id));
+						this.fileLastSyncIds.set(documentId, maxId);
 
-					if (path && offlineContent !== null) {
-						await this.crdtEngine.handleLocalChange(documentId, offlineContent);
+						if (documentId !== 'shard-index' && path) {
+							this.eventBus.emit('CrdtTextChanged', {
+								uuid: documentId,
+								path,
+								content: doc.getText('markdown').toString()
+							});
+						}
 					}
+
+					this.lastPingMs = Math.round(performance.now() - start);
+					this.hasConnectionError = false;
+				} catch (err) {
+					console.error('[NetworkOrchestrator] pullDocument failed for ' + documentId + ':', err);
+					this.hasConnectionError = true;
+					this.lastErrorMessage = 'Connection failed';
 				}
-
-				const currentLastId = this.fileLastSyncIds.get(documentId) || 0;
-				const updates = await this.remoteStore.fetchUpdatesSince(documentId, currentLastId);
-				const decryptedUpdates: Uint8Array[] = [];
-
-				for (const update of updates) {
-					const decBytes = await this.crypto.decrypt(update.encryptedUpdate, this.activeKey!);
-					decryptedUpdates.push(decBytes);
-				}
-
-				if (decryptedUpdates.length > 0) {
-					await this.crdtEngine.applyUpdates(documentId, decryptedUpdates);
-					const maxId = Math.max(...updates.map(u => u.id));
-					this.fileLastSyncIds.set(documentId, maxId);
-
-					if (documentId !== 'shard-index' && path) {
-						const doc = await this.crdtEngine.getOrCreateDoc(documentId);
-						this.eventBus.emit('CrdtTextChanged', {
-							uuid: documentId,
-							path,
-							content: doc.getText('markdown').toString()
-						});
-					}
-				}
-
-				this.lastPingMs = Math.round(performance.now() - start);
-				this.hasConnectionError = false;
-			} catch (err) {
-				console.error('[NetworkOrchestrator] pullDocument failed for ' + documentId + ':', err);
-				this.hasConnectionError = true;
-				this.lastErrorMessage = 'Connection failed';
+			});
+		} finally {
+			if (documentId !== this.activeDocumentId && documentId !== 'shard-index') {
+				this.crdtEngine.removeDoc(documentId);
 			}
-		});
+		}
 
 		if (!isSilent) this.removeActiveTask(taskName);
 	}

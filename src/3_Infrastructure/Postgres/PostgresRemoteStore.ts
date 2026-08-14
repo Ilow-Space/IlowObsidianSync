@@ -43,10 +43,12 @@ export class PostgresRemoteStore implements IRemoteStore {
 			this.socket = new WebSocket(wssUrl);
 
 			this.socket.onopen = () => {
-				for (const documentId of this.subscriptions.keys()) {
+				const keys = Array.from(this.subscriptions.keys());
+				if (keys.length > 0) {
+					const filters = keys.map(docId => `document_id=eq.${docId}`);
 					this.socket?.send(JSON.stringify({
-						action: 'subscribe',
-						filter: `document_id=eq.${documentId}`
+						action: 'subscribe_bulk',
+						filters
 					}));
 				}
 			};

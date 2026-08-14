@@ -90,6 +90,34 @@ describe('Reactive Event-Driven VFS Reconciler Tests', () => {
 		await movedPromise;
 	});
 
+	it('PERF REGRESSION: ObsidianDiskReconciler must throttle global vault writes to prevent UI freezing', async () => {
+		let activeWrites = 0;
+		let maxConcurrentWrites = 0;
+
+		// Mock app.vault.modify to take 50ms and track concurrency
+		appMock.vault.modify.mockImplementation(async () => {
+			activeWrites++;
+			maxConcurrentWrites = Math.max(maxConcurrentWrites, activeWrites);
+			await new Promise(r => setTimeout(r, 50));
+			activeWrites--;
+		});
+
+		// Simulate an incoming storm of 50 simultaneous network updates
+		const promises = Array.from({ length: 50 }).map((_, i) => {
+			return eventBus.emit('CrdtTextChanged', {
+				uuid: `doc-${i}`,
+				path: `Folder/Doc-${i}.md`,
+				content: 'New network data'
+			});
+		});
+
+		await Promise.all(promises);
+		await new Promise(r => setTimeout(r, 100)); // allow queue to process
+
+		// With a concurrency limit of 5, max active writes should never exceed 5.
+		expect(maxConcurrentWrites).toBeLessThanOrEqual(5);
+	});
+
 	it('Processes CrdtNodeSoftDeleted and invokes trashing fallback correctly', async () => {
 		const fileObj = { path: 'TrashMe.md' };
 		appMock.vault.getAbstractFileByPath.mockImplementation((p: string) => p === 'TrashMe.md' ? fileObj : null);
