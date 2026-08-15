@@ -1,3 +1,4 @@
+// src/2_Application/Sync/LoroVfsController.ts
 import { LoroDoc, LoroTree, LoroTreeNode } from 'loro-crdt';
 import { SyncEventBus } from './SyncEventBus';
 import { LoroSyncEngine } from '@infrastructure/Crdt/LoroSyncEngine';
@@ -7,11 +8,8 @@ export class LoroVfsController {
 	private loroTree!: LoroTree;
 	private pathToUuid = new Map<string, string>();
 	private uuidToLastKnownPath = new Map<string, string>();
-	private uuidToNodeId = new Map<string, string>();
+	private uuidToNodeId = new Map<string, any>();
 	private nodeIdToUuid = new Map<string, string>();
-	
-	// Caches only RAW TreeID objects (safe across WASM transactions)
-	private stringToTreeId = new Map<string, any>();
 
 	private unsubscribeDoc: (() => void) | null = null;
 	private changeTimeout: any = null;
@@ -22,6 +20,22 @@ export class LoroVfsController {
 		private syncEngine: LoroSyncEngine,
 		private eventBus: SyncEventBus
 	) {}
+
+	private getNodeIdStr(id: any): string {
+		if (id === null || id === undefined) return '';
+		if (typeof id === 'string') return id;
+		if (typeof id === 'object') {
+			// Explicitly map Loro's WASM getters to bypass JSON.stringify limitations
+			if (id.peer !== undefined && id.counter !== undefined) {
+				return `${id.peer}_${id.counter}`;
+			}
+			try {
+				const j = JSON.stringify(id);
+				if (j !== '{}') return j;
+			} catch (e) {}
+		}
+		return String(id);
+	}
 
 	public async initialize(): Promise<void> {
 		this.treeDoc = await this.syncEngine.getOrCreateDoc('shard-index');
@@ -71,13 +85,6 @@ export class LoroVfsController {
 		}, 50);
 	}
 
-	private idToStr(id: any): string {
-		if (!id) return '';
-		if (typeof id === 'string') return id.replace('@', ':');
-		if (id.peer !== undefined && id.counter !== undefined) return `${id.peer}:${id.counter}`;
-		return String(id).replace('@', ':');
-	}
-
 	public getUuidForPath(path: string): string | null {
 		return this.pathToUuid.get(path) || null;
 	}
@@ -89,14 +96,14 @@ export class LoroVfsController {
 	public getActiveFiles(): Array<{ uuid: string; path: string; type: string }> {
 		const result: Array<{ uuid: string; path: string; type: string }> = [];
 		const nodes = this.loroTree.getNodes();
-		const fastNodeMap = new Map<string, LoroTreeNode>();
-		for (const n of nodes) fastNodeMap.set(this.idToStr(n.id), n);
+		const nodeMap = new Map<string, LoroTreeNode>();
+		for (const n of nodes) nodeMap.set(this.getNodeIdStr(n.id), n);
 
 		for (const [uuid, path] of this.uuidToLastKnownPath.entries()) {
-			const nodeIdStr = this.uuidToNodeId.get(uuid);
-			if (nodeIdStr) {
+			const nodeId = this.uuidToNodeId.get(uuid);
+			if (nodeId) {
 				try {
-					const node = fastNodeMap.get(nodeIdStr);
+					const node = nodeMap.get(this.getNodeIdStr(nodeId));
 					if (node && !node.isDeleted() && node.data.get('isDeleted') !== true) {
 						const type = node.data.get('type') as string;
 						result.push({ uuid, path, type });
@@ -114,17 +121,18 @@ export class LoroVfsController {
 		this.captureFrontierIfNeeded();
 
 		const { dirPath, name } = this.splitPath(payload.path);
-		const parentNodeIdStr = this.getOrCreateFolderChainNodeId(dirPath);
+		const parentUuid = this.getOrCreateFolderChainUuid(dirPath);
 
 		const nodeUuid = window.crypto.randomUUID() as string;
 		const childNode = this.loroTree.createNode();
-		const childIdStr = this.idToStr(childNode.id);
 		
-		this.stringToTreeId.set(childIdStr, childNode.id);
-		
-		if (parentNodeIdStr) {
-			const parentTreeId = this.stringToTreeId.get(parentNodeIdStr);
-			if (parentTreeId) this.loroTree.move(childNode.id, parentTreeId);
+		if (parentUuid) {
+			const parentNodeId = this.uuidToNodeId.get(parentUuid);
+			if (parentNodeId) {
+				try {
+					this.loroTree.move(childNode.id, parentNodeId);
+				} catch (e) {}
+			}
 		}
 
 		childNode.data.set('uuid', nodeUuid);
@@ -136,8 +144,8 @@ export class LoroVfsController {
 
 		this.pathToUuid.set(payload.path, nodeUuid);
 		this.uuidToLastKnownPath.set(nodeUuid, payload.path);
-		this.uuidToNodeId.set(nodeUuid, childIdStr);
-		this.nodeIdToUuid.set(childIdStr, nodeUuid);
+		this.uuidToNodeId.set(nodeUuid, childNode.id);
+		this.nodeIdToUuid.set(this.getNodeIdStr(childNode.id), nodeUuid);
 
 		this.scheduleLocalPush();
 	}
@@ -146,30 +154,29 @@ export class LoroVfsController {
 		const nodeUuid = this.pathToUuid.get(payload.oldPath);
 		if (!nodeUuid) return;
 
-		const nodeIdStr = this.uuidToNodeId.get(nodeUuid);
-		if (!nodeIdStr) return;
+		const targetNodeId = this.uuidToNodeId.get(nodeUuid);
+		if (!targetNodeId) return;
 
 		this.captureFrontierIfNeeded();
 
 		const { dirPath, name } = this.splitPath(payload.newPath);
-		const parentNodeIdStr = this.getOrCreateFolderChainNodeId(dirPath);
+		const parentUuid = this.getOrCreateFolderChainUuid(dirPath);
+		const parentNodeId = parentUuid ? this.uuidToNodeId.get(parentUuid) : undefined;
 
-		const targetTreeId = this.stringToTreeId.get(nodeIdStr);
-		const parentTreeId = parentNodeIdStr ? this.stringToTreeId.get(parentNodeIdStr) : undefined;
-
-		if (targetTreeId) {
-			try {
-				// Move strictly using raw IDs (safe across WASM boundaries)
-				this.loroTree.move(targetTreeId, parentTreeId);
-
-				// Fetch a fresh node wrapper to safely mutate the metadata
-				const freshNode = this.loroTree.getNodes().find(n => this.idToStr(n.id) === nodeIdStr);
-				if (freshNode) freshNode.data.set('filename', name);
-				
-				this.treeDoc.commit();
-			} catch (e) {
-				console.error("[LoroVfsController] Error during tree move:", e);
+		try {
+			if (parentNodeId !== undefined && parentNodeId !== null) {
+				this.loroTree.move(targetNodeId, parentNodeId);
+			} else {
+				this.loroTree.move(targetNodeId, undefined as any);
 			}
+
+			const targetIdStr = this.getNodeIdStr(targetNodeId);
+			const freshNode = this.loroTree.getNodes().find(n => this.getNodeIdStr(n.id) === targetIdStr);
+			if (freshNode) freshNode.data.set('filename', name);
+			
+			this.treeDoc.commit();
+		} catch (e) {
+			console.error("[LoroVfsController] Error during tree move:", e);
 		}
 
 		this.rebuildCache();
@@ -180,28 +187,24 @@ export class LoroVfsController {
 		const nodeUuid = this.pathToUuid.get(payload.path);
 		if (!nodeUuid) return;
 
-		const nodeIdStr = this.uuidToNodeId.get(nodeUuid);
-		if (!nodeIdStr) return;
+		const targetNodeId = this.uuidToNodeId.get(nodeUuid);
+		if (!targetNodeId) return;
 
 		this.captureFrontierIfNeeded();
 
-		const targetTreeId = this.stringToTreeId.get(nodeIdStr);
-
-		if (targetTreeId) {
-			try {
-				// Set meta data using fresh node wrapper before deleting the actual node
-				const freshNode = this.loroTree.getNodes().find(n => this.idToStr(n.id) === nodeIdStr);
-				if (freshNode) freshNode.data.set('isDeleted', true);
-				
-				this.loroTree.delete(targetTreeId);
-				this.treeDoc.commit();
-			} catch (e) {}
-		}
+		try {
+			const targetIdStr = this.getNodeIdStr(targetNodeId);
+			const freshNode = this.loroTree.getNodes().find(n => this.getNodeIdStr(n.id) === targetIdStr);
+			if (freshNode) freshNode.data.set('isDeleted', true);
+			
+			this.loroTree.delete(targetNodeId);
+			this.treeDoc.commit();
+		} catch (e) {}
 
 		this.pathToUuid.delete(payload.path);
 		this.uuidToLastKnownPath.delete(nodeUuid);
 		this.uuidToNodeId.delete(nodeUuid);
-		this.nodeIdToUuid.delete(nodeIdStr);
+		this.nodeIdToUuid.delete(this.getNodeIdStr(targetNodeId));
 
 		this.scheduleLocalPush();
 	}
@@ -211,16 +214,22 @@ export class LoroVfsController {
 		this.uuidToLastKnownPath.clear();
 		this.uuidToNodeId.clear();
 		this.nodeIdToUuid.clear();
-		this.stringToTreeId.clear();
 
 		const nodes = this.loroTree.getNodes();
-		const fastNodeMap = new Map<string, LoroTreeNode>();
+		const nodeMap = new Map<string, LoroTreeNode>();
 
 		for (const node of nodes) {
 			try {
-				const idStr = this.idToStr(node.id);
-				fastNodeMap.set(idStr, node);
-				this.stringToTreeId.set(idStr, node.id);
+				const idStr = this.getNodeIdStr(node.id);
+				nodeMap.set(idStr, node);
+
+				if (node.isDeleted() || node.data.get('isDeleted') === true) continue;
+
+				const nodeUuid = node.data.get('uuid') as string;
+				if (!nodeUuid) continue;
+
+				this.uuidToNodeId.set(nodeUuid, node.id);
+				this.nodeIdToUuid.set(idStr, nodeUuid);
 			} catch (e) {}
 		}
 
@@ -231,12 +240,7 @@ export class LoroVfsController {
 				const nodeUuid = node.data.get('uuid') as string;
 				if (!nodeUuid) continue;
 
-				const idStr = this.idToStr(node.id);
-				this.uuidToNodeId.set(nodeUuid, idStr);
-				this.nodeIdToUuid.set(idStr, nodeUuid);
-
-				// Resolves O(1) instantly via map injection
-				const resolvedPath = this.resolvePathForNode(node, fastNodeMap);
+				const resolvedPath = this.resolvePathForNode(node, nodeMap);
 				if (resolvedPath) {
 					this.pathToUuid.set(resolvedPath, nodeUuid);
 					this.uuidToLastKnownPath.set(nodeUuid, resolvedPath);
@@ -245,13 +249,13 @@ export class LoroVfsController {
 		}
 	}
 
-	private resolvePathForNode(node: LoroTreeNode, fastNodeMap: Map<string, LoroTreeNode>): string | null {
+	private resolvePathForNode(node: LoroTreeNode, nodeMap: Map<string, LoroTreeNode>): string | null {
 		const parts: string[] = [];
 		let curr: LoroTreeNode | null = node;
 		const visited = new Set<string>();
 
 		while (curr) {
-			const idStr = this.idToStr(curr.id);
+			const idStr = this.getNodeIdStr(curr.id);
 			if (!idStr || visited.has(idStr)) return null;
 			visited.add(idStr);
 
@@ -266,8 +270,8 @@ export class LoroVfsController {
 				const parentId = curr.parent;
 				if (!parentId) break;
 
-				const parentStr = this.idToStr(parentId);
-				curr = fastNodeMap.get(parentStr) || null;
+				const parentIdStr = this.getNodeIdStr(parentId);
+				curr = nodeMap.get(parentIdStr) || null;
 			} catch (e) {
 				break;
 			}
@@ -280,16 +284,15 @@ export class LoroVfsController {
 		const oldUuidToLastKnown = new Map(this.uuidToLastKnownPath);
 		this.rebuildCache();
 
-		// Fetch fresh nodes for comparison
 		const nodes = this.loroTree.getNodes();
-		const fastNodeMap = new Map<string, LoroTreeNode>();
-		for (const n of nodes) fastNodeMap.set(this.idToStr(n.id), n);
+		const nodeMap = new Map<string, LoroTreeNode>();
+		for (const n of nodes) nodeMap.set(this.getNodeIdStr(n.id), n);
 
 		for (const [uuid, newPath] of this.uuidToLastKnownPath.entries()) {
 			const oldPath = oldUuidToLastKnown.get(uuid);
-			const nodeIdStr = this.uuidToNodeId.get(uuid);
+			const nodeId = this.uuidToNodeId.get(uuid);
 			try {
-				const node = nodeIdStr ? fastNodeMap.get(nodeIdStr) : null;
+				const node = nodeId ? nodeMap.get(this.getNodeIdStr(nodeId)) : null;
 				const isFolder = node ? node.data.get('type') === 'folder' : false;
 
 				if (!oldPath) {
@@ -318,10 +321,10 @@ export class LoroVfsController {
 		}
 	}
 
-	private getOrCreateFolderChainNodeId(dirPath: string): string | null {
+	private getOrCreateFolderChainUuid(dirPath: string): string | null {
 		if (!dirPath || dirPath === '.' || dirPath === '') return null;
 
-		let currentParentIdStr: string | null = null;
+		let currentParentUuid: string | null = null;
 		let cumulative = '';
 
 		for (const part of dirPath.split('/')) {
@@ -329,20 +332,18 @@ export class LoroVfsController {
 
 			const existingUuid = this.pathToUuid.get(cumulative);
 			if (existingUuid) {
-				const nodeIdStr = this.uuidToNodeId.get(existingUuid);
-				if (nodeIdStr) {
-					currentParentIdStr = nodeIdStr;
-				}
+				currentParentUuid = existingUuid;
 			} else {
 				const folderUuid = window.crypto.randomUUID() as string;
 				const newFolderNode = this.loroTree.createNode();
-				const newFolderIdStr = this.idToStr(newFolderNode.id);
-				
-				this.stringToTreeId.set(newFolderIdStr, newFolderNode.id);
 
-				if (currentParentIdStr) {
-					const parentTreeId = this.stringToTreeId.get(currentParentIdStr);
-					if (parentTreeId) this.loroTree.move(newFolderNode.id, parentTreeId);
+				if (currentParentUuid) {
+					const parentNodeId = this.uuidToNodeId.get(currentParentUuid);
+					if (parentNodeId) {
+						try {
+							this.loroTree.move(newFolderNode.id, parentNodeId);
+						} catch (e) {}
+					}
 				}
 
 				newFolderNode.data.set('uuid', folderUuid);
@@ -354,14 +355,14 @@ export class LoroVfsController {
 
 				this.pathToUuid.set(cumulative, folderUuid);
 				this.uuidToLastKnownPath.set(folderUuid, cumulative);
-				this.uuidToNodeId.set(folderUuid, newFolderIdStr);
-				this.nodeIdToUuid.set(newFolderIdStr, folderUuid);
+				this.uuidToNodeId.set(folderUuid, newFolderNode.id);
+				this.nodeIdToUuid.set(this.getNodeIdStr(newFolderNode.id), folderUuid);
 
-				currentParentIdStr = newFolderIdStr;
+				currentParentUuid = folderUuid;
 			}
 		}
 
-		return currentParentIdStr;
+		return currentParentUuid;
 	}
 
 	private splitPath(p: string): { dirPath: string; name: string } {

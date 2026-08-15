@@ -39,7 +39,6 @@ describe('Reactive Event-Driven VFS Reconciler Tests', () => {
 
 	it('Emits LocalDeltaReadyForPush when local file is created', async () => {
 		const createdPromise = new Promise<void>((resolve) => {
-			// FIX: We listen for the push event now, NOT CrdtNodeCreated (which is for remote nodes only)
 			eventBus.on('LocalDeltaReadyForPush', (payload) => {
 				expect(payload.documentId).toBe('shard-index');
 				resolve();
@@ -74,7 +73,6 @@ describe('Reactive Event-Driven VFS Reconciler Tests', () => {
 			isFolder: false
 		});
 
-		// Wait for creation debounce to settle
 		await new Promise(r => setTimeout(r, 100));
 
 		const movedPromise = new Promise<void>((resolve) => {
@@ -173,20 +171,17 @@ describe('Reactive Event-Driven VFS Reconciler Tests', () => {
 
 		expect(remoteCreatedSpy).not.toHaveBeenCalled();
 	});
+
 	it('BUG REGRESSION: File move to an uncommitted directory must process correctly and update tree paths', async () => {
-		// 1. Create a loose file
 		eventBus.emit('LocalFileCreated', { path: 'LooseFile.md', isFolder: false, content: 'Data' });
 		
-		// 2. We do NOT wait for the 50ms batch to commit. We immediately move it to a NEW folder.
 		eventBus.emit('LocalFileRenamed', {
 			oldPath: 'LooseFile.md',
 			newPath: 'NewFolder/LooseFile.md'
 		});
 
-		// 3. Wait for the debounce push batch to settle
 		await new Promise(r => setTimeout(r, 100));
 
-		// 4. Verify the CRDT accurately resolved the path
 		const fileUuid = vfsController.getUuidForPath('NewFolder/LooseFile.md');
 		const obsoleteUuid = vfsController.getUuidForPath('LooseFile.md');
 		
