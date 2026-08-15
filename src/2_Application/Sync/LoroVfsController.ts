@@ -267,9 +267,10 @@ export class LoroVfsController {
 					parts.unshift(filename);
 				}
 
-				const parentId = curr.parent;
-				if (!parentId) break;
+				const parentNode = typeof curr.parent === 'function' ? curr.parent() : (curr as any).parent;
+				if (!parentNode) break;
 
+				const parentId = parentNode.id !== undefined ? parentNode.id : parentNode;
 				const parentIdStr = this.getNodeIdStr(parentId);
 				curr = nodeMap.get(parentIdStr) || null;
 			} catch (e) {
