@@ -13,8 +13,8 @@ async function disableActivePlugin() {
     try {
         await browser.execute(async () => {
             const app = (window as any).app;
-            if (app?.plugins?.plugins['obsidian-crdt-sync']) {
-                await app.plugins.disablePlugin('obsidian-crdt-sync');
+            if (app?.plugins?.plugins['ilow-sync']) {
+                await app.plugins.disablePlugin('ilow-sync');
             }
         });
     } catch (e) {}
@@ -128,7 +128,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
         await browser.execute(async () => {
             const app = (window as any).app;
-            const pluginId = 'obsidian-crdt-sync';
+            const pluginId = 'ilow-sync';
             if (app.plugins.enabledPlugins.has(pluginId)) {
                 const plugin = app.plugins.plugins[pluginId];
                 if (plugin) {
@@ -153,7 +153,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
         await browser.execute(async () => {
             const app = (window as any).app;
-            const pluginId = 'obsidian-crdt-sync';
+            const pluginId = 'ilow-sync';
             if (app.plugins.enabledPlugins.has(pluginId)) {
                 const plugin = app.plugins.plugins[pluginId];
                 if (plugin) {
@@ -183,8 +183,8 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         await browser.execute(async () => {
             try {
                 const app = (window as any).app;
-                if (app?.plugins?.plugins['obsidian-crdt-sync']) {
-                    await app.plugins.disablePlugin('obsidian-crdt-sync');
+                if (app?.plugins?.plugins['ilow-sync']) {
+                    await app.plugins.disablePlugin('ilow-sync');
                 }
             } catch (e) {}
         });
@@ -209,13 +209,13 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         // Trigger full sync and synchronously inspect status bar WHILE background sync is active
         const statusDuringSync = await browser.executeAsync(async (done) => {
             const app = (window as any).app;
-            const plugin = app.plugins.plugins['obsidian-crdt-sync'];
+            const plugin = app.plugins.plugins['ilow-sync'];
             
             // Start background sync
             const syncPromise = plugin.syncOrchestrator.runFullSync();
 
             // Read status bar text synchronously while sync is running
-            const statusText = document.querySelector('.crdt-sync-status')?.textContent || '';
+            const statusText = document.querySelector('.ilow-sync-status')?.textContent || '';
 
             await syncPromise;
             done(statusText);
@@ -244,7 +244,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         const rpsDuringSync = await browser.executeAsync(async (url, done) => {
             const app = (window as any).app;
-            const plugin = app.plugins.plugins['obsidian-crdt-sync'];
+            const plugin = app.plugins.plugins['ilow-sync'];
 
             await plugin.syncOrchestrator.runFullSync();
 
@@ -337,7 +337,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         // 3. Cycle 1: First reconciliation (Processes disk deletion)
         await browser.execute(async () => {
-            const plugin = (window as any).app.plugins.plugins['obsidian-crdt-sync'];
+            const plugin = (window as any).app.plugins.plugins['ilow-sync'];
             if (plugin?.treeIndexManager) {
                 await plugin.treeIndexManager.reconcileFilesystem();
             }
@@ -346,7 +346,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         // 4. Cycle 2: Second reconciliation (Files are ALREADY gone from disk)
         const cycle2RemovalLogs = (await browser.executeAsync(async (done) => {
             (window as any).__obsidianLogs = [];
-            const plugin = (window as any).app.plugins.plugins['obsidian-crdt-sync'];
+            const plugin = (window as any).app.plugins.plugins['ilow-sync'];
             if (plugin?.treeIndexManager) {
                 await plugin.treeIndexManager.reconcileFilesystem();
             }
@@ -387,7 +387,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         // 2. Monitor network pushes on Vault B
         const redundantPushes = await browser.executeAsync(async (done) => {
             const app = (window as any).app;
-            const plugin = app.plugins.plugins['obsidian-crdt-sync'];
+            const plugin = app.plugins.plugins['ilow-sync'];
             
             let pushCount = 0;
             // Spy on the push method
@@ -434,7 +434,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         // 2. Inspect the CRDT tree map directly
         const indexSizeData = await browser.execute(() => {
-            const plugin = (window as any).app.plugins.plugins['obsidian-crdt-sync'];
+            const plugin = (window as any).app.plugins.plugins['ilow-sync'];
             const treeMap = plugin.treeIndexManager.treeMap;
             
             let totalKeys = 0;
@@ -473,7 +473,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         const snapshotData = (await browser.executeAsync(async (url, done) => {
             const app = (window as any).app;
-            const plugin = app.plugins.plugins['obsidian-crdt-sync'];
+            const plugin = app.plugins.plugins['ilow-sync'];
             const uuid = plugin.treeIndexManager.getUuidForPath('CompactionTest.md');
             
             // Fetch raw DB state bypassing local cache
@@ -496,7 +496,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         // Trigger reconciliation manually
         await browser.execute(async () => {
-            const plugin = (window as any).app.plugins.plugins['obsidian-crdt-sync'];
+            const plugin = (window as any).app.plugins.plugins['ilow-sync'];
             await plugin.treeIndexManager.reconcileFilesystem();
         });
         await browser.pause(2000);
@@ -523,7 +523,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         await browser.executeAsync(async (done) => {
             const app = (window as any).app;
-            const plugin = app.plugins.plugins['obsidian-crdt-sync'];
+            const plugin = app.plugins.plugins['ilow-sync'];
             
             await app.vault.create('SplitBrain.md', 'Data');
             const uuid = plugin.treeIndexManager.getUuidForPath('SplitBrain.md');
@@ -577,7 +577,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         const renameCalls = await browser.executeAsync(async (done) => {
             const app = (window as any).app;
-            const plugin = app.plugins.plugins['obsidian-crdt-sync'];
+            const plugin = app.plugins.plugins['ilow-sync'];
             
             await app.vault.create('Conflict.md', 'Data');
             
@@ -606,7 +606,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         const resolvedPath = await browser.execute(async () => {
             const app = (window as any).app;
-            const plugin = app.plugins.plugins['obsidian-crdt-sync'];
+            const plugin = app.plugins.plugins['ilow-sync'];
             
             await app.vault.createFolder('App v1.0.0');
             
@@ -624,7 +624,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         const leakedKeys = (await browser.executeAsync(async (done) => {
             const app = (window as any).app;
-            const plugin = app.plugins.plugins['obsidian-crdt-sync'];
+            const plugin = app.plugins.plugins['ilow-sync'];
             
             const file = await app.vault.create('LeakTest.md', 'Data');
             const uuid = plugin.treeIndexManager.getUuidForPath('LeakTest.md');
@@ -654,7 +654,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         const isLockedDuringFetch = await browser.executeAsync(async (done) => {
-            const plugin = (window as any).app.plugins.plugins['obsidian-crdt-sync'];
+            const plugin = (window as any).app.plugins.plugins['ilow-sync'];
             
             // Hook network fetch to check lock state
             const originalFetch = plugin.remoteStore.fetchUpdatesSince;
@@ -678,7 +678,7 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         const activeListeners = await browser.executeAsync(async (done) => {
-            const plugin = (window as any).app.plugins.plugins['obsidian-crdt-sync'];
+            const plugin = (window as any).app.plugins.plugins['ilow-sync'];
             
             // Simulate user modifying settings (triggers initializeSyncOrchestrator multiple times)
             await plugin.saveSettings();

@@ -2,7 +2,7 @@ import { ItemView, WorkspaceLeaf, setIcon } from 'obsidian';
 import MyPlugin from '../Plugin';
 import { ServerTelemetry } from '@domain/Interfaces/IRemoteStore';
 
-export const SYNC_SIDEBAR_VIEW_TYPE = 'crdt-sync-sidebar-view';
+export const SYNC_SIDEBAR_VIEW_TYPE = 'ilow-sync-sidebar-view';
 
 export class SyncSidebarView extends ItemView {
 	private telemetry: ServerTelemetry | null = null;
@@ -12,7 +12,7 @@ export class SyncSidebarView extends ItemView {
 	}
 
 	getViewType(): string { return SYNC_SIDEBAR_VIEW_TYPE; }
-	getDisplayText(): string { return 'CRDT Sync Status'; }
+	getDisplayText(): string { return 'Ilow Sync Status'; }
 	getIcon(): string { return 'folder-sync'; }
 
 	async onOpen() {

@@ -15,13 +15,13 @@ export class QrScannerModal extends Modal {
 
 		const nativeSyncEnabled = (this.app as any).internalPlugins?.plugins?.sync?.enabled;
 		if (nativeSyncEnabled) {
-			const warning = contentEl.createDiv({ cls: 'crdt-sync-warning' });
+			const warning = contentEl.createDiv({ cls: 'ilow-sync-warning' });
 			warning.style.backgroundColor = 'var(--background-modifier-error)';
 			warning.style.padding = '10px';
 			warning.style.borderRadius = '5px';
 			warning.style.marginBottom = '15px';
 			warning.createEl('h3', { text: '⚠️ Conflict Warning' });
-			warning.createEl('p', { text: 'For Obsidian CRDT Sync to function correctly and avoid data corruption, please disable the official Obsidian Sync plugin in your Core Plugins settings.' });
+			warning.createEl('p', { text: 'For Ilow Sync to function correctly and avoid data corruption, please disable the official Obsidian Sync plugin in your Core Plugins settings.' });
 		}
 
 		// 1. Direct Paste Fallback (Ideal for Desktop)
@@ -29,10 +29,10 @@ export class QrScannerModal extends Modal {
 		let inputPayload = '';
 		new Setting(contentEl)
 			.setName('Payload String')
-			.setDesc('Paste the obsidian-sync:// string generated from your other device.')
+			.setDesc('Paste the ilow-sync:// string generated from your other device.')
 			.addText((text) =>
 				text
-					.setPlaceholder('obsidian-sync://...')
+					.setPlaceholder('ilow-sync://...')
 					.onChange((val) => {
 						inputPayload = val.trim();
 					})
@@ -57,11 +57,11 @@ export class QrScannerModal extends Modal {
 		contentEl.createEl('h4', { text: 'Or Scan via Camera' });
 		contentEl.createEl('p', { text: 'Align the QR Code within the camera frame below.' });
 
-		const readerDiv = contentEl.createDiv({ attr: { id: 'crdt-sync-reader' } });
+		const readerDiv = contentEl.createDiv({ attr: { id: 'ilow-sync-reader' } });
 
 		setTimeout(() => {
 			try {
-				this.html5QrcodeScanner = new Html5Qrcode('crdt-sync-reader');
+				this.html5QrcodeScanner = new Html5Qrcode('ilow-sync-reader');
 				this.html5QrcodeScanner
 					.start(
 						{ facingMode: 'environment' },

@@ -8,7 +8,7 @@ const pluginPath = path.join(process.cwd(), 'dist').replace(/\\/g, '/');
 const vaultAPath = path.join(process.cwd(), 'test', 'vaults', 'vaultA').replace(/\\/g, '/');
 const vaultBPath = path.join(process.cwd(), 'test', 'vaults', 'vaultB').replace(/\\/g, '/');
 
-let pluginId = 'obsidian-crdt-sync';
+let pluginId = 'ilow-sync';
 const manifestPath = path.join(pluginPath, 'manifest.json');
 if (fs.existsSync(manifestPath)) {
     try {

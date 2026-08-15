@@ -1,4 +1,4 @@
-# Obsidian CRDT Sync
+# Ilow Sync
 
 An end-to-end encrypted (E2EE), real-time synchronization plugin for Obsidian powered by Loro CRDT and a Go/PostgreSQL backend. It delivers multi-vault document convergence, structure-aware Virtual File System (VFS) reconciliation, offline change merging, and zero-knowledge snapshot storage.
 
@@ -84,7 +84,7 @@ The codebase is structured according to Domain-Driven Design (DDD) principles ac
 | **Key Derivation** | PBKDF2 (SHA-256, 100,000 iterations, custom hex salt)
 
  |
-| **Local Cache** | Dexie / IndexedDB (`loro-snapshot-store-db`)
+| **Local Cache** | Dexie / IndexedDB (`ilow-snapshot-store-db`)
 
  |
 | **Concurrency Control** | `async-mutex` for disk locks, `p-limit` for concurrent pulls, `p-queue` for write queues

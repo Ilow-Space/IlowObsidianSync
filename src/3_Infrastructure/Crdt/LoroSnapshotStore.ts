@@ -10,7 +10,7 @@ export class LoroSnapshotStore extends Dexie {
 	public snapshots!: Table<IDBDocumentSnapshot, string>;
 
 	constructor() {
-		super('loro-snapshot-store-db');
+		super('ilow-snapshot-store-db');
 		this.version(1).stores({
 			snapshots: 'documentId'
 		});

@@ -1,10 +1,10 @@
 {
-  "name": "obsidian-crdt-sync",
+  "name": "ilow-sync",
   "version": "1.0.0",
   "main": "dist/main.js",
   "scripts": {
     "dev": "vite build --watch --mode development",
-    "build": "tsc -v && vite build --mode production && node -e \"require('fs').copyFileSync('manifest.json', 'dist/manifest.json')\"",
+    "build": "tsc -v && vite build --mode production && node -e \"require('fs').copyFileSync('manifest.json', 'dist/manifest.json'); if (require('fs').existsSync('styles.css')) require('fs').copyFileSync('styles.css', 'dist/styles.css')\"",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
@@ -15,7 +15,8 @@
     "test:unit": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "npm run build && wdio run wdio.conf.mts",
-    "test:all": "npm run typecheck && npm run lint:fix && npm run dry && npm run test:unit && npm run test:e2e"
+    "test:all": "npm run typecheck && npm run lint:fix && npm run dry && npm run test:unit && npm run test:e2e",
+    "release": "npm version patch && git push origin --follow-tags"
   },
   "dependencies": {
     "async-mutex": "^0.5.0",

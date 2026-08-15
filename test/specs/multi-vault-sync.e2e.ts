@@ -15,8 +15,8 @@ async function disableActivePlugin() {
     try {
         await browser.execute(async () => {
             const app = (window as any).app;
-            if (app?.plugins?.plugins['obsidian-crdt-sync']) {
-                await app.plugins.disablePlugin('obsidian-crdt-sync');
+            if (app?.plugins?.plugins['ilow-sync']) {
+                await app.plugins.disablePlugin('ilow-sync');
             }
         });
     } catch (e) {}
@@ -140,7 +140,7 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
         await browser.execute(async () => {
             const app = (window as any).app;
-            const pluginId = 'obsidian-crdt-sync';
+            const pluginId = 'ilow-sync';
             if (app.plugins.enabledPlugins.has(pluginId)) {
                 const plugin = app.plugins.plugins[pluginId];
                 if (plugin) {
@@ -165,7 +165,7 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
         await browser.execute(async () => {
             const app = (window as any).app;
-            const pluginId = 'obsidian-crdt-sync';
+            const pluginId = 'ilow-sync';
             if (app.plugins.enabledPlugins.has(pluginId)) {
                 const plugin = app.plugins.plugins[pluginId];
                 if (plugin) {
@@ -195,8 +195,8 @@ describe('Realtime Multi-Vault CRDT Synchronization', () => {
         await browser.execute(async () => {
             try {
                 const app = (window as any).app;
-                if (app?.plugins?.plugins['obsidian-crdt-sync']) {
-                    await app.plugins.disablePlugin('obsidian-crdt-sync');
+                if (app?.plugins?.plugins['ilow-sync']) {
+                    await app.plugins.disablePlugin('ilow-sync');
                 }
             } catch (e) {}
         });

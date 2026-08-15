@@ -13,7 +13,7 @@ export class QrDisplayModal extends Modal {
 		contentEl.createEl('p', { text: 'Scan this QR code from a mobile device, or click the QR code to copy the string to your clipboard.' });
 
 		// QR Code Container
-		const container = contentEl.createDiv({ cls: 'crdt-sync-settings-qr' });
+		const container = contentEl.createDiv({ cls: 'ilow-sync-settings-qr' });
 		container.style.textAlign = 'center';
 		container.style.margin = '16px 0';
 		container.style.cursor = 'pointer';

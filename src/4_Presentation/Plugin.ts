@@ -52,7 +52,7 @@ export default class MyPlugin extends Plugin {
 	}
 
 	async onload() {
-		console.log('Loading Obsidian CRDT Sync Plugin (Loro Reactive VFS Edition)');
+		console.log('Loading Ilow Sync Plugin (Loro Reactive VFS Edition)');
 
 		// 1. Perform Yjs -> Loro Migration schema check and purge on boot
 		await LoroMigrationManager.performLibraryMigrationCheck();
@@ -78,7 +78,7 @@ export default class MyPlugin extends Plugin {
 
 		// Status Bar Setup
 		this.statusBarItem = this.addStatusBarItem();
-		this.statusBarItem.addClass('crdt-sync-status');
+		this.statusBarItem.addClass('ilow-sync-status');
 		this.statusBarItem.addClass('mod-clickable');
 		this.updateStatusBar('offline', 'Disconnected');
 		this.statusBarItem.onClickEvent(() => {
@@ -86,7 +86,7 @@ export default class MyPlugin extends Plugin {
 		});
 
 		// Ribbon Icon Setup
-		this.addRibbonIcon('folder-sync', 'CRDT Sync History', () => {
+		this.addRibbonIcon('folder-sync', 'Ilow Sync History', () => {
 			this.activateSidebar();
 		});
 
@@ -94,7 +94,7 @@ export default class MyPlugin extends Plugin {
 
 		// Auto-load master sync key from secret storage
 		try {
-			const keyData = await (this.app as any).secretStorage.getSecret('crdt-master-key');
+			const keyData = await (this.app as any).secretStorage.getSecret('ilow-master-key');
 			if (keyData) {
 				this.updateStatusBar('syncing', 'Loading key...');
 				this.derivedKey = await this.cryptoService.importKey(keyData);
@@ -123,7 +123,7 @@ export default class MyPlugin extends Plugin {
 	}
 
 	onunload() {
-		console.log('Unloading Obsidian CRDT Sync Plugin');
+		console.log('Unloading Ilow Sync Plugin');
 		if (this.manifestUnsubscribe) {
 			this.manifestUnsubscribe();
 			this.manifestUnsubscribe = null;
@@ -202,7 +202,7 @@ export default class MyPlugin extends Plugin {
 			this.derivedKey = await this.cryptoService.deriveKey(password, this.settings.salt);
 
 			const exportedKey = await this.cryptoService.exportKey(this.derivedKey);
-			await (this.app as any).secretStorage.setSecret('crdt-master-key', exportedKey);
+			await (this.app as any).secretStorage.setSecret('ilow-master-key', exportedKey);
 
 			this.initializeSyncOrchestrator();
 
@@ -270,7 +270,7 @@ export default class MyPlugin extends Plugin {
 		this.updateStatusBar('offline', 'Disconnected');
 
 		try {
-			await (this.app as any).secretStorage.deleteSecret('crdt-master-key');
+			await (this.app as any).secretStorage.deleteSecret('ilow-master-key');
 		} catch (err) {
 			console.error('Failed to remove master sync key:', err);
 		}

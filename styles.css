@@ -1,5 +1,5 @@
-/* Styles for Obsidian CRDT Sync */
-.crdt-sync-settings-qr {
+/* Styles for Ilow Sync */
+.ilow-sync-settings-qr {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -7,13 +7,13 @@
   margin: 20px 0;
 }
 
-.crdt-sync-qr-container {
+.ilow-sync-qr-container {
   padding: 10px;
   background-color: white;
   border-radius: 4px;
 }
 
-#crdt-sync-reader {
+#ilow-sync-reader {
   width: 100%;
   max-width: 400px;
   margin: 10px auto;

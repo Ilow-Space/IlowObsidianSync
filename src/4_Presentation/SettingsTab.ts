@@ -12,17 +12,17 @@ export class SettingsTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		containerEl.createEl('h2', { text: 'Obsidian CRDT Sync Settings' });
+		containerEl.createEl('h2', { text: 'Ilow Sync Settings' });
 
 		const nativeSyncEnabled = (this.app as any).internalPlugins?.plugins?.sync?.enabled;
 		if (nativeSyncEnabled) {
-			const warning = containerEl.createDiv({ cls: 'crdt-sync-warning' });
+			const warning = containerEl.createDiv({ cls: 'ilow-sync-warning' });
 			warning.style.backgroundColor = 'var(--background-modifier-error)';
 			warning.style.padding = '10px';
 			warning.style.borderRadius = '5px';
 			warning.style.marginBottom = '15px';
-			warning.createEl('h3', { text: '⚠️ Conflict Warning', cls: 'crdt-sync-warning-title' });
-			warning.createEl('p', { text: 'For Obsidian CRDT Sync to function correctly and avoid data corruption, please disable the official Obsidian Sync plugin in your Core Plugins settings.' });
+			warning.createEl('h3', { text: '⚠️ Conflict Warning', cls: 'ilow-sync-warning-title' });
+			warning.createEl('p', { text: 'For Ilow Sync to function correctly and avoid data corruption, please disable the official Obsidian Sync plugin in your Core Plugins settings.' });
 		}
 
 		// PostgREST URL
@@ -198,7 +198,7 @@ export class SettingsTab extends PluginSettingTab {
 							headers: this.plugin.settings.headers,
 							salt: this.plugin.settings.salt
 						};
-						const modal = new QrDisplayModal(this.app, 'obsidian-sync://' + btoa(JSON.stringify(payload)));
+						const modal = new QrDisplayModal(this.app, 'ilow-sync://' + btoa(JSON.stringify(payload)));
 						modal.open();
 					})
 			);
@@ -211,12 +211,12 @@ export class SettingsTab extends PluginSettingTab {
 				btn.setButtonText('Scan QR Code')
 					.onClick(() => {
 						const modal = new QrScannerModal(this.app, async (text) => {
-							if (!text.startsWith('obsidian-sync://')) {
+							if (!text.startsWith('ilow-sync://')) {
 								new Notice('Invalid QR code format.');
 								return;
 							}
 							try {
-								const base64 = text.replace('obsidian-sync://', '');
+								const base64 = text.replace('ilow-sync://', '');
 								const parsed = JSON.parse(atob(base64));
 								if (parsed.serverUrl && parsed.headers && parsed.salt) {
 									this.plugin.settings.serverUrl = parsed.serverUrl;
@@ -252,7 +252,7 @@ export class SettingsTab extends PluginSettingTab {
 								if (this.plugin.getSyncOrchestrator()) {
 									this.plugin.getSyncOrchestrator()?.stopAll();
 								}
-								await window.indexedDB.deleteDatabase('obsidian-crdt-sync-db');
+								await window.indexedDB.deleteDatabase('ilow-snapshot-store-db');
 								new Notice('Local state hard reset successful! Initiating fresh re-sync...');
 
 								if (this.plugin.isKeyDerived && this.plugin.getSyncOrchestrator()) {
