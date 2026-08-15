@@ -99,6 +99,11 @@ export default class MyPlugin extends Plugin {
 				this.updateStatusBar('syncing', 'Loading key...');
 				this.derivedKey = await this.cryptoService.importKey(keyData);
 
+				if (this.remoteStore) {
+					const vaultAliasId = await this.cryptoService.getVaultAliasId(this.derivedKey);
+					this.remoteStore.setVaultAliasId(vaultAliasId);
+				}
+
 				if (this.networkOrchestrator) {
 					this.networkOrchestrator.setCryptoKey(this.derivedKey);
 					this.runBackgroundBootstrap().catch(console.error);
@@ -204,7 +209,7 @@ export default class MyPlugin extends Plugin {
 			const exportedKey = await this.cryptoService.exportKey(this.derivedKey);
 			await (this.app as any).secretStorage.setSecret('ilow-master-key', exportedKey);
 
-			this.initializeSyncOrchestrator();
+			await this.initializeSyncOrchestrator();
 
 			if (this.networkOrchestrator) {
 				this.networkOrchestrator.setCryptoKey(this.derivedKey);
@@ -276,7 +281,7 @@ export default class MyPlugin extends Plugin {
 		}
 	}
 
-	private initializeSyncOrchestrator() {
+	private async initializeSyncOrchestrator() {
 		if (this.manifestUnsubscribe) {
 			this.manifestUnsubscribe();
 			this.manifestUnsubscribe = null;
@@ -304,6 +309,11 @@ export default class MyPlugin extends Plugin {
 
 		if (this.settings.serverUrl) {
 			this.remoteStore = new PostgresRemoteStore(this.settings.serverUrl, this.settings.headers);
+			if (this.derivedKey) {
+				const vaultAliasId = await this.cryptoService.getVaultAliasId(this.derivedKey);
+				this.remoteStore.setVaultAliasId(vaultAliasId);
+			}
+
 			const socketUrl = this.settings.serverUrl.replace(/^http/i, 'ws');
 
 			this.vfsController = new LoroVfsController(this.syncEngine, this.eventBus);

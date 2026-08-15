@@ -318,6 +318,10 @@ export class NetworkOrchestrator {
 		this.triggerStatusUpdate();
 	}
 
+	public async forceSyncAndCompact(documentId: string): Promise<void> {
+		await this.pullDocument(documentId);
+	}
+
 	public async deleteRemoteSnapshot(documentId: string): Promise<void> {
 		this.fileLastSyncIds.delete(documentId);
 		this.fileUpdateCounters.delete(documentId);

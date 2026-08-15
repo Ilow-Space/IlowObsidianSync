@@ -9,6 +9,12 @@ export class WebCryptoService implements ICryptography {
 		return CryptoUtils.bufToHex(array);
 	}
 
+	public async getVaultAliasId(key: CryptoKey): Promise<string> {
+		const rawKeyBuffer = await window.crypto.subtle.exportKey('raw', key);
+		const hashBuffer = await window.crypto.subtle.digest('SHA-256', rawKeyBuffer);
+		return CryptoUtils.bufToHex(new Uint8Array(hashBuffer));
+	}
+
 	public async deriveKey(password: string, salt: string): Promise<CryptoKey> {
 		const enc = new TextEncoder();
 		const keyMaterial = await window.crypto.subtle.importKey(

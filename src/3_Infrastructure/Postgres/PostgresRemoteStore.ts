@@ -7,6 +7,7 @@ import { requestUrl } from 'obsidian';
 export class PostgresRemoteStore implements IRemoteStore {
 	private serverUrl: string;
 	private headers: Record<string, string>;
+	private vaultAliasId: string = '';
 	private socket: WebSocket | null = null;
 	private subscriptions = new Map<string, Array<(docId?: string, action?: string) => void>>();
 
@@ -16,6 +17,15 @@ export class PostgresRemoteStore implements IRemoteStore {
 			'Content-Type': 'application/json',
 			...headers
 		};
+	}
+
+	public setVaultAliasId(vaultAliasId: string) {
+		this.vaultAliasId = vaultAliasId;
+		if (vaultAliasId) {
+			this.headers['X-Vault-Alias-ID'] = vaultAliasId;
+		} else {
+			delete this.headers['X-Vault-Alias-ID'];
+		}
 	}
 
 	// NEW BULK FETCH IMPLEMENTATION
@@ -40,7 +50,12 @@ export class PostgresRemoteStore implements IRemoteStore {
 
 	public connectWebSocket(wssUrl: string) {
 		try {
-			this.socket = new WebSocket(wssUrl);
+			const socketUrl = new URL(wssUrl);
+			if (this.vaultAliasId) {
+				socketUrl.searchParams.set('vault_alias_id', this.vaultAliasId);
+			}
+
+			this.socket = new WebSocket(socketUrl.toString());
 
 			this.socket.onopen = () => {
 				const keys = Array.from(this.subscriptions.keys());
@@ -48,7 +63,8 @@ export class PostgresRemoteStore implements IRemoteStore {
 					const filters = keys.map(docId => `document_id=eq.${docId}`);
 					this.socket?.send(JSON.stringify({
 						action: 'subscribe_bulk',
-						filters
+						filters,
+						vault_alias_id: this.vaultAliasId
 					}));
 				}
 			};
@@ -105,7 +121,11 @@ export class PostgresRemoteStore implements IRemoteStore {
         this.subscriptions.get(documentId)!.push(onUpdateDetected);
 
         if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-        	this.socket.send(JSON.stringify({ action: 'subscribe', filter: `document_id=eq.${documentId}` }));
+		this.socket.send(JSON.stringify({
+			action: 'subscribe',
+			filter: `document_id=eq.${documentId}`,
+			vault_alias_id: this.vaultAliasId
+		}));
         }
 
         return () => {

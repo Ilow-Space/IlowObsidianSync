@@ -60,6 +60,7 @@ var upgrader = websocket.Upgrader{
 type Client struct {
 	conn          *websocket.Conn
 	subscriptions map[string]bool
+	vaultAliasID  string
 	mu            sync.RWMutex
 }
 
@@ -73,17 +74,19 @@ var globalHub = Hub{
 }
 
 type SubscribeMessage struct {
-	Action  string   `json:"action"`
-	Filter  string   `json:"filter"`
-	Filters []string `json:"filters"`
+	Action       string   `json:"action"`
+	Filter       string   `json:"filter"`
+	Filters      []string `json:"filters"`
+	VaultAliasID string   `json:"vault_alias_id"`
 }
 
 type PgPayload struct {
 	Type   string `json:"type"`
 	Table  string `json:"table"`
 	Record struct {
-		DocumentID string `json:"document_id"`
-		ID         int    `json:"id"`
+		VaultAliasID string `json:"vault_alias_id"`
+		DocumentID   string `json:"document_id"`
+		ID           int    `json:"id"`
 	} `json:"record"`
 }
 
@@ -252,7 +255,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Vault-Alias-ID")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -274,28 +277,59 @@ func corsMiddleware(next http.Handler) http.Handler {
 func runMigrations() {
 	migrations := []string{
 		`CREATE TABLE IF NOT EXISTS vault_snapshots (
-			document_id TEXT PRIMARY KEY,
+			vault_alias_id TEXT NOT NULL DEFAULT '',
+			document_id TEXT NOT NULL,
 			encrypted_state BYTEA,
 			encrypted_path BYTEA,
 			is_deleted BOOLEAN DEFAULT false,
 			max_compacted_id INT DEFAULT 0,
-			updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+			updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (vault_alias_id, document_id)
 		);`,
+		`ALTER TABLE vault_snapshots ADD COLUMN IF NOT EXISTS vault_alias_id TEXT NOT NULL DEFAULT '';`,
 		`ALTER TABLE vault_snapshots ADD COLUMN IF NOT EXISTS max_compacted_id INT DEFAULT 0;`,
 		`CREATE TABLE IF NOT EXISTS vault_updates (
 			id SERIAL PRIMARY KEY,
-			document_id TEXT NOT NULL REFERENCES vault_snapshots(document_id) ON DELETE CASCADE,
+			vault_alias_id TEXT NOT NULL DEFAULT '',
+			document_id TEXT NOT NULL,
 			encrypted_update BYTEA,
 			created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_vault_updates_doc_id ON vault_updates(document_id);`,
+		`ALTER TABLE vault_updates ADD COLUMN IF NOT EXISTS vault_alias_id TEXT NOT NULL DEFAULT '';`,
+		`DO $$
+		BEGIN
+			IF EXISTS (
+				SELECT 1 FROM pg_constraint WHERE conname = 'vault_updates_document_id_fkey'
+			) THEN
+				ALTER TABLE vault_updates DROP CONSTRAINT vault_updates_document_id_fkey;
+			END IF;
+		END $$;`,
+		`DO $$
+		BEGIN
+			IF EXISTS (
+				SELECT 1 FROM pg_constraint WHERE conname = 'vault_snapshots_pkey' AND array_length(conkey, 1) = 1
+			) THEN
+				ALTER TABLE vault_snapshots DROP CONSTRAINT vault_snapshots_pkey;
+				ALTER TABLE vault_snapshots ADD PRIMARY KEY (vault_alias_id, document_id);
+			END IF;
+		END $$;`,
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint WHERE conname = 'vault_updates_vault_alias_id_document_id_fkey'
+			) THEN
+				ALTER TABLE vault_updates ADD CONSTRAINT vault_updates_vault_alias_id_document_id_fkey
+					FOREIGN KEY (vault_alias_id, document_id) REFERENCES vault_snapshots(vault_alias_id, document_id) ON DELETE CASCADE;
+			END IF;
+		END $$;`,
+		`CREATE INDEX IF NOT EXISTS idx_vault_updates_doc_id ON vault_updates(vault_alias_id, document_id);`,
 		`CREATE OR REPLACE FUNCTION notify_vault_update()
 		RETURNS trigger AS $$
 		BEGIN
 		  PERFORM pg_notify('vault_updates_channel', json_build_object(
 			'type', 'INSERT',
 			'table', 'vault_updates',
-			'record', json_build_object('document_id', NEW.document_id, 'id', NEW.id)
+			'record', json_build_object('vault_alias_id', NEW.vault_alias_id, 'document_id', NEW.document_id, 'id', NEW.id)
 		  )::text);
 		  RETURN NEW;
 		END;
@@ -355,9 +389,19 @@ func handleGetTelemetry(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func getVaultAliasIDHeader(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get("X-Vault-Alias-ID"))
+}
+
 // BULK OPTIMIZATION
 func handleGetBulkLatestUpdateIDs(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query("SELECT document_id, MAX(id) as max_id FROM vault_updates GROUP BY document_id")
+	vaultAliasID := getVaultAliasIDHeader(r)
+	if vaultAliasID == "" {
+		http.Error(w, "X-Vault-Alias-ID header is required", http.StatusBadRequest)
+		return
+	}
+
+	rows, err := db.Query("SELECT document_id, MAX(id) as max_id FROM vault_updates WHERE vault_alias_id = $1 GROUP BY document_id", vaultAliasID)
 	if err != nil {
 		log.Printf("Error fetching bulk latest IDs: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -380,6 +424,12 @@ func handleGetBulkLatestUpdateIDs(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetSnapshot(w http.ResponseWriter, r *http.Request) {
+	vaultAliasID := getVaultAliasIDHeader(r)
+	if vaultAliasID == "" {
+		http.Error(w, "X-Vault-Alias-ID header is required", http.StatusBadRequest)
+		return
+	}
+
 	id := r.PathValue("id")
 	if id == "" {
 		http.Error(w, "Missing document ID", http.StatusBadRequest)
@@ -392,7 +442,7 @@ func handleGetSnapshot(w http.ResponseWriter, r *http.Request) {
 	var maxCompactedID int
 	var updatedAt time.Time
 
-	err := db.QueryRow("SELECT encrypted_state, encrypted_path, is_deleted, max_compacted_id, updated_at FROM vault_snapshots WHERE document_id = $1", id).
+	err := db.QueryRow("SELECT encrypted_state, encrypted_path, is_deleted, max_compacted_id, updated_at FROM vault_snapshots WHERE vault_alias_id = $1 AND document_id = $2", vaultAliasID, id).
 		Scan(&encState, &encPath, &isDeleted, &maxCompactedID, &updatedAt)
 
 	if err == sql.ErrNoRows {
@@ -426,6 +476,12 @@ func handleGetSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetUpdates(w http.ResponseWriter, r *http.Request) {
+	vaultAliasID := getVaultAliasIDHeader(r)
+	if vaultAliasID == "" {
+		http.Error(w, "X-Vault-Alias-ID header is required", http.StatusBadRequest)
+		return
+	}
+
 	id := r.PathValue("id")
 	if id == "" {
 		http.Error(w, "Missing document ID", http.StatusBadRequest)
@@ -443,7 +499,7 @@ func handleGetUpdates(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows, err := db.Query("SELECT id, document_id, encrypted_update, created_at FROM vault_updates WHERE document_id = $1 AND id > $2 ORDER BY id ASC", id, since)
+	rows, err := db.Query("SELECT id, document_id, encrypted_update, created_at FROM vault_updates WHERE vault_alias_id = $1 AND document_id = $2 AND id > $3 ORDER BY id ASC", vaultAliasID, id, since)
 	if err != nil {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
@@ -486,6 +542,12 @@ func handleGetUpdates(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetLatestUpdateID(w http.ResponseWriter, r *http.Request) {
+	vaultAliasID := getVaultAliasIDHeader(r)
+	if vaultAliasID == "" {
+		http.Error(w, "X-Vault-Alias-ID header is required", http.StatusBadRequest)
+		return
+	}
+
 	id := r.PathValue("id")
 	if id == "" {
 		http.Error(w, "Missing document ID", http.StatusBadRequest)
@@ -493,7 +555,7 @@ func handleGetLatestUpdateID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var lastID int
-	err := db.QueryRow("SELECT id FROM vault_updates WHERE document_id = $1 ORDER BY id DESC LIMIT 1", id).Scan(&lastID)
+	err := db.QueryRow("SELECT id FROM vault_updates WHERE vault_alias_id = $1 AND document_id = $2 ORDER BY id DESC LIMIT 1", vaultAliasID, id).Scan(&lastID)
 	if err == sql.ErrNoRows {
 		lastID = 0
 	} else if err != nil {
@@ -506,6 +568,12 @@ func handleGetLatestUpdateID(w http.ResponseWriter, r *http.Request) {
 }
 
 func handlePostUpdate(w http.ResponseWriter, r *http.Request) {
+	vaultAliasID := getVaultAliasIDHeader(r)
+	if vaultAliasID == "" {
+		http.Error(w, "X-Vault-Alias-ID header is required", http.StatusBadRequest)
+		return
+	}
+
 	var payload UpdatePayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -529,18 +597,18 @@ func handlePostUpdate(w http.ResponseWriter, r *http.Request) {
 
 	if len(pathBytes) > 0 {
 		_, err = db.Exec(`
-			INSERT INTO vault_snapshots (document_id, encrypted_state, encrypted_path, is_deleted, updated_at)
-			VALUES ($1, NULL, $2, false, NOW())
-			ON CONFLICT (document_id) DO UPDATE
+			INSERT INTO vault_snapshots (vault_alias_id, document_id, encrypted_state, encrypted_path, is_deleted, updated_at)
+			VALUES ($1, $2, NULL, $3, false, NOW())
+			ON CONFLICT (vault_alias_id, document_id) DO UPDATE
 			SET encrypted_path = EXCLUDED.encrypted_path, is_deleted = false, updated_at = NOW();
-		`, payload.DocumentID, pathBytes)
+		`, vaultAliasID, payload.DocumentID, pathBytes)
 	} else {
 		_, err = db.Exec(`
-			INSERT INTO vault_snapshots (document_id, encrypted_state, is_deleted, updated_at)
-			VALUES ($1, NULL, false, NOW())
-			ON CONFLICT (document_id) DO UPDATE
+			INSERT INTO vault_snapshots (vault_alias_id, document_id, encrypted_state, is_deleted, updated_at)
+			VALUES ($1, $2, NULL, false, NOW())
+			ON CONFLICT (vault_alias_id, document_id) DO UPDATE
 			SET is_deleted = false, updated_at = NOW();
-		`, payload.DocumentID)
+		`, vaultAliasID, payload.DocumentID)
 	}
 
 	if err != nil {
@@ -549,9 +617,9 @@ func handlePostUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, err = db.Exec(`
-		INSERT INTO vault_updates (document_id, encrypted_update, created_at)
-		VALUES ($1, $2, NOW());
-	`, payload.DocumentID, updateBytes)
+		INSERT INTO vault_updates (vault_alias_id, document_id, encrypted_update, created_at)
+		VALUES ($1, $2, $3, NOW());
+	`, vaultAliasID, payload.DocumentID, updateBytes)
 
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
@@ -563,6 +631,12 @@ func handlePostUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func handlePostCompact(w http.ResponseWriter, r *http.Request) {
+	vaultAliasID := getVaultAliasIDHeader(r)
+	if vaultAliasID == "" {
+		http.Error(w, "X-Vault-Alias-ID header is required", http.StatusBadRequest)
+		return
+	}
+
 	id := r.PathValue("id")
 	if id == "" {
 		http.Error(w, "Missing document ID", http.StatusBadRequest)
@@ -599,25 +673,25 @@ func handlePostCompact(w http.ResponseWriter, r *http.Request) {
 
 	if len(pathBytes) > 0 {
 		_, err = tx.Exec(`
-			INSERT INTO vault_snapshots (document_id, encrypted_state, encrypted_path, is_deleted, max_compacted_id, updated_at)
-			VALUES ($1, $2, $3, $4, $5, NOW())
-			ON CONFLICT (document_id) DO UPDATE
+			INSERT INTO vault_snapshots (vault_alias_id, document_id, encrypted_state, encrypted_path, is_deleted, max_compacted_id, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, NOW())
+			ON CONFLICT (vault_alias_id, document_id) DO UPDATE
 			SET encrypted_state = EXCLUDED.encrypted_state,
 				encrypted_path = EXCLUDED.encrypted_path,
 				is_deleted = EXCLUDED.is_deleted,
 				max_compacted_id = EXCLUDED.max_compacted_id,
 				updated_at = NOW();
-		`, id, stateBytes, pathBytes, payload.PIsDeleted, payload.PMaxID)
+		`, vaultAliasID, id, stateBytes, pathBytes, payload.PIsDeleted, payload.PMaxID)
 	} else {
 		_, err = tx.Exec(`
-			INSERT INTO vault_snapshots (document_id, encrypted_state, is_deleted, max_compacted_id, updated_at)
-			VALUES ($1, $2, $3, $4, NOW())
-			ON CONFLICT (document_id) DO UPDATE
+			INSERT INTO vault_snapshots (vault_alias_id, document_id, encrypted_state, is_deleted, max_compacted_id, updated_at)
+			VALUES ($1, $2, $3, $4, $5, NOW())
+			ON CONFLICT (vault_alias_id, document_id) DO UPDATE
 			SET encrypted_state = EXCLUDED.encrypted_state,
 				is_deleted = EXCLUDED.is_deleted,
 				max_compacted_id = EXCLUDED.max_compacted_id,
 				updated_at = NOW();
-		`, id, stateBytes, payload.PIsDeleted, payload.PMaxID)
+		`, vaultAliasID, id, stateBytes, payload.PIsDeleted, payload.PMaxID)
 	}
 
 	if err != nil {
@@ -625,7 +699,7 @@ func handlePostCompact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = tx.Exec("DELETE FROM vault_updates WHERE document_id = $1 AND id <= $2", id, payload.PMaxID)
+	_, err = tx.Exec("DELETE FROM vault_updates WHERE vault_alias_id = $1 AND document_id = $2 AND id <= $3", vaultAliasID, id, payload.PMaxID)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -641,7 +715,13 @@ func handlePostCompact(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetManifest(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query("SELECT document_id, encrypted_path, is_deleted, updated_at FROM vault_snapshots")
+	vaultAliasID := getVaultAliasIDHeader(r)
+	if vaultAliasID == "" {
+		http.Error(w, "X-Vault-Alias-ID header is required", http.StatusBadRequest)
+		return
+	}
+
+	rows, err := db.Query("SELECT document_id, encrypted_path, is_deleted, updated_at FROM vault_snapshots WHERE vault_alias_id = $1", vaultAliasID)
 	if err != nil {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
@@ -684,6 +764,12 @@ func handleGetManifest(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
+	vaultAliasID := getVaultAliasIDHeader(r)
+	if vaultAliasID == "" {
+		http.Error(w, "X-Vault-Alias-ID header is required", http.StatusBadRequest)
+		return
+	}
+
 	id := r.PathValue("id")
 	if id == "" {
 		http.Error(w, "Missing document ID", http.StatusBadRequest)
@@ -697,13 +783,13 @@ func handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	_, err = tx.Exec("UPDATE vault_snapshots SET is_deleted = true, updated_at = NOW() WHERE document_id = $1", id)
+	_, err = tx.Exec("UPDATE vault_snapshots SET is_deleted = true, updated_at = NOW() WHERE vault_alias_id = $1 AND document_id = $2", vaultAliasID, id)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
-	_, err = tx.Exec("DELETE FROM vault_updates WHERE document_id = $1", id)
+	_, err = tx.Exec("DELETE FROM vault_updates WHERE vault_alias_id = $1 AND document_id = $2", vaultAliasID, id)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
@@ -713,9 +799,9 @@ func handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 		SELECT pg_notify('vault_updates_channel', json_build_object(
 			'type', 'DELETE',
 			'table', 'vault_snapshots',
-			'record', json_build_object('document_id', $1::text, 'id', 0)
+			'record', json_build_object('vault_alias_id', $1::text, 'document_id', $2::text, 'id', 0)
 		)::text);
-	`, id)
+	`, vaultAliasID, id)
 
 	if err := tx.Commit(); err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
@@ -751,9 +837,15 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	vaultAliasID := r.URL.Query().Get("vault_alias_id")
+	if vaultAliasID == "" {
+		vaultAliasID = r.Header.Get("X-Vault-Alias-ID")
+	}
+
 	client := &Client{
 		conn:          conn,
 		subscriptions: make(map[string]bool),
+		vaultAliasID:  vaultAliasID,
 	}
 
 	globalHub.mu.Lock()
@@ -781,16 +873,18 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		var subMsg SubscribeMessage
 		if err := json.Unmarshal(msg, &subMsg); err == nil {
+			client.mu.Lock()
+			if subMsg.VaultAliasID != "" {
+				client.vaultAliasID = subMsg.VaultAliasID
+			}
+
 			if subMsg.Action == "subscribe" && subMsg.Filter != "" {
 				matches := filterRegex.FindStringSubmatch(subMsg.Filter)
 				if len(matches) > 1 {
 					docID := matches[1]
-					client.mu.Lock()
 					client.subscriptions[docID] = true
-					client.mu.Unlock()
 				}
 			} else if subMsg.Action == "subscribe_bulk" && len(subMsg.Filters) > 0 {
-				client.mu.Lock()
 				for _, filterStr := range subMsg.Filters {
 					matches := filterRegex.FindStringSubmatch(filterStr)
 					if len(matches) > 1 {
@@ -798,8 +892,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 						client.subscriptions[docID] = true
 					}
 				}
-				client.mu.Unlock()
 			}
+			client.mu.Unlock()
 		}
 	}
 }
@@ -818,6 +912,7 @@ func handleDatabaseNotifications(l *pq.Listener) {
 			}
 
 			docID := payload.Record.DocumentID
+			payloadVaultAliasID := payload.Record.VaultAliasID
 			if docID == "" {
 				continue
 			}
@@ -826,9 +921,10 @@ func handleDatabaseNotifications(l *pq.Listener) {
 			for client := range globalHub.clients {
 				client.mu.RLock()
 				isSubscribed := client.subscriptions[docID] || client.subscriptions["manifest"]
+				clientVaultAliasID := client.vaultAliasID
 				client.mu.RUnlock()
 
-				if isSubscribed {
+				if isSubscribed && payloadVaultAliasID != "" && clientVaultAliasID != "" && payloadVaultAliasID == clientVaultAliasID {
 					client.conn.WriteMessage(websocket.TextMessage, []byte(notification.Extra))
 				}
 			}
