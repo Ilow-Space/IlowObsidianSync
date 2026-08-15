@@ -105,19 +105,19 @@ export class PostgresRemoteStore implements IRemoteStore {
         this.subscriptions.get(documentId)!.push(onUpdateDetected);
 
         if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-		this.socket.send(JSON.stringify({ action: 'subscribe', filter: `document_id=eq.${documentId}` }));
+        	this.socket.send(JSON.stringify({ action: 'subscribe', filter: `document_id=eq.${documentId}` }));
         }
 
         return () => {
-		const callbacks = this.subscriptions.get(documentId);
-		if (callbacks) {
-			const remaining = callbacks.filter(cb => cb !== onUpdateDetected);
-			if (remaining.length === 0) {
-				this.subscriptions.delete(documentId);
-			} else {
-				this.subscriptions.set(documentId, remaining);
-			}
-		}
+        	const callbacks = this.subscriptions.get(documentId);
+        	if (callbacks) {
+        		const remaining = callbacks.filter(cb => cb !== onUpdateDetected);
+        		if (remaining.length === 0) {
+        			this.subscriptions.delete(documentId);
+        		} else {
+        			this.subscriptions.set(documentId, remaining);
+        		}
+        	}
         };
 	}
 

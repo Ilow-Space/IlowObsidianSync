@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+﻿import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SyncEventBus } from '../src/2_Application/Sync/SyncEventBus';
 import { LoroVfsController } from '../src/2_Application/Sync/LoroVfsController';
 import { NetworkOrchestrator } from '../src/2_Application/Sync/NetworkOrchestrator';
@@ -120,5 +120,23 @@ describe('NetworkOrchestrator & Sync Tests', () => {
 		await orchestrator.pullDocument('test-doc', 'test.md');
 
 		expect(noteRepoMock.readNote).toHaveBeenCalledWith('test.md');
+	});
+	it('PERF REGRESSION: pullDocument must safely merge snapshots without ejecting active LoroDocs', async () => {
+		const dummyKey = {} as any;
+		orchestrator.setCryptoKey(dummyKey);
+        
+		// Spy on the engine to ensure we NEVER call forceEjectDoc
+		const ejectSpy = vi.spyOn(syncEngine, 'forceEjectDoc');
+
+		remoteStoreMock.fetchSnapshotDetails.mockResolvedValueOnce({
+			encryptedState: new Uint8Array([4, 5, 6]), // Will be mocked to valid by cryptoMock
+			maxCompactedId: 10,
+			isDeleted: false
+		});
+
+		await orchestrator.pullDocument('test-doc', 'test.md');
+
+		// The orchestrator must seamlessly merge, preserving local offline state without wiping the doc instance
+		expect(ejectSpy).not.toHaveBeenCalled();
 	});
 });

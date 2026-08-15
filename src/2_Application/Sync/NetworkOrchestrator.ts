@@ -43,6 +43,13 @@ export class NetworkOrchestrator {
 	public initialize(): void {
 		this.eventBus.on('LocalDeltaReadyForPush', this.handleLocalDeltaReadyForPush.bind(this));
 		this.eventBus.on('LocalFileModified', this.handleLocalFileModified.bind(this));
+		this.eventBus.on('CrdtNodeCreated', this.handleRemoteNodeDiscovered.bind(this));
+	}
+	private async handleRemoteNodeDiscovered(payload: { uuid: string; path: string; isFolder: boolean }): Promise<void> {
+		if (payload.isFolder || !this.activeKey || !this.isInitialized) return;
+		
+		// Instantly fetch the content for the newly discovered file ghost
+		await this.pullDocument(payload.uuid, payload.path, true);
 	}
 
 	public getRemoteStore(): IRemoteStore { return this.remoteStore; }
@@ -70,6 +77,10 @@ export class NetworkOrchestrator {
 	private removeActiveTask(taskName: string) {
 		this.activeTasks.delete(taskName);
 		this.triggerStatusUpdate();
+	}
+
+	public getActiveSyncPaths(): string[] {
+		return Array.from(this.activeTasks);
 	}
 
 	private triggerStatusUpdate() {
@@ -101,22 +112,25 @@ export class NetworkOrchestrator {
 		if (!this.activeKey) return;
 
 		this.addActiveTask(payload.path || 'System Index');
-		try {
-			const encryptedUpdate = await this.crypto.encrypt(payload.updateBinary, this.activeKey);
-			let encryptedPath = null;
-			if (payload.path) {
-				const pathBytes = new TextEncoder().encode(payload.path);
-				encryptedPath = await this.crypto.encrypt(pathBytes, this.activeKey);
-			}
+		
+		await this.orchestratorMutex.runExclusive(async () => {
+			try {
+				const encryptedUpdate = await this.crypto.encrypt(payload.updateBinary, this.activeKey!);
+				let encryptedPath = null;
+				if (payload.path) {
+					const pathBytes = new TextEncoder().encode(payload.path);
+					encryptedPath = await this.crypto.encrypt(pathBytes, this.activeKey!);
+				}
 
-			await this.remoteStore.pushUpdate(payload.documentId, encryptedUpdate, encryptedPath);
-			this.hasConnectionError = false;
-		} catch (err) {
-			this.hasConnectionError = true;
-			this.lastErrorMessage = 'Connection failed';
-		} finally {
-			this.removeActiveTask(payload.path || 'System Index');
-		}
+				await this.remoteStore.pushUpdate(payload.documentId, encryptedUpdate, encryptedPath);
+				this.hasConnectionError = false;
+			} catch (err) {
+				this.hasConnectionError = true;
+				this.lastErrorMessage = 'Connection failed';
+			} finally {
+				this.removeActiveTask(payload.path || 'System Index');
+			}
+		});
 	}
 
 	private async handleLocalFileModified(payload: { path: string; content: string }): Promise<void> {
@@ -209,16 +223,15 @@ export class NetworkOrchestrator {
 				const start = performance.now();
 				try {
 					const details = await this.remoteStore.fetchSnapshotDetails(documentId);
+					
 					if (details && lastId < details.maxCompactedId) {
 						console.log(`[NetworkOrchestrator] Lagging client detected for ${documentId}. Initiating snapshot rehydration...`);
 
+						// RESTORED: Read local disk content before merge to protect unpushed offline edits
 						let offlineContent: string | null = null;
 						if (path) {
 							offlineContent = await this.noteRepo.readNote(path);
 						}
-
-						await this.crdtEngine.localStore.deleteDocumentState(documentId);
-						this.crdtEngine.forceEjectDoc(documentId);
 
 						if (details.encryptedState) {
 							const decryptedBytes = await this.crypto.decrypt(details.encryptedState, this.activeKey!);
@@ -242,7 +255,7 @@ export class NetworkOrchestrator {
 					}
 
 					if (decryptedUpdates.length > 0) {
-					const doc = await this.crdtEngine.applyUpdates(documentId, decryptedUpdates);
+						const doc = await this.crdtEngine.applyUpdates(documentId, decryptedUpdates);
 						const maxId = Math.max(...updates.map(u => u.id));
 						this.fileLastSyncIds.set(documentId, maxId);
 

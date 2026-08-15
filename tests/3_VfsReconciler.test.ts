@@ -37,11 +37,11 @@ describe('Reactive Event-Driven VFS Reconciler Tests', () => {
 		diskReconciler.initialize();
 	});
 
-	it('Emits and processes LocalFileCreated event correctly', async () => {
+	it('Emits LocalDeltaReadyForPush when local file is created', async () => {
 		const createdPromise = new Promise<void>((resolve) => {
-			eventBus.on('CrdtNodeCreated', (payload) => {
-				expect(payload.path).toBe('Documents/Note.md');
-				expect(payload.isFolder).toBe(false);
+			// FIX: We listen for the push event now, NOT CrdtNodeCreated (which is for remote nodes only)
+			eventBus.on('LocalDeltaReadyForPush', (payload) => {
+				expect(payload.documentId).toBe('shard-index');
 				resolve();
 			});
 		});
@@ -68,16 +68,18 @@ describe('Reactive Event-Driven VFS Reconciler Tests', () => {
 		expect(appMock.vault.create).toHaveBeenCalledWith('Notes/Ideas.md', 'Some remote edits');
 	});
 
-	it('Triggers proper native move on LoroTree and renames correctly', async () => {
+	it('Triggers proper native move on LoroTree and schedules delta push', async () => {
 		eventBus.emit('LocalFileCreated', {
 			path: 'Notes/Draft.md',
 			isFolder: false
 		});
 
+		// Wait for creation debounce to settle
+		await new Promise(r => setTimeout(r, 100));
+
 		const movedPromise = new Promise<void>((resolve) => {
-			eventBus.on('CrdtNodeMoved', (payload) => {
-				expect(payload.oldPath).toBe('Notes/Draft.md');
-				expect(payload.newPath).toBe('Notes/Published.md');
+			eventBus.on('LocalDeltaReadyForPush', (payload) => {
+				expect(payload.documentId).toBe('shard-index');
 				resolve();
 			});
 		});
@@ -94,7 +96,6 @@ describe('Reactive Event-Driven VFS Reconciler Tests', () => {
 		let activeWrites = 0;
 		let maxConcurrentWrites = 0;
 
-		// Mock app.vault.modify to take 50ms and track concurrency
 		appMock.vault.modify.mockImplementation(async () => {
 			activeWrites++;
 			maxConcurrentWrites = Math.max(maxConcurrentWrites, activeWrites);
@@ -102,7 +103,6 @@ describe('Reactive Event-Driven VFS Reconciler Tests', () => {
 			activeWrites--;
 		});
 
-		// Simulate an incoming storm of 50 simultaneous network updates
 		const promises = Array.from({ length: 50 }).map((_, i) => {
 			return eventBus.emit('CrdtTextChanged', {
 				uuid: `doc-${i}`,
@@ -112,9 +112,8 @@ describe('Reactive Event-Driven VFS Reconciler Tests', () => {
 		});
 
 		await Promise.all(promises);
-		await new Promise(r => setTimeout(r, 100)); // allow queue to process
+		await new Promise(r => setTimeout(r, 100)); 
 
-		// With a concurrency limit of 5, max active writes should never exceed 5.
 		expect(maxConcurrentWrites).toBeLessThanOrEqual(5);
 	});
 
@@ -135,5 +134,63 @@ describe('Reactive Event-Driven VFS Reconciler Tests', () => {
 		expect(appMock.vault.trash).toHaveBeenCalledTimes(2);
 		expect(appMock.vault.trash).toHaveBeenNthCalledWith(1, fileObj, true);
 		expect(appMock.vault.trash).toHaveBeenNthCalledWith(2, fileObj, false);
+	});
+
+	it('PERF REGRESSION: Bulk deletions must execute O(1) cache eviction and batch WASM exports', async () => {
+		const rebuildSpy = vi.spyOn(vfsController, 'rebuildCache');
+		const exportSpy = vi.spyOn(vfsController['treeDoc'], 'export');
+
+		for (let i = 0; i < 100; i++) {
+			eventBus.emit('LocalFileCreated', { path: `Bulk/File-${i}.md`, isFolder: false });
+		}
+		
+		await new Promise(r => setTimeout(r, 100));
+		
+		rebuildSpy.mockClear();
+		exportSpy.mockClear();
+
+		for (let i = 0; i < 100; i++) {
+			eventBus.emit('LocalFileDeleted', { path: `Bulk/File-${i}.md` });
+		}
+
+		await new Promise(r => setTimeout(r, 100));
+
+		expect(rebuildSpy).toHaveBeenCalledTimes(0); 
+		expect(exportSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it('PERF REGRESSION: Local mutations must NOT emit CrdtNode events to prevent eager REST fetching loops', async () => {
+		const remoteCreatedSpy = vi.fn();
+		eventBus.on('CrdtNodeCreated', remoteCreatedSpy);
+
+		eventBus.emit('LocalFileCreated', {
+			path: 'Test/Local.md',
+			isFolder: false,
+			content: 'Local Data'
+		});
+
+		await new Promise(r => setTimeout(r, 100));
+
+		expect(remoteCreatedSpy).not.toHaveBeenCalled();
+	});
+	it('BUG REGRESSION: File move to an uncommitted directory must process correctly and update tree paths', async () => {
+		// 1. Create a loose file
+		eventBus.emit('LocalFileCreated', { path: 'LooseFile.md', isFolder: false, content: 'Data' });
+		
+		// 2. We do NOT wait for the 50ms batch to commit. We immediately move it to a NEW folder.
+		eventBus.emit('LocalFileRenamed', {
+			oldPath: 'LooseFile.md',
+			newPath: 'NewFolder/LooseFile.md'
+		});
+
+		// 3. Wait for the debounce push batch to settle
+		await new Promise(r => setTimeout(r, 100));
+
+		// 4. Verify the CRDT accurately resolved the path
+		const fileUuid = vfsController.getUuidForPath('NewFolder/LooseFile.md');
+		const obsoleteUuid = vfsController.getUuidForPath('LooseFile.md');
+		
+		expect(fileUuid).not.toBeNull();
+		expect(obsoleteUuid).toBeNull();
 	});
 });

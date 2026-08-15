@@ -1,4 +1,4 @@
-import { LoroDoc, LoroText, LoroTree, LoroTreeNode } from 'loro-crdt';
+import { LoroDoc } from 'loro-crdt';
 import diff from 'fast-diff';
 import { LoroSnapshotStore } from './LoroSnapshotStore';
 
@@ -29,11 +29,9 @@ export class LoroSyncEngine {
 
 		const doc = new LoroDoc();
 
-		// If it's a regular document (not shard-index), create/get the LoroText container
 		if (documentId !== 'shard-index') {
 			doc.getText('markdown');
 		} else {
-			// For shard-index, get the LoroTree container
 			doc.getTree('vault-tree');
 		}
 
@@ -86,27 +84,30 @@ export class LoroSyncEngine {
 				return null;
 			}
 
-			let update: Uint8Array | null = null;
+			// FIX: Capture the state vector BEFORE applying diffs using doc.version()
+			const oldVersion = doc.version();
 
-			// Run fast-diff to apply minimal changes to preserve character anchors and cursor stability
+			let update: Uint8Array | null = null;
 			const diffs = diff(currentText, newContent);
 			let index = 0;
 
 			doc.setPeerId(doc.peerId);
 
 			for (const [op, value] of diffs) {
-				if (op === 0) { // EQUAL
+				if (op === 0) {
 					index += value.length;
-				} else if (op === 1) { // INSERT
+				} else if (op === 1) {
 					text.insert(index, value);
 					index += value.length;
-				} else if (op === -1) { // DELETE
+				} else if (op === -1) {
 					text.delete(index, value.length);
 				}
 			}
 
 			doc.commit();
-			update = doc.export({ mode: 'update' });
+			
+			// FIX: Export ONLY the tiny incremental delta generated since the oldVersion
+			update = new Uint8Array(doc.export({ mode: 'update', from: oldVersion }));
 
 			const snapshot = doc.export({ mode: 'snapshot' });
 			await this.localStore.saveDocumentState(documentId, snapshot);

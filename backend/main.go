@@ -11,6 +11,7 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -102,13 +103,35 @@ type CompactPayload struct {
 func startTelemetryTracker() {
 	secTicker := time.NewTicker(1 * time.Second)
 	hourTicker := time.NewTicker(1 * time.Hour)
+	
+	idleSeconds := 0         // NEW: Tracks consecutive seconds with zero traffic
+	isOptimizing := false    // NEW: Mutex flag to prevent overlapping maintenance runs
+
 	for {
 		select {
 		case <-secTicker.C:
 			rps := atomic.SwapUint64(&reqsLastSecond, 0)
+			
 			telemetryMux.Lock()
 			currentRPS = float64(rps)
 			telemetryMux.Unlock()
+
+			// --- IDLE DETECTION LOGIC ---
+			if rps == 0 {
+				idleSeconds++
+			} else {
+				idleSeconds = 0 // Reset the counter the millisecond a user syncs
+			}
+
+			// Trigger maintenance exactly once after 5 minutes (300 seconds) of total API silence
+			if idleSeconds == 300 && !isOptimizing {
+				isOptimizing = true
+				go func() {
+					runIdleOptimizations()
+					isOptimizing = false
+				}()
+			}
+
 		case <-hourTicker.C:
 			rpm := atomic.SwapUint64(&reqsLastHour, 0)
 			telemetryMux.Lock()
@@ -116,6 +139,39 @@ func startTelemetryTracker() {
 			telemetryMux.Unlock()
 		}
 	}
+}
+
+func runIdleOptimizations() {
+	log.Println("[Self-Optimization] Server has been completely idle for 5 minutes. Initiating maintenance tasks...")
+
+	// 1. Force Go Runtime to surrender unused RAM back to the Operating System
+	var memBefore runtime.MemStats
+	runtime.ReadMemStats(&memBefore)
+	
+	debug.FreeOSMemory() // Aggressively invokes GC and releases memory pages to the OS
+	
+	var memAfter runtime.MemStats
+	runtime.ReadMemStats(&memAfter)
+	
+	reclaimedMB := float64(memBefore.Alloc - memAfter.Alloc) / 1024.0 / 1024.0
+	if reclaimedMB > 0 {
+		log.Printf("[Self-Optimization] Go Garbage Collector reclaimed %.2f MB of RAM.\n", reclaimedMB)
+	}
+
+	// 2. Postgres Physical Defragmentation
+	// This reclaims disk space from dead tuples left behind by CRDT compactions and updates query planner stats.
+	// Note: VACUUM ANALYZE is non-blocking, so if a user suddenly connects, the database won't lock up.
+	if db != nil {
+		start := time.Now()
+		_, err := db.Exec("VACUUM ANALYZE vault_snapshots, vault_updates;")
+		if err != nil {
+			log.Printf("[Self-Optimization] Postgres VACUUM failed: %v\n", err)
+		} else {
+			log.Printf("[Self-Optimization] Postgres defragmented successfully in %v.\n", time.Since(start))
+		}
+	}
+
+	log.Println("[Self-Optimization] Maintenance complete. Server is operating at peak efficiency.")
 }
 
 func main() {

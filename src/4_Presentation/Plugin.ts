@@ -120,15 +120,6 @@ export default class MyPlugin extends Plugin {
 				}
 			})
 		);
-
-		// Full synchronization sync interval
-		this.registerInterval(
-			window.setInterval(async () => {
-				if (this.isKeyDerived && this.networkOrchestrator) {
-					await this.networkOrchestrator.runFullSync();
-				}
-			}, 10000)
-		);
 	}
 
 	onunload() {
@@ -238,14 +229,19 @@ export default class MyPlugin extends Plugin {
 				this.manifestUnsubscribe();
 			}
 
+			// REWRITTEN: Abandon full-sync polling. React instantly to precise WS broadcasts.
 			this.manifestUnsubscribe = this.remoteStore.subscribeToUpdates('manifest', (docId, action) => {
 				if (!docId) return;
 
 				if (docId === 'shard-index') {
-					this.networkOrchestrator?.runFullSync().catch(console.error);
+					// Pull just the index. (This will emit CrdtNodeCreated, triggering Task 1!)
+					this.networkOrchestrator?.pullDocument('shard-index', null, true).catch(console.error);
 				} else {
+					// Pull just the specific file that changed
 					const path = this.vfsController!.getPathForUuid(docId);
-					this.networkOrchestrator?.pullDocument(docId, path, true).catch(console.error);
+					if (path) {
+						this.networkOrchestrator?.pullDocument(docId, path, true).catch(console.error);
+					}
 				}
 			});
 

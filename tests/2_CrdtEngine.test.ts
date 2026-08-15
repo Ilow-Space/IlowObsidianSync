@@ -95,4 +95,17 @@ describe('LoroSyncEngine & Conflict Resolution', () => {
         await expect(engine.applyUpdates(docId, [invalidUpdate])).resolves.toBeDefined();
         expect(doc.getText('markdown').toString()).toBe('Valid Baseline');
     });
+    it('PERF REGRESSION: handleLocalChange must export purely incremental deltas, not full histories', async () => {
+    const docId = 'delta-test';
+    // Create a massive initial document
+    const massiveContent = 'A'.repeat(500000); 
+    await engine.getOrCreateDoc(docId, massiveContent);
+    
+    // Add one single word
+    const updateBinary = await engine.handleLocalChange(docId, massiveContent + ' Small Edit');
+    
+    // The exported delta should be tiny (just the words " Small Edit" + metadata), NOT 500kb.
+    expect(updateBinary).not.toBeNull();
+    expect(updateBinary!.length).toBeLessThan(1000); // FAILS ON OLD CODE (Yields > 500,000 bytes)
+});
 });
