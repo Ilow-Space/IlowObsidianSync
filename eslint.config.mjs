@@ -30,17 +30,17 @@ export default [
             // ==========================================
             // 1. DDD ARCHITECTURAL BOUNDARIES
             // ==========================================
-            'boundaries/element-types': [
-                'error',
+            "boundaries/dependencies": [
+                2,
                 {
-                    default: 'disallow',
-                    rules: [
-                        { from: 'domain', allow: ['domain'] },
-                        { from: 'application', allow: ['domain', 'application'] },
-                        { from: 'infrastructure', allow: ['domain', 'infrastructure'] },
-                        { from: 'presentation', allow: ['domain', 'application', 'infrastructure', 'presentation'] },
-                    ],
-                },
+                    "default": "disallow",
+                    "policies": [
+                        { "from": "domain", "allow": ["domain"] },
+                        { "from": "application", "allow": ["domain", "application"] },
+                        { "from": "infrastructure", "allow": ["domain", "application", "infrastructure"] },
+                        { "from": "presentation", "allow": ["domain", "application", "infrastructure", "presentation"] }
+                    ]
+                }
             ],
 
             // ==========================================

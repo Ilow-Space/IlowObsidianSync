@@ -121,11 +121,11 @@ export class PostgresRemoteStore implements IRemoteStore {
         this.subscriptions.get(documentId)!.push(onUpdateDetected);
 
         if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-		this.socket.send(JSON.stringify({
-			action: 'subscribe',
-			filter: `document_id=eq.${documentId}`,
-			vault_alias_id: this.vaultAliasId
-		}));
+        	this.socket.send(JSON.stringify({
+        		action: 'subscribe',
+        		filter: `document_id=eq.${documentId}`,
+        		vault_alias_id: this.vaultAliasId
+        	}));
         }
 
         return () => {

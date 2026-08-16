@@ -136,14 +136,24 @@ export class NetworkOrchestrator {
 	private async handleLocalFileModified(payload: { path: string; content: string }): Promise<void> {
 		if (!this.activeKey || !this.isInitialized) return;
 
-		const documentId = this.vfsController.getUuidForPath(payload.path);
-		if (!documentId) return;
+		let documentId = this.vfsController.getUuidForPath(payload.path);
+		
+		// If an orphaned file on disk is modified, automatically register it as a new VFS node
+		if (!documentId) {
+			this.eventBus.emit('LocalFileCreated', {
+				path: payload.path,
+				isFolder: false,
+				content: payload.content
+			});
+			documentId = this.vfsController.getUuidForPath(payload.path);
+			if (!documentId) return;
+		}
 
 		const updateBinary = await this.crdtEngine.handleLocalChange(documentId, payload.content);
 		if (updateBinary) {
-			await this.handleLocalDeltaReadyForPush({
+			this.eventBus.emit('LocalDeltaReadyForPush', {
 				documentId,
-				updateBinary,
+				updateBinary: new Uint8Array(updateBinary),
 				path: payload.path
 			});
 		}
@@ -171,7 +181,11 @@ export class NetworkOrchestrator {
 				throw new Error(this.lastErrorMessage || 'Sync failed');
 			}
 
-			this.vfsController.rebuildCache();
+			// BUG 1 FIX: 
+			// We DO NOT call `this.vfsController.rebuildCache()` here. 
+			// Doing so destroys the "old state" snapshot needed to detect file moves.
+			// Instead, we wait 60ms to let the VFS debouncer safely compute and emit the diffs.
+			await new Promise(resolve => setTimeout(resolve, 60));
 
 			const activeFiles = this.vfsController.getActiveFiles();
 			const limit = pLimit(20);
@@ -241,7 +255,15 @@ export class NetworkOrchestrator {
 						this.fileLastSyncIds.set(documentId, details.maxCompactedId);
 
 						if (path && offlineContent !== null) {
-							await this.crdtEngine.handleLocalChange(documentId, offlineContent);
+							const updateBinary = await this.crdtEngine.handleLocalChange(documentId, offlineContent);
+							if (updateBinary) {
+								this.eventBus.emit('LocalDeltaReadyForPush', {
+									documentId,
+									// Wrap the array to satisfy TS and Zod's strict ArrayBuffer requirements
+									updateBinary: new Uint8Array(updateBinary),
+									path
+								});
+							}
 						}
 					}
 
