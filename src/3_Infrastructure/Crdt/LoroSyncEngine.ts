@@ -7,6 +7,7 @@ export class LoroSyncEngine {
 	private activeDocs = new Map<string, LoroDoc>();
 	private refCounts = new Map<string, number>();
 	private fallbackCache = new Map<string, WeakRef<LoroDoc>>();
+	private loadingDocs = new Map<string, Promise<LoroDoc>>();
 
 	public async getOrCreateDoc(documentId: string, initialContent?: string): Promise<LoroDoc> {
 		if (this.activeDocs.has(documentId)) {
@@ -15,41 +16,57 @@ export class LoroSyncEngine {
 			return this.activeDocs.get(documentId)!;
 		}
 
-		const fallbackRef = this.fallbackCache.get(documentId);
-		if (fallbackRef) {
-			const doc = fallbackRef.deref();
-			if (doc) {
+		if (this.loadingDocs.has(documentId)) {
+			const doc = await this.loadingDocs.get(documentId)!;
+			const currentCount = this.refCounts.get(documentId) || 0;
+			this.refCounts.set(documentId, currentCount + 1);
+			return doc;
+		}
+
+		const loadPromise = (async () => {
+			try {
+				const fallbackRef = this.fallbackCache.get(documentId);
+				if (fallbackRef) {
+					const doc = fallbackRef.deref();
+					if (doc) {
+						this.activeDocs.set(documentId, doc);
+						this.refCounts.set(documentId, 1);
+						this.fallbackCache.delete(documentId);
+						return doc;
+					}
+					this.fallbackCache.delete(documentId);
+				}
+
+				const doc = new LoroDoc();
+
+				if (documentId !== 'shard-index') {
+					doc.getText('markdown');
+				} else {
+					doc.getTree('vault-tree');
+				}
+
+				const savedState = await this.localStore.loadDocumentState(documentId);
+				if (savedState) {
+					doc.import(savedState);
+				} else if (initialContent !== undefined) {
+					if (documentId !== 'shard-index') {
+						const text = doc.getText('markdown');
+						text.insert(0, initialContent);
+						const snapshot = doc.export({ mode: 'snapshot' });
+						await this.localStore.saveDocumentState(documentId, snapshot);
+					}
+				}
+
 				this.activeDocs.set(documentId, doc);
 				this.refCounts.set(documentId, 1);
-				this.fallbackCache.delete(documentId);
 				return doc;
+			} finally {
+				this.loadingDocs.delete(documentId);
 			}
-			this.fallbackCache.delete(documentId);
-		}
+		})();
 
-		const doc = new LoroDoc();
-
-		if (documentId !== 'shard-index') {
-			doc.getText('markdown');
-		} else {
-			doc.getTree('vault-tree');
-		}
-
-		const savedState = await this.localStore.loadDocumentState(documentId);
-		if (savedState) {
-			doc.import(savedState);
-		} else if (initialContent !== undefined) {
-			if (documentId !== 'shard-index') {
-				const text = doc.getText('markdown');
-				text.insert(0, initialContent);
-				const snapshot = doc.export({ mode: 'snapshot' });
-				await this.localStore.saveDocumentState(documentId, snapshot);
-			}
-		}
-
-		this.activeDocs.set(documentId, doc);
-		this.refCounts.set(documentId, 1);
-		return doc;
+		this.loadingDocs.set(documentId, loadPromise);
+		return await loadPromise;
 	}
 
 	public async applyUpdates(documentId: string, updates: Uint8Array[]): Promise<LoroDoc> {
@@ -136,12 +153,14 @@ export class LoroSyncEngine {
 		this.activeDocs.delete(documentId);
 		this.refCounts.delete(documentId);
 		this.fallbackCache.delete(documentId);
+		this.loadingDocs.delete(documentId);
 	}
 
 	public destroy(): void {
 		this.activeDocs.clear();
 		this.refCounts.clear();
 		this.fallbackCache.clear();
+		this.loadingDocs.clear();
 		this.localStore.close();
 	}
 }

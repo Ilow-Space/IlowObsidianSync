@@ -1,4 +1,4 @@
-﻿import { IRemoteStore, RemoteManifestItem, ServerTelemetry } from '@domain/Interfaces/IRemoteStore';
+import { IRemoteStore, RemoteManifestItem, ServerTelemetry } from '@domain/Interfaces/IRemoteStore';
 import { EncryptedBlob } from '@domain/ValueObjects/CryptoTypes';
 import { CRDTUpdate } from '@domain/Entities/Models';
 import { CryptoUtils } from '../Crypto/CryptoUtils';
@@ -20,11 +20,16 @@ export class PostgresRemoteStore implements IRemoteStore {
 	}
 
 	public setVaultAliasId(vaultAliasId: string) {
+		const changed = this.vaultAliasId !== vaultAliasId;
 		this.vaultAliasId = vaultAliasId;
 		if (vaultAliasId) {
 			this.headers['X-Vault-Alias-ID'] = vaultAliasId;
 		} else {
 			delete this.headers['X-Vault-Alias-ID'];
+		}
+		if (changed && this.socket) {
+			this.disconnect();
+			if (vaultAliasId) this.connectWebSocket(this.serverUrl.replace(/^http/i, 'ws'));
 		}
 	}
 
@@ -72,6 +77,10 @@ export class PostgresRemoteStore implements IRemoteStore {
 			this.socket.onmessage = (event) => {
 				try {
 					const payload = JSON.parse(event.data);
+					if (payload.record && payload.record.vault_alias_id && payload.record.vault_alias_id !== this.vaultAliasId) {
+						return; // Discard misrouted cross-tenant updates
+					}
+
 					const action = payload.type === 'DELETE' ? 'delete' : 'insert';
 
 					if (payload.type === 'INSERT' && payload.table === 'vault_updates') {
@@ -118,36 +127,36 @@ export class PostgresRemoteStore implements IRemoteStore {
 			this.subscriptions.set(documentId, []);
 		}
 
-        this.subscriptions.get(documentId)!.push(onUpdateDetected);
+		this.subscriptions.get(documentId)!.push(onUpdateDetected);
 
-        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-		this.socket.send(JSON.stringify({
-			action: 'subscribe',
-			filter: `document_id=eq.${documentId}`,
-			vault_alias_id: this.vaultAliasId
-		}));
-        }
+		if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+			this.socket.send(JSON.stringify({
+				action: 'subscribe',
+				filter: `document_id=eq.${documentId}`,
+				vault_alias_id: this.vaultAliasId
+			}));
+		}
 
-        return () => {
-        	const callbacks = this.subscriptions.get(documentId);
-        	if (callbacks) {
-        		const remaining = callbacks.filter(cb => cb !== onUpdateDetected);
-        		if (remaining.length === 0) {
-        			this.subscriptions.delete(documentId);
-        		} else {
-        			this.subscriptions.set(documentId, remaining);
-        		}
-        	}
-        };
+		return () => {
+			const callbacks = this.subscriptions.get(documentId);
+			if (callbacks) {
+				const remaining = callbacks.filter(cb => cb !== onUpdateDetected);
+				if (remaining.length === 0) {
+					this.subscriptions.delete(documentId);
+				} else {
+					this.subscriptions.set(documentId, remaining);
+				}
+			}
+		};
 	}
 
 	public disconnect() {
 		if (this.socket) {
 			const temp = this.socket;
 			this.socket = null;
+			temp.onclose = null;
 			temp.close();
 		}
-		this.subscriptions.clear();
 	}
 
 	public async testConnection(): Promise<boolean> {
@@ -163,7 +172,7 @@ export class PostgresRemoteStore implements IRemoteStore {
 			return false;
 		}
 	}
-    
+
 	public async fetchTelemetry(): Promise<ServerTelemetry | null> {
 		try {
 			const res = await requestUrl({
