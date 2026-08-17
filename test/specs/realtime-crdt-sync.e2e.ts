@@ -2,8 +2,10 @@ import { browser, expect } from '@wdio/globals';
 import path from 'path';
 import fs from 'fs';
 
-const BACKEND_URL = 'http://localhost:3001';
-const ADMIN_TOKEN = 'A547245O7B57F75A7U7B4F7U57I75E7D27b4A5U75IEFBaszsjbuif32772525b?';
+import 'dotenv/config'; // Loads variables from .env into process.env
+
+const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:3001';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'A547245O7B57F75A7U7B4F7U57I75E7D27b4A5U75IEFBaszsjbuif32772525b?';
 const MASTER_PASSWORD = '1';
 
 const vaultAPath = path.join(process.cwd(), 'test', 'vaults', 'vaultA').replace(/\\/g, '/');
