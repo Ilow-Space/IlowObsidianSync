@@ -11,10 +11,14 @@ export class LoroVfsController {
 	private uuidToNodeId = new Map<string, any>();
 	private nodeIdToUuid = new Map<string, string>();
 
+	private boundCreated = this.handleLocalFileCreated.bind(this);
+	private boundRenamed = this.handleLocalFileRenamed.bind(this);
+	private boundDeleted = this.handleLocalFileDeleted.bind(this);
+
 	private unsubscribeDoc: (() => void) | null = null;
 	private changeTimeout: any = null;
 	private pushTimeout: any = null;
-	private pendingFrontier: any = null; 
+	private pendingFrontier: any = null;
 
 	constructor(
 		private syncEngine: LoroSyncEngine,
@@ -43,9 +47,9 @@ export class LoroVfsController {
 
 		this.rebuildCache();
 
-		this.eventBus.on('LocalFileCreated', this.handleLocalFileCreated.bind(this));
-		this.eventBus.on('LocalFileRenamed', this.handleLocalFileRenamed.bind(this));
-		this.eventBus.on('LocalFileDeleted', this.handleLocalFileDeleted.bind(this));
+		this.eventBus.on('LocalFileCreated', this.boundCreated);
+		this.eventBus.on('LocalFileRenamed', this.boundRenamed);
+		this.eventBus.on('LocalFileDeleted', this.boundDeleted);
 
 		this.unsubscribeDoc = this.treeDoc.subscribe((event) => {
 			if (event.by === 'local') return;
@@ -69,12 +73,12 @@ export class LoroVfsController {
 
 	private scheduleLocalPush(): void {
 		if (this.pushTimeout) clearTimeout(this.pushTimeout);
-		
+
 		this.pushTimeout = setTimeout(() => {
 			if (this.pendingFrontier) {
 				const updateBinary = new Uint8Array(this.treeDoc.export({ mode: 'update', from: this.pendingFrontier }));
-				this.pendingFrontier = null; 
-				
+				this.pendingFrontier = null;
+
 				this.eventBus.emit('LocalDeltaReadyForPush', {
 					documentId: 'shard-index',
 					updateBinary,
@@ -125,7 +129,7 @@ export class LoroVfsController {
 
 		const nodeUuid = window.crypto.randomUUID() as string;
 		const childNode = this.loroTree.createNode();
-		
+
 		if (parentUuid) {
 			const parentNodeId = this.uuidToNodeId.get(parentUuid);
 			if (parentNodeId) {
@@ -173,10 +177,10 @@ export class LoroVfsController {
 			const targetIdStr = this.getNodeIdStr(targetNodeId);
 			const freshNode = this.loroTree.getNodes().find(n => this.getNodeIdStr(n.id) === targetIdStr);
 			if (freshNode) freshNode.data.set('filename', name);
-			
+
 			this.treeDoc.commit();
 		} catch (e) {
-			console.error("[LoroVfsController] Error during tree move:", e);
+			console.error('[LoroVfsController] Error during tree move:', e);
 		}
 
 		this.rebuildCache();
@@ -196,7 +200,7 @@ export class LoroVfsController {
 			const targetIdStr = this.getNodeIdStr(targetNodeId);
 			const freshNode = this.loroTree.getNodes().find(n => this.getNodeIdStr(n.id) === targetIdStr);
 			if (freshNode) freshNode.data.set('isDeleted', true);
-			
+
 			this.loroTree.delete(targetNodeId);
 			this.treeDoc.commit();
 		} catch (e) {}
@@ -374,6 +378,10 @@ export class LoroVfsController {
 	}
 
 	public destroy(): void {
+		this.eventBus.off('LocalFileCreated', this.boundCreated);
+		this.eventBus.off('LocalFileRenamed', this.boundRenamed);
+		this.eventBus.off('LocalFileDeleted', this.boundDeleted);
+
 		if (this.unsubscribeDoc) {
 			this.unsubscribeDoc();
 			this.unsubscribeDoc = null;

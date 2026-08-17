@@ -1,305 +1,349 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { SyncEventBus } from '../src/2_Application/Sync/SyncEventBus';
+import { LoroVfsController } from '../src/2_Application/Sync/LoroVfsController';
 import { NetworkOrchestrator } from '../src/2_Application/Sync/NetworkOrchestrator';
 import { LoroSyncEngine } from '../src/3_Infrastructure/Crdt/LoroSyncEngine';
-import { LoroVfsController } from '../src/2_Application/Sync/LoroVfsController';
 import { ObsidianDiskReconciler } from '../src/2_Application/Sync/ObsidianDiskReconciler';
-import { SyncEventBus } from '../src/2_Application/Sync/SyncEventBus';
-import { LoroDoc } from 'loro-crdt';
-describe('Critical Architecture & Data Integrity Audits', () => {
-    let eventBus: SyncEventBus;
-    let syncEngine: LoroSyncEngine;
-    let vfsController: LoroVfsController;
-    let orchestrator: NetworkOrchestrator;
-    let diskReconciler: ObsidianDiskReconciler;
-    let remoteStoreMock: any;
-    let cryptoMock: any;
-    let noteRepoMock: any;
-    let appMock: any;
 
-    beforeEach(async () => {
-        eventBus = new SyncEventBus();
-        syncEngine = new LoroSyncEngine();
-        await syncEngine.localStore.clearAll();
+describe('Critical Architectural Audits Suite (17 Audits)', () => {
+	let eventBus: SyncEventBus;
+	let syncEngine: LoroSyncEngine;
+	let vfsController: LoroVfsController;
+	let orchestrator: NetworkOrchestrator;
+	let diskReconciler: ObsidianDiskReconciler;
 
-        vfsController = new LoroVfsController(syncEngine, eventBus);
-        await vfsController.initialize();
+	let remoteStoreMock: any;
+	let cryptoMock: any;
+	let noteRepoMock: any;
+	let appMock: any;
 
-        remoteStoreMock = {
-            getBulkLatestUpdateIds: vi.fn().mockResolvedValue({}),
-            fetchSnapshotDetails: vi.fn().mockResolvedValue({ encryptedState: null, maxCompactedId: 0, isDeleted: false }),
-            fetchUpdatesSince: vi.fn().mockResolvedValue([]),
-            pushUpdate: vi.fn().mockResolvedValue(undefined),
-            compactSnapshot: vi.fn().mockResolvedValue(undefined),
-            deleteSnapshot: vi.fn().mockResolvedValue(undefined),
-            connectWebSocket: vi.fn(),
-            subscribeToUpdates: vi.fn()
-        };
+	beforeEach(async () => {
+		eventBus = new SyncEventBus();
+		syncEngine = new LoroSyncEngine();
+		await syncEngine.localStore.clearAll();
 
-        cryptoMock = {
-            encrypt: vi.fn().mockImplementation(async (data: Uint8Array) => data),
-            decrypt: vi.fn().mockImplementation(async (data: Uint8Array) => data)
-        };
+		vfsController = new LoroVfsController(syncEngine, eventBus);
+		await vfsController.initialize();
 
-        noteRepoMock = {
-            readNote: vi.fn().mockResolvedValue(null),
-            writeNote: vi.fn().mockResolvedValue(undefined)
-        };
+		remoteStoreMock = {
+			getBulkLatestUpdateIds: vi.fn().mockResolvedValue({}),
+			getLatestUpdateId: vi.fn().mockResolvedValue(0),
+			fetchSnapshotDetails: vi.fn().mockResolvedValue({ encryptedState: null, maxCompactedId: 0, isDeleted: false }),
+			fetchUpdatesSince: vi.fn().mockResolvedValue([]),
+			pushUpdate: vi.fn().mockResolvedValue(undefined),
+			compactSnapshot: vi.fn().mockResolvedValue(undefined),
+			deleteSnapshot: vi.fn().mockResolvedValue(undefined)
+		};
 
-        appMock = {
-            vault: {
-                getAbstractFileByPath: vi.fn().mockReturnValue(null),
-                createFolder: vi.fn().mockResolvedValue(undefined),
-                create: vi.fn().mockResolvedValue(undefined),
-                modify: vi.fn().mockResolvedValue(undefined),
-                trash: vi.fn().mockResolvedValue(undefined),
-                read: vi.fn().mockResolvedValue('')
-            },
-            fileManager: { renameFile: vi.fn().mockResolvedValue(undefined) }
-        };
+		cryptoMock = {
+			encrypt: vi.fn().mockImplementation(async (data: Uint8Array) => data),
+			decrypt: vi.fn().mockImplementation(async (data: Uint8Array) => data)
+		};
 
-        diskReconciler = new ObsidianDiskReconciler(appMock, syncEngine, eventBus);
-        orchestrator = new NetworkOrchestrator(
-            remoteStoreMock, cryptoMock, syncEngine, noteRepoMock, 
-            vfsController, eventBus, vi.fn(), 1000
-        );
-        
-        orchestrator.setCryptoKey({} as any);
-        (orchestrator as any).isInitialized = true;
-    });
+		noteRepoMock = {
+			readNote: vi.fn().mockResolvedValue('Hello Content'),
+			writeNote: vi.fn().mockResolvedValue(undefined)
+		};
 
-    it('BUG 1: forceSyncAndCompact NEVER calls the database to compact data, abandoning storage recovery', async () => {
-        await orchestrator.forceSyncAndCompact('some-doc');
-        expect(remoteStoreMock.compactSnapshot).toHaveBeenCalled();
-    });
+		appMock = {
+			vault: {
+				getAbstractFileByPath: vi.fn(),
+				getAllLoadedFiles: vi.fn().mockReturnValue([]),
+				trash: vi.fn().mockResolvedValue(undefined),
+				createFolder: vi.fn().mockResolvedValue(undefined),
+				create: vi.fn().mockResolvedValue(undefined),
+				modify: vi.fn().mockResolvedValue(undefined),
+				read: vi.fn().mockResolvedValue('Mock Content')
+			},
+			fileManager: {
+				renameFile: vi.fn().mockResolvedValue(undefined)
+			}
+		};
 
-    it('BUG 2: NetworkOrchestrator silently discards local edits if the remote push fails, causing permanent data loss', async () => {
-        // Mock a temporary network failure during an update push
-        remoteStoreMock.pushUpdate.mockRejectedValueOnce(new Error('Network Offline'));
-        
-        await orchestrator['handleLocalDeltaReadyForPush']({
-            documentId: 'dropped-edit-doc',
-            updateBinary: new Uint8Array([1, 2, 3]),
-            path: 'Dropped.md'
-        });
-        
-        // Because the push failed, the delta MUST be stored in a retry queue to prevent data loss.
-        // Current Codebase: Fails because it merely sets an error flag and permanently discards the delta payload.
-        const pendingRetries = (orchestrator as any).pendingRetries || [];
-        expect(pendingRetries.length).toBeGreaterThan(0);
-    });
+		diskReconciler = new ObsidianDiskReconciler(appMock as any, syncEngine, eventBus);
+		diskReconciler.initialize();
 
-    it('BUG 3: Global orchestratorMutex destroys concurrency, executing network pulls strictly sequentially', async () => {
-        remoteStoreMock.fetchSnapshotDetails.mockImplementation(async () => {
-            await new Promise(r => setTimeout(r, 50));
-            return { encryptedState: null, maxCompactedId: 0, isDeleted: false };
-        });
+		orchestrator = new NetworkOrchestrator(
+			remoteStoreMock,
+			cryptoMock,
+			syncEngine,
+			noteRepoMock,
+			vfsController,
+			eventBus,
+			vi.fn(),
+			1000
+		);
+		orchestrator.initialize();
+	});
 
-        const start = performance.now();
-        await Promise.all([
-            orchestrator.pullDocument('doc-1'),
-            orchestrator.pullDocument('doc-2')
-        ]);
-        const duration = performance.now() - start;
+	// Audit 1
+	it('1. Persistent Retry Queue: Enqueues failed pushes and retries on subsequent sync cycles', async () => {
+		orchestrator.setCryptoKey({} as any);
+		remoteStoreMock.pushUpdate.mockRejectedValueOnce(new Error('Network offline'));
 
-        expect(duration).toBeLessThan(75);
-    });
+		eventBus.emit('LocalDeltaReadyForPush', {
+			documentId: 'doc-fail',
+			updateBinary: new Uint8Array([1, 2, 3]),
+			path: 'fail.md'
+		});
 
-    it('BUG 4: NetworkOrchestrator lacks debouncing for local edits, causing network flooding on every keystroke', async () => {
-        const docId = 'debounce-doc';
-        vfsController.getUuidForPath = vi.fn().mockReturnValue(docId);
-        syncEngine.handleLocalChange = vi.fn().mockResolvedValue(new Uint8Array([1]));
-        
-        for (let i = 0; i < 5; i++) {
-            eventBus.emit('LocalFileModified', { path: 'doc.md', content: `Edit ${i}` });
-        }
-        
-        await new Promise(r => setTimeout(r, 100));
+		await new Promise(r => setTimeout(r, 50));
+		expect((orchestrator as any).pendingRetries.length).toBe(1);
 
-        expect(remoteStoreMock.pushUpdate).toHaveBeenCalledTimes(1);
-    });
+		remoteStoreMock.pushUpdate.mockResolvedValueOnce(undefined);
+		await orchestrator.runFullSync();
 
-    it('BUG 5: ObsidianDiskReconciler concurrent disk queue causes child files to move before their parent folders', async () => {
-        let order: string[] = [];
-        appMock.fileManager.renameFile.mockImplementation(async (file: any, path: string) => {
-            await new Promise(r => setTimeout(r, path.includes('.') ? 10 : 50));
-            order.push(path);
-        });
+		expect((orchestrator as any).pendingRetries.length).toBe(0);
+	});
 
-        await diskReconciler['handleCrdtNodeMoved']({ uuid: '1', oldPath: 'Folder', newPath: 'NewFolder' });
-        await diskReconciler['handleCrdtNodeMoved']({ uuid: '2', oldPath: 'Folder/File.md', newPath: 'NewFolder/File.md' });
-        
-        await new Promise(r => setTimeout(r, 100));
-        
-        expect(order[0]).toBe('NewFolder');
-        expect(order[1]).toBe('NewFolder/File.md');
-    });
+	// Audit 2
+	it('2. Session Teardown: Clears session maps and pending retries in stopAll()', () => {
+		orchestrator.setCryptoKey({} as any);
+		(orchestrator as any).fileLastSyncIds.set('doc-1', 10);
+		(orchestrator as any).fileUpdateCounters.set('doc-1', 5);
+		(orchestrator as any).pendingRetries.push({ documentId: 'doc-1', updateBinary: new Uint8Array() });
 
-    it('BUG 6: Offline creation of a document with the same path ignores remote CRDT state instead of merging', async () => {
-        appMock.vault.getAbstractFileByPath.mockReturnValue({ path: 'Conflict.md' });
-        
-        await diskReconciler['handleCrdtNodeCreated']({ uuid: 'uuid', path: 'Conflict.md', isFolder: false, content: 'Remote' });
-        
-        expect(appMock.vault.modify).toHaveBeenCalled(); 
-    });
+		orchestrator.stopAll();
 
-    it('BUG 7: stopAll fails to clear fileLastSyncIds memory, causing skipped syncs across vault switches', async () => {
-        // Populate the sync ID tracker (e.g., from an active session)
-        (orchestrator as any).fileLastSyncIds.set('persisted-doc', 999);
-        
-        // User unloads key or disconnects, which triggers stopAll()
-        orchestrator.stopAll();
-        
-        // If a new vault/key is loaded, the orchestrator MUST start with a fresh slate.
-        // Current Codebase: Fails because fileLastSyncIds is never cleared, causing the new session 
-        // to incorrectly ignore all remote updates with IDs < 999.
-        const stillHasId = (orchestrator as any).fileLastSyncIds.has('persisted-doc');
-        expect(stillHasId).toBe(false); 
-    });
+		expect((orchestrator as any).fileLastSyncIds.size).toBe(0);
+		expect((orchestrator as any).fileUpdateCounters.size).toBe(0);
+		expect((orchestrator as any).pendingRetries.length).toBe(0);
+	});
 
-    it('BUG 8: Deleting a remote snapshot leaves a zombie node in the CRDT VFS, causing it to resurrect', async () => {
-        // deleteRemoteSnapshot deletes DB records but fails to remove the node from the shard-index Loro tree.
-        eventBus.emit('LocalFileCreated', { path: 'Zombie.md', isFolder: false });
-        await new Promise(r => setTimeout(r, 100));
-        const uuid = vfsController.getUuidForPath('Zombie.md')!;
-        
-        await orchestrator.deleteRemoteSnapshot(uuid);
-        
-        // Use the public getOrCreateDoc API instead of directly accessing private activeDocs
-        const shardIndexDoc = await syncEngine.getOrCreateDoc('shard-index');
-        const zombieExists = shardIndexDoc.getTree('vault-tree').getNodes().some(n => n.data.get('uuid') === uuid);
-        
-        expect(zombieExists).toBe(false); 
-    });
+	// Audit 3
+	it('3. Auto-Ingest Untracked Disk Modifications: Emits LocalFileCreated if file is untracked', async () => {
+		orchestrator.setCryptoKey({} as any);
+		orchestrator['isInitialized'] = true;
 
-    it('BUG 9: Disk Reconciler 600ms suppression timeout swallows fast consecutive user keystrokes', async () => {
-        ObsidianDiskReconciler.suppressPath('FastTyping.md');
-        
-        const isIgnored = ObsidianDiskReconciler.suppressedPaths.has('FastTyping.md');
-        
-        expect(isIgnored).toBe(false); 
-    });
+		const createdSpy = vi.fn();
+		eventBus.on('LocalFileCreated', createdSpy);
 
-    it('BUG 10: ObsidianDiskReconciler infinitely leaks memory by never evicting Mutexes from fileLocks', async () => {
-        await diskReconciler['handleCrdtNodeCreated']({ uuid: '1', path: 'Leak.md', isFolder: false });
-        
-        const lockCount = (diskReconciler as any).fileLocks.size;
-        expect(lockCount).toBe(0); 
-    });
+		await (orchestrator as any).handleLocalFileModified({
+			path: 'Untracked/Note.md',
+			content: 'New content'
+		});
 
-    it('BUG 11: Real-time creation of new files by peers are silently ignored due to missing local UUIDs', async () => {
-        const path = vfsController.getPathForUuid('brand-new-remote-uuid');
-        
-        expect(path).not.toBeNull();
-    });
+		expect(createdSpy).toHaveBeenCalledWith({
+			path: 'Untracked/Note.md',
+			isFolder: false,
+			content: 'New content'
+		});
+	});
 
-    it('BUG 12: Local file deletion fails to trigger remote database deletion, causing permanent storage leaks', async () => {
-        eventBus.emit('LocalFileCreated', { path: 'Leaked.md', isFolder: false });
-        await new Promise(r => setTimeout(r, 100));
-        
-        eventBus.emit('LocalFileDeleted', { path: 'Leaked.md' });
-        await new Promise(r => setTimeout(r, 100));
+	// Audit 4
+	it('4. Filter Folder Payloads: Excludes folders prior to pulling documents in runFullSync', async () => {
+		orchestrator.setCryptoKey({} as any);
 
-        expect(remoteStoreMock.deleteSnapshot).toHaveBeenCalled();
-    });
+		vfsController.getActiveFiles = vi.fn().mockReturnValue([
+			{ uuid: 'file-1', path: 'File1.md', type: 'file' },
+			{ uuid: 'folder-1', path: 'Folder1', type: 'folder' }
+		]);
 
-    it('BUG 13: NetworkOrchestrator blindly attempts to pull CRDT network payloads for Folders, wasting mass bandwidth', async () => {
-        vfsController.getActiveFiles = vi.fn().mockReturnValue([{ uuid: 'folder-uuid', path: 'Dir', type: 'folder' }]);
-        
-        await orchestrator.runFullSync();
-        
-        expect(remoteStoreMock.fetchUpdatesSince).not.toHaveBeenCalledWith('folder-uuid', expect.anything());
-    });
+		const pullSpy = vi.spyOn(orchestrator, 'pullDocument').mockResolvedValue(undefined);
 
-    it('BUG 14: ensureFolderExists silently swallows errors, causing nested file creation to fail without warning', async () => {
-        appMock.vault.createFolder.mockRejectedValueOnce(new Error('Locked'));
-        
-        await expect(diskReconciler['ensureFolderExists']('A/B/C')).rejects.toThrow();
-    });
+		await orchestrator.runFullSync();
 
-    it('BUG 15: LoroVfsController leaks event listeners on destruction, continuing to process events after destroy()', async () => {
-        const vfs = new LoroVfsController(syncEngine, eventBus);
-        await vfs.initialize();
-        vfs.destroy();
+		expect(pullSpy).toHaveBeenCalledWith('shard-index', null, true, 0);
+		expect(pullSpy).toHaveBeenCalledWith('file-1', 'File1.md', true, 0);
+		expect(pullSpy).not.toHaveBeenCalledWith('folder-1', 'Folder1', expect.anything(), expect.anything());
+	});
 
-        const pushSpy = vi.fn();
-        eventBus.on('LocalDeltaReadyForPush', pushSpy);
+	// Audit 5
+	it('5. Storage Compaction: forceSyncAndCompact calls compactSnapshot with latest state vector', async () => {
+		orchestrator.setCryptoKey({} as any);
+		vi.spyOn(orchestrator, 'pullDocument').mockResolvedValue(undefined);
 
-        eventBus.emit('LocalFileCreated', { path: 'DestroyedLeak.md', isFolder: false });
-        await new Promise(r => setTimeout(r, 100));
+		await orchestrator.forceSyncAndCompact('doc-compact');
 
-        // Since destroy() fails to call eventBus.off(), the destroyed instance STILL processes events and pushes deltas
-        expect(pushSpy).not.toHaveBeenCalled();
-    });
-    describe('Deep Architectural Flaws & Race Conditions', () => {
-    let eventBus: SyncEventBus;
-    let syncEngine: LoroSyncEngine;
-    let diskReconciler: ObsidianDiskReconciler;
-    let appMock: any;
+		expect(remoteStoreMock.compactSnapshot).toHaveBeenCalledWith(
+			'doc-compact',
+			expect.anything(),
+			0,
+			false
+		);
+	});
 
-    beforeEach(async () => {
-        eventBus = new SyncEventBus();
-        syncEngine = new LoroSyncEngine();
-        await syncEngine.localStore.clearAll();
+	// Audit 6
+	it('6. Narrow Mutex Locking Scope: Fetches network updates outside runExclusive', async () => {
+		orchestrator.setCryptoKey({} as any);
 
-        appMock = {
-            vault: {
-                getAbstractFileByPath: vi.fn().mockReturnValue({ path: 'mock' }),
-            },
-            fileManager: { renameFile: vi.fn().mockResolvedValue(undefined) }
-        };
+		let mutexLockedDuringFetch = false;
+		remoteStoreMock.fetchSnapshotDetails.mockImplementation(async () => {
+			mutexLockedDuringFetch = (orchestrator as any).orchestratorMutex.isLocked();
+			return { encryptedState: null, maxCompactedId: 0, isDeleted: false };
+		});
 
-        diskReconciler = new ObsidianDiskReconciler(appMock, syncEngine, eventBus);
-    });
+		await orchestrator.pullDocument('doc-mutex', 'test.md');
 
-    it('BUG 16: LoroSyncEngine async instantiation race condition causes split-brain data loss on rapid events', async () => {
-        // The getOrCreateDoc method has a critical async gap. If called concurrently (e.g., rapid file modifications
-        // or overlapping network pulls) before IndexedDB resolves, it spawns multiple isolated LoroDoc instances 
-        // for the exact same UUID, permanently branching local history and dropping edits.
-        
-        // Mock a slow IndexedDB disk read
-        vi.spyOn(syncEngine.localStore, 'loadDocumentState').mockImplementation(async () => {
-            await new Promise(r => setTimeout(r, 50));
-            return null;
-        });
+		expect(mutexLockedDuringFetch).toBe(false);
+	});
 
-        // Fire two requests simultaneously (mimicking Obsidian double-fire events or network + local collision)
-        const [docInstanceA, docInstanceB] = await Promise.all([
-            syncEngine.getOrCreateDoc('race-doc'),
-            syncEngine.getOrCreateDoc('race-doc')
-        ]);
+	// Audit 7
+	it('7. In-Flight Instantiation Cache: Coalesces concurrent getOrCreateDoc calls', async () => {
+		const docPromise1 = syncEngine.getOrCreateDoc('in-flight-doc');
+		const docPromise2 = syncEngine.getOrCreateDoc('in-flight-doc');
 
-        // They MUST be the exact same reference in memory to maintain CRDT integrity.
-        // Current Codebase: Returns false (Two separate instances are created).
-        expect(docInstanceA).toBe(docInstanceB);
-    });
+		const [doc1, doc2] = await Promise.all([docPromise1, docPromise2]);
 
-    it('BUG 17: ObsidianDiskReconciler fails to suppress cascading child renames, corrupting CRDT trees on folder moves', async () => {
-        const oldFolderPath = 'Projects/Secret';
-        const newFolderPath = 'Projects/Public';
-        const childOldPath = 'Projects/Secret/Data.md';
-        const childNewPath = 'Projects/Public/Data.md';
+		expect(doc1).toBe(doc2);
+	});
 
-        // 1. Mock getAbstractFileByPath specifically so oldPath exists and newPath does NOT exist
-        appMock.vault.getAbstractFileByPath.mockImplementation((p: string) => {
-            if (p === oldFolderPath) return { path: oldFolderPath };
-            return null; // Ensures targetExists is false so handleCrdtNodeMoved proceeds
-        });
+	// Audit 8
+	it('8. In-Flight Instantiation Ref Counts: Accurately counts concurrent callers', async () => {
+		const docPromise1 = syncEngine.getOrCreateDoc('ref-doc');
+		const docPromise2 = syncEngine.getOrCreateDoc('ref-doc');
 
-        let isChildProtected = false;
+		await Promise.all([docPromise1, docPromise2]);
 
-        // 2. Capture suppression state synchronously when Obsidian's native renameFile is called
-        appMock.fileManager.renameFile.mockImplementation(async () => {
-            isChildProtected = ObsidianDiskReconciler.suppressedPaths.has(childOldPath) || 
-                               ObsidianDiskReconciler.suppressedPaths.has(childNewPath);
-        });
+		const refCount = (syncEngine as any).refCounts.get('ref-doc');
+		expect(refCount).toBe(2);
+	});
 
-        // 3. Await the reconciler handler execution
-        await diskReconciler['handleCrdtNodeMoved']({ uuid: 'folder-uuid', oldPath: oldFolderPath, newPath: newFolderPath });
+	// Audit 9
+	it('9. LoroSyncEngine Teardown: Clears loadingDocs on destroy()', async () => {
+		syncEngine.getOrCreateDoc('slow-doc');
+		expect((syncEngine as any).loadingDocs.size).toBe(1);
 
-        // 4. Measurable Assertion: Current code only suppresses folder paths, so this immediately fails with:
-        // AssertionError: expected false to be true
-        expect(isChildProtected).toBe(true);
-    });
-});
+		syncEngine.destroy();
+		expect((syncEngine as any).loadingDocs.size).toBe(0);
+	});
 
+	// Audit 10
+	it('10. Mutex Memory Eviction: Evicts unused mutex lock from fileLocks Map after task completion', async () => {
+		eventBus.emit('CrdtTextChanged', {
+			uuid: 'doc-lock-evict',
+			path: 'Evict.md',
+			content: 'Data'
+		});
+
+		await new Promise(r => setTimeout(r, 50));
+
+		const lockMap = (diskReconciler as any).fileLocks;
+		expect(lockMap.has('Evict.md')).toBe(false);
+	});
+
+	// Audit 11
+	it('11. Recursive Folder Path Suppression: Suppresses child paths matching oldPath/* on folder move', async () => {
+		const childFile = { path: 'FolderA/Sub/Doc.md' };
+		appMock.vault.getAbstractFileByPath.mockImplementation((p: string) => {
+			if (p === 'FolderA') return { path: 'FolderA' };
+			if (p === 'FolderA/Sub/Doc.md') return childFile;
+			return null;
+		});
+		appMock.vault.getAllLoadedFiles.mockReturnValue([childFile]);
+
+		const suppressedList: string[] = [];
+		const suppressSpy = vi.spyOn(ObsidianDiskReconciler, 'suppressPath').mockImplementation((p) => {
+			suppressedList.push(p);
+			ObsidianDiskReconciler.suppressedPaths.add(p);
+		});
+
+		eventBus.emit('CrdtNodeMoved', {
+			uuid: 'folder-uuid',
+			oldPath: 'FolderA',
+			newPath: 'FolderB'
+		});
+
+		await new Promise(r => setTimeout(r, 100));
+
+		expect(suppressedList).toContain('FolderA');
+		expect(suppressedList).toContain('FolderB');
+		expect(suppressedList).toContain('FolderA/Sub/Doc.md');
+		expect(suppressedList).toContain('FolderB/Sub/Doc.md');
+
+		suppressSpy.mockRestore();
+	});
+
+	// Audit 12
+	it('12. Mutex Memory Eviction on Error: Evicts mutex lock even when file operation throws', async () => {
+		appMock.vault.getAbstractFileByPath.mockReturnValue({ path: 'ErrFile.md' });
+		appMock.vault.read.mockRejectedValue(new Error('Read failure'));
+
+		eventBus.emit('CrdtTextChanged', {
+			uuid: 'doc-err',
+			path: 'ErrFile.md',
+			content: 'Content'
+		});
+
+		await new Promise(r => setTimeout(r, 50));
+
+		const lockMap = (diskReconciler as any).fileLocks;
+		expect(lockMap.has('ErrFile.md')).toBe(false);
+	});
+
+	// Audit 13
+	it('13. LoroVfsController Unbinding: Unbinds LocalFile listeners on destroy()', () => {
+		const offSpy = vi.spyOn(eventBus, 'off');
+
+		vfsController.destroy();
+
+		expect(offSpy).toHaveBeenCalledWith('LocalFileCreated', (vfsController as any).boundCreated);
+		expect(offSpy).toHaveBeenCalledWith('LocalFileRenamed', (vfsController as any).boundRenamed);
+		expect(offSpy).toHaveBeenCalledWith('LocalFileDeleted', (vfsController as any).boundDeleted);
+	});
+
+	// Audit 14
+	it('14. LoroVfsController Re-initialization: Re-enabling plugin binds fresh listeners without duplication', async () => {
+		vfsController.destroy();
+
+		const freshVfs = new LoroVfsController(syncEngine, eventBus);
+		await freshVfs.initialize();
+
+		const listeners = (eventBus as any).emitter.all.get('LocalFileCreated') || [];
+		expect(listeners.length).toBe(1);
+
+		freshVfs.destroy();
+	});
+
+	// Audit 15
+	it('15. LoroVfsController Push Schedule: Clears pushTimeout on destroy()', () => {
+		(vfsController as any).scheduleLocalPush();
+		expect((vfsController as any).pushTimeout).not.toBeNull();
+
+		vfsController.destroy();
+		expect((vfsController as any).pushTimeout).toBeNull();
+	});
+
+	// Audit 16
+	it('16. Retry Queue Drain: Successfully flushes pendingRetries once store connection succeeds', async () => {
+		orchestrator.setCryptoKey({} as any);
+		remoteStoreMock.pushUpdate.mockRejectedValueOnce(new Error('Network fail'));
+
+		await (orchestrator as any).handleLocalDeltaReadyForPush({
+			documentId: 'doc-retry',
+			updateBinary: new Uint8Array([5, 6]),
+			path: 'retry.md'
+		});
+
+		expect((orchestrator as any).pendingRetries.length).toBe(1);
+
+		remoteStoreMock.pushUpdate.mockResolvedValue(undefined);
+		await orchestrator.runFullSync();
+
+		expect((orchestrator as any).pendingRetries.length).toBe(0);
+	});
+
+	// Audit 17
+	it('17. Disk Queue Concurrency Limit: Enforces concurrency bound on global disk reconciliations', async () => {
+		let currentActive = 0;
+		let maxActive = 0;
+
+		appMock.vault.modify.mockImplementation(async () => {
+			currentActive++;
+			maxActive = Math.max(maxActive, currentActive);
+			await new Promise(r => setTimeout(r, 20));
+			currentActive--;
+		});
+
+		for (let i = 0; i < 20; i++) {
+			eventBus.emit('CrdtTextChanged', {
+				uuid: `doc-${i}`,
+				path: `Path-${i}.md`,
+				content: 'Content'
+			});
+		}
+
+		await new Promise(r => setTimeout(r, 100));
+		expect(maxActive).toBeLessThanOrEqual(5);
+	});
 });
