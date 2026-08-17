@@ -192,7 +192,7 @@ export class NetworkOrchestrator {
 				throw new Error(this.lastErrorMessage || 'Sync failed');
 			}
 
-			this.vfsController.rebuildCache();
+			this.vfsController.processRemoteVfsUpdates();
 
 			const activeFiles = this.vfsController.getActiveFiles().filter(file => file.type !== 'folder');
 			const limit = pLimit(20);

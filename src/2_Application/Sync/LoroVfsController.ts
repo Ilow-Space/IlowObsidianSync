@@ -376,6 +376,11 @@ export class LoroVfsController {
 		const name = lastSlash !== -1 ? p.substring(lastSlash + 1) : p;
 		return { dirPath, name };
 	}
+	
+	public processRemoteVfsUpdates(): void {
+		this.treeDoc.commit();
+		this.rebuildCacheAndEmitRemoteDiffs();
+	}
 
 	public destroy(): void {
 		this.eventBus.off('LocalFileCreated', this.boundCreated);

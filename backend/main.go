@@ -401,7 +401,16 @@ func handleGetBulkLatestUpdateIDs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := db.Query("SELECT document_id, MAX(id) as max_id FROM vault_updates WHERE vault_alias_id = $1 GROUP BY document_id", vaultAliasID)
+	query := `
+	    SELECT 
+	        s.document_id, 
+	        GREATEST(COALESCE(s.max_compacted_id, 0), COALESCE(MAX(u.id), 0)) as max_id
+	    FROM vault_snapshots s
+	    LEFT JOIN vault_updates u ON s.document_id = u.document_id AND s.vault_alias_id = u.vault_alias_id
+	    WHERE s.vault_alias_id = $1
+	    GROUP BY s.document_id, s.max_compacted_id
+	`
+	rows, err := db.Query(query, vaultAliasID)
 	if err != nil {
 		log.Printf("Error fetching bulk latest IDs: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -555,7 +564,13 @@ func handleGetLatestUpdateID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var lastID int
-	err := db.QueryRow("SELECT id FROM vault_updates WHERE vault_alias_id = $1 AND document_id = $2 ORDER BY id DESC LIMIT 1", vaultAliasID, id).Scan(&lastID)
+	query := `
+	    SELECT GREATEST(
+	        COALESCE((SELECT id FROM vault_updates WHERE vault_alias_id = $1 AND document_id = $2 ORDER BY id DESC LIMIT 1), 0),
+	        COALESCE((SELECT max_compacted_id FROM vault_snapshots WHERE vault_alias_id = $1 AND document_id = $2), 0)
+	    )
+	`
+	err := db.QueryRow(query, vaultAliasID, id).Scan(&lastID)
 	if err == sql.ErrNoRows {
 		lastID = 0
 	} else if err != nil {
