@@ -31,7 +31,7 @@ export class LoroVfsController {
 		if (typeof id === 'object') {
 			// Explicitly map Loro's WASM getters to bypass JSON.stringify limitations
 			if (id.peer !== undefined && id.counter !== undefined) {
-				return `${id.peer}_${id.counter}`;
+				return `${id.peer.toString()}_${id.counter}`;
 			}
 			try {
 				const j = JSON.stringify(id);

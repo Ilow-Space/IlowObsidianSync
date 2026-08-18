@@ -29,7 +29,7 @@ export class ObsidianDiskReconciler {
 	public static unsuppressPath(path: string): void {
 		setTimeout(() => {
 			ObsidianDiskReconciler.suppressedPaths.delete(path);
-		}, 600);
+		}, 50);
 	}
 
 	private getFileMutex(path: string): Mutex {

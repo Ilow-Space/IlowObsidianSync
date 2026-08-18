@@ -139,7 +139,6 @@ export class NetworkOrchestrator {
 	}
 
 	private async handleLocalFileModified(payload: { path: string; content: string }): Promise<void> {
-		if (!this.activeKey || !this.isInitialized) return;
 
 		let documentId = this.vfsController.getUuidForPath(payload.path);
 		if (!documentId) {

@@ -243,10 +243,16 @@ export default class MyPlugin extends Plugin {
 					this.networkOrchestrator?.pullDocument('shard-index', null, true).catch(console.error);
 				} else {
 					// Pull just the specific file that changed
-					const path = this.vfsController!.getPathForUuid(docId);
-					if (path) {
-						this.networkOrchestrator?.pullDocument(docId, path, true).catch(console.error);
-					}
+					(async () => {
+						let path = this.vfsController!.getPathForUuid(docId);
+						if (!path) {
+							await this.networkOrchestrator?.pullDocument('shard-index', null, true);
+							path = this.vfsController!.getPathForUuid(docId);
+						}
+						if (path) {
+							await this.networkOrchestrator?.pullDocument(docId, path, true);
+						}
+					})().catch(console.error);
 				}
 			});
 

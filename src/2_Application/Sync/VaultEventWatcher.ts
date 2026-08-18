@@ -22,6 +22,10 @@ export class VaultEventWatcher {
 						isFolder,
 						content
 					});
+					this.eventBus.emit('LocalFileModified', {
+						path: file.path,
+						content
+					});
 				}).catch(() => {
 					this.eventBus.emit('LocalFileCreated', {
 						path: file.path,

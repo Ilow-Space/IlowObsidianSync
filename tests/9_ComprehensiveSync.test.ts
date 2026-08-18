@@ -5,14 +5,7 @@ import { NetworkOrchestrator } from '../src/2_Application/Sync/NetworkOrchestrat
 import { LoroSyncEngine } from '../src/3_Infrastructure/Crdt/LoroSyncEngine';
 import { ObsidianDiskReconciler } from '../src/2_Application/Sync/ObsidianDiskReconciler';
 import { LoroDoc } from 'loro-crdt';
-
-// -------------------------------------------------------------------------
-// STRICT OBSIDIAN CLASS MOCKS
-// Required because ObsidianDiskReconciler strictly checks `instanceof TFile`
-// -------------------------------------------------------------------------
-class TAbstractFile { path!: string; }
-class TFile extends TAbstractFile { extension = 'md'; }
-class TFolder extends TAbstractFile { children = []; }
+import { TFile, TFolder, TAbstractFile } from 'obsidian';
 
 describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
     let eventBus: SyncEventBus;
@@ -289,22 +282,33 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
     });
 
     // =====================================================================
+    // GROUP 4 & 5 HELPER FUNCTIONS
+    // =====================================================================
+    let updateCounter = 100;
+
+    const createRemoteIndexDelta = async (actions: (tree: any) => void) => {
+        const remoteDoc = new LoroDoc();
+        const localDoc = await syncEngine.getOrCreateDoc('shard-index');
+        remoteDoc.import(localDoc.export({ mode: 'snapshot' }));
+        syncEngine.removeDoc('shard-index');
+        const tree = remoteDoc.getTree('vault-tree');
+        actions(tree);
+        remoteDoc.commit();
+        return remoteDoc.export({ mode: 'update' });
+    };
+
+    const pushMockRemoteUpdate = (docId: string, delta: Uint8Array) => {
+        const updateId = ++updateCounter;
+        remoteStoreMock.getLatestUpdateId.mockResolvedValue(updateId);
+        remoteStoreMock.fetchUpdatesSince.mockResolvedValueOnce([{
+            id: updateId, documentId: docId, encryptedUpdate: { ciphertext: Buffer.from(delta).toString('base64') }
+        }]);
+    };
+
+    // =====================================================================
     // GROUP 4: INCOMING DATA (MIRRORING BASIC ACTIONS)
     // =====================================================================
     describe('Incoming Data (Mirroring Basic Actions)', () => {
-        const createRemoteIndexDelta = async (actions: (tree: any) => void) => {
-            const remoteDoc = new LoroDoc();
-            const tree = remoteDoc.getTree('vault-tree');
-            actions(tree);
-            remoteDoc.commit();
-            return remoteDoc.export({ mode: 'update' });
-        };
-
-        const pushMockRemoteUpdate = (docId: string, delta: Uint8Array) => {
-            remoteStoreMock.fetchUpdatesSince.mockResolvedValueOnce([{
-                id: 1, documentId: docId, encryptedUpdate: { ciphertext: Buffer.from(delta).toString('base64') }
-            }]);
-        };
 
         it('16. Remote Create: Reconciler creates file locally', async () => {
             const remoteUuid = 'remote-123';
@@ -344,11 +348,10 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
             const uuid = vfsController.getUuidForPath('BeforeRename.md')!;
 
             const delta = await createRemoteIndexDelta(tree => {
-                const node = tree.createNode();
-                node.data.set('uuid', uuid);
-                node.data.set('filename', 'AfterRename.md');
-                node.data.set('type', 'file');
-                node.data.set('isDeleted', false);
+                const node = tree.getNodes().find((n: any) => n.data.get('uuid') === uuid);
+                if (node) {
+                    node.data.set('filename', 'AfterRename.md');
+                }
             });
 
             pushMockRemoteUpdate('shard-index', delta);
@@ -369,12 +372,10 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
                 fNode.data.set('filename', 'Dest');
                 fNode.data.set('type', 'folder');
 
-                const nNode = tree.createNode();
-                tree.move(nNode.id, fNode.id);
-                nNode.data.set('uuid', uuid);
-                nNode.data.set('filename', 'Root.md');
-                nNode.data.set('type', 'file');
-                nNode.data.set('isDeleted', false);
+                const nNode = tree.getNodes().find((n: any) => n.data.get('uuid') === uuid);
+                if (nNode) {
+                    tree.move(nNode.id, fNode.id);
+                }
             });
 
             pushMockRemoteUpdate('shard-index', delta);
@@ -390,9 +391,11 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
             const uuid = vfsController.getUuidForPath('KillMe.md')!;
 
             const delta = await createRemoteIndexDelta(tree => {
-                const node = tree.createNode();
-                node.data.set('uuid', uuid);
-                node.data.set('isDeleted', true);
+                const node = tree.getNodes().find((n: any) => n.data.get('uuid') === uuid);
+                if (node) {
+                    node.data.set('isDeleted', true);
+                    tree.delete(node.id);
+                }
             });
 
             pushMockRemoteUpdate('shard-index', delta);
@@ -409,13 +412,8 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
     // =====================================================================
     describe('Incoming Data (Complex Compound Mirroring)', () => {
         const pushRemoteIndex = async (actions: (tree: any) => void) => {
-            const remoteDoc = new LoroDoc();
-            const tree = remoteDoc.getTree('vault-tree');
-            actions(tree);
-            remoteDoc.commit();
-            remoteStoreMock.fetchUpdatesSince.mockResolvedValueOnce([{
-                id: 1, documentId: 'shard-index', encryptedUpdate: { ciphertext: Buffer.from(remoteDoc.export({ mode: 'update' })).toString('base64') }
-            }]);
+            const delta = await createRemoteIndexDelta(actions);
+            pushMockRemoteUpdate('shard-index', delta);
             await orchestrator.pullDocument('shard-index');
             (vfsController as any).rebuildCacheAndEmitRemoteDiffs();
             await waitForDisk();
@@ -425,9 +423,7 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
             const remoteDoc = new LoroDoc();
             remoteDoc.getText('markdown').insert(0, content);
             remoteDoc.commit();
-            remoteStoreMock.fetchUpdatesSince.mockResolvedValueOnce([{
-                id: 2, documentId: uuid, encryptedUpdate: { ciphertext: Buffer.from(remoteDoc.export({ mode: 'update' })).toString('base64') }
-            }]);
+            pushMockRemoteUpdate(uuid, remoteDoc.export({ mode: 'update' }));
             await orchestrator.pullDocument(uuid, path);
             await waitForDisk();
         };
@@ -442,11 +438,11 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
                 folder.data.set('filename', 'FolderB');
                 folder.data.set('type', 'folder');
 
-                const file = tree.createNode();
-                tree.move(file.id, folder.id);
-                file.data.set('uuid', uuid);
-                file.data.set('filename', 'RenamedA.md');
-                file.data.set('type', 'file');
+                const file = tree.getNodes().find((n: any) => n.data.get('uuid') === uuid);
+                if (file) {
+                    tree.move(file.id, folder.id);
+                    file.data.set('filename', 'RenamedA.md');
+                }
             });
 
             expect(appMock.fileManager.renameFile).toHaveBeenCalledWith(expect.any(TFile), 'FolderB/RenamedA.md');
@@ -457,10 +453,10 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
             const uuid = vfsController.getUuidForPath('Name1.md')!;
 
             await pushRemoteIndex(tree => {
-                const file = tree.createNode();
-                file.data.set('uuid', uuid);
-                file.data.set('filename', 'Name2.md');
-                file.data.set('type', 'file');
+                const file = tree.getNodes().find((n: any) => n.data.get('uuid') === uuid);
+                if (file) {
+                    file.data.set('filename', 'Name2.md');
+                }
             });
             expect(appMock.fileManager.renameFile).toHaveBeenCalledWith(expect.any(TFile), 'Name2.md');
 
@@ -478,11 +474,10 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
                 folder.data.set('filename', 'TargetFolder');
                 folder.data.set('type', 'folder');
 
-                const file = tree.createNode();
-                tree.move(file.id, folder.id);
-                file.data.set('uuid', uuid);
-                file.data.set('filename', 'RootMove.md');
-                file.data.set('type', 'file');
+                const file = tree.getNodes().find((n: any) => n.data.get('uuid') === uuid);
+                if (file) {
+                    tree.move(file.id, folder.id);
+                }
             });
             expect(appMock.fileManager.renameFile).toHaveBeenCalledWith(expect.any(TFile), 'TargetFolder/RootMove.md');
 
@@ -525,10 +520,11 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
                 folder.data.set('filename', 'LifeDir');
                 folder.data.set('type', 'folder');
 
-                const file = tree.createNode();
-                tree.move(file.id, folder.id);
-                file.data.set('uuid', uuid);
-                file.data.set('filename', 'Life2.md');
+                const file = tree.getNodes().find((n: any) => n.data.get('uuid') === uuid);
+                if (file) {
+                    tree.move(file.id, folder.id);
+                    file.data.set('filename', 'Life2.md');
+                }
             });
             expect(appMock.fileManager.renameFile).toHaveBeenCalledWith(expect.any(TFile), 'LifeDir/Life2.md');
 
@@ -538,9 +534,11 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
 
             // Delete
             await pushRemoteIndex(tree => {
-                const file = tree.createNode();
-                file.data.set('uuid', uuid);
-                file.data.set('isDeleted', true);
+                const file = tree.getNodes().find((n: any) => n.data.get('uuid') === uuid);
+                if (file) {
+                    file.data.set('isDeleted', true);
+                    tree.delete(file.id);
+                }
             });
             expect(appMock.vault.trash).toHaveBeenCalledWith(expect.any(TFile), true);
         });
@@ -565,18 +563,16 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
             await createLocalFile('MoveDel.md');
             const uuid = vfsController.getUuidForPath('MoveDel.md')!;
 
-            const remoteDoc = new LoroDoc();
-            const tree = remoteDoc.getTree('vault-tree');
-            const file = tree.createNode();
-            file.data.set('uuid', uuid);
-            file.data.set('filename', 'MovedAndDeleted.md');
-            file.data.set('isDeleted', true);
-            remoteDoc.commit();
+            const delta = await createRemoteIndexDelta(tree => {
+                const file = tree.getNodes().find((n: any) => n.data.get('uuid') === uuid);
+                if (file) {
+                    file.data.set('filename', 'MovedAndDeleted.md');
+                    file.data.set('isDeleted', true);
+                    tree.delete(file.id);
+                }
+            });
 
-            remoteStoreMock.fetchUpdatesSince.mockResolvedValueOnce([{
-                id: 1, documentId: 'shard-index', encryptedUpdate: { ciphertext: Buffer.from(remoteDoc.export({ mode: 'update' })).toString('base64') }
-            }]);
-            
+            pushMockRemoteUpdate('shard-index', delta);
             await orchestrator.pullDocument('shard-index');
             (vfsController as any).rebuildCacheAndEmitRemoteDiffs();
             await waitForDisk();
@@ -615,16 +611,14 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
             await createLocalFile('Race.md');
             const uuid = vfsController.getUuidForPath('Race.md')!;
 
-            const remoteDoc = new LoroDoc();
-            const tree = remoteDoc.getTree('vault-tree');
-            const file = tree.createNode();
-            file.data.set('uuid', uuid);
-            file.data.set('filename', 'RaceDone.md');
-            remoteDoc.commit();
+            const delta = await createRemoteIndexDelta(tree => {
+                const file = tree.getNodes().find((n: any) => n.data.get('uuid') === uuid);
+                if (file) {
+                    file.data.set('filename', 'RaceDone.md');
+                }
+            });
 
-            remoteStoreMock.fetchUpdatesSince.mockResolvedValueOnce([{
-                id: 1, documentId: 'shard-index', encryptedUpdate: { ciphertext: Buffer.from(remoteDoc.export({ mode: 'update' })).toString('base64') }
-            }]);
+            pushMockRemoteUpdate('shard-index', delta);
             await orchestrator.pullDocument('shard-index');
             (vfsController as any).rebuildCacheAndEmitRemoteDiffs();
             await waitForDisk();
@@ -632,9 +626,7 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
             const docEdit = new LoroDoc();
             docEdit.getText('markdown').insert(0, 'Race Content');
             docEdit.commit();
-            remoteStoreMock.fetchUpdatesSince.mockResolvedValueOnce([{
-                id: 2, documentId: uuid, encryptedUpdate: { ciphertext: Buffer.from(docEdit.export({ mode: 'update' })).toString('base64') }
-            }]);
+            pushMockRemoteUpdate(uuid, docEdit.export({ mode: 'update' }));
             
             await orchestrator.pullDocument(uuid, 'RaceDone.md');
             await waitForDisk();
@@ -653,6 +645,32 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
             expect(commitSpy).toHaveBeenCalled();
             expect(emitSpy).toHaveBeenCalled();
             expect(rebuildSpy).toHaveBeenCalled();
+        });
+
+        it('31. Offline Peer Return: Remote file move while offline propagates upon full sync', async () => {
+            await createLocalFile('Projects/Active.md');
+            const uuid = vfsController.getUuidForPath('Projects/Active.md')!;
+
+            const delta = await createRemoteIndexDelta(tree => {
+                const targetFolder = tree.createNode();
+                targetFolder.data.set('uuid', 'archive-folder');
+                targetFolder.data.set('filename', 'Archive');
+                targetFolder.data.set('type', 'folder');
+
+                const file = tree.getNodes().find((n: any) => n.data.get('uuid') === uuid);
+                if (file) {
+                    tree.move(file.id, targetFolder.id);
+                }
+            });
+
+            pushMockRemoteUpdate('shard-index', delta);
+            remoteStoreMock.getBulkLatestUpdateIds.mockResolvedValueOnce({ 'shard-index': 200 });
+
+            await orchestrator.runFullSync();
+            await waitForDisk();
+
+            expect(appMock.fileManager.renameFile).toHaveBeenCalledWith(expect.any(TFile), 'Archive/Active.md');
+            expect(vfsController.getUuidForPath('Archive/Active.md')).toBe(uuid);
         });
     });
 });
