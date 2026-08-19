@@ -188,4 +188,38 @@ describe('Reactive Event-Driven VFS Reconciler Tests', () => {
 		expect(fileUuid).not.toBeNull();
 		expect(obsoleteUuid).toBeNull();
 	});
+
+	it('Resolves offline path collisions by generating a (Conflict 1) file', async () => {
+	    // 1. Mock the Obsidian Vault to simulate that "Collision.md" already exists locally
+	    appMock.vault.getAbstractFileByPath.mockImplementation((p: string) => {
+	        if (p === 'Collision.md') return { path: 'Collision.md' }; 
+	        return null; // Other paths are free
+	    });
+	
+	    // 2. Set up a listener to ensure the Reconciler tells the CRDT engine about the new path
+	    const renamePromise = new Promise<void>((resolve) => {
+	        eventBus.on('LocalFileRenamed', (payload) => {
+	            expect(payload.oldPath).toBe('Collision.md');
+	            expect(payload.newPath).toBe('Collision (Conflict 1).md');
+	            resolve();
+	        });
+	    });
+	
+	    // 3. Simulate an incoming CRDT node from the remote server trying to use the same path
+	    eventBus.emit('CrdtNodeCreated', {
+	        uuid: 'remote-collision-uuid',
+	        path: 'Collision.md',
+	        isFolder: false,
+	        content: 'Remote Content'
+	    });
+	
+	    // 4. Wait for the async mutex and the timeout in your Reconciler logic
+	    await renamePromise;
+	
+	    // 5. Verify that Obsidian was instructed to write to the conflict path, NOT the original
+	    expect(appMock.vault.create).toHaveBeenCalledWith(
+	        'Collision (Conflict 1).md', 
+	        'Remote Content'
+	    );
+	});
 });

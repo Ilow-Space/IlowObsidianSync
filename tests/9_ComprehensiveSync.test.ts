@@ -74,8 +74,9 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
         };
 
         noteRepoMock = {
-            readNote: vi.fn().mockResolvedValue(''),
-            writeNote: vi.fn().mockResolvedValue(undefined)
+        	readNote: vi.fn().mockResolvedValue(''),
+        	writeNote: vi.fn().mockResolvedValue(undefined),
+        	listAllNotes: vi.fn().mockImplementation(async () => Array.from(mockVaultFiles.keys()).filter(p => !mockVaultFiles.get(p)?.children))
         };
 
         diskReconciler = new ObsidianDiskReconciler(appMock, syncEngine, eventBus);
@@ -584,7 +585,7 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
         it('28. Offline Create + Back Online Pull Conflict applies safely', async () => {
             remoteStoreMock.pushUpdate.mockRejectedValue(new Error('Offline'));
             await createLocalFile('Conflict.md'); // Exists locally
-
+                
             remoteStoreMock.pushUpdate.mockResolvedValue(undefined);
             const remoteDoc = new LoroDoc();
             const tree = remoteDoc.getTree('vault-tree');
@@ -593,7 +594,7 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
             file.data.set('filename', 'Conflict.md');
             file.data.set('type', 'file');
             remoteDoc.commit();
-
+                
             remoteStoreMock.fetchUpdatesSince.mockResolvedValueOnce([{
                 id: 1, documentId: 'shard-index', encryptedUpdate: { ciphertext: Buffer.from(remoteDoc.export({ mode: 'update' })).toString('base64') }
             }]);
@@ -601,12 +602,10 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
             await orchestrator.pullDocument('shard-index');
             (vfsController as any).rebuildCacheAndEmitRemoteDiffs();
             await waitForDisk();
-
-            // The reconciler aborts 'create' if the file is already on disk to avoid wiping the user's data. 
-            // Crdt merges text naturally afterward.
-            expect(appMock.vault.create).not.toHaveBeenCalled();
+        
+            // The reconciler creates a conflict copy to preserve both distinct offline creations
+            expect(appMock.vault.create).toHaveBeenCalledWith('Conflict (Conflict 1).md', '');
         });
-
         it('29. Remote Rename & Edit on same file avoids race conditions', async () => {
             await createLocalFile('Race.md');
             const uuid = vfsController.getUuidForPath('Race.md')!;

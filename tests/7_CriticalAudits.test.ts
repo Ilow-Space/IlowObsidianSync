@@ -42,7 +42,8 @@ describe('Critical Architectural Audits Suite (17 Audits)', () => {
 
 		noteRepoMock = {
 			readNote: vi.fn().mockResolvedValue('Hello Content'),
-			writeNote: vi.fn().mockResolvedValue(undefined)
+			writeNote: vi.fn().mockResolvedValue(undefined),
+			listAllNotes: vi.fn().mockResolvedValue([])
 		};
 
 		appMock = {
@@ -159,7 +160,8 @@ describe('Critical Architectural Audits Suite (17 Audits)', () => {
 			'doc-compact',
 			expect.anything(),
 			0,
-			false
+			false,
+			null
 		);
 	});
 

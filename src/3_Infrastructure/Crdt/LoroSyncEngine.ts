@@ -81,6 +81,9 @@ export class LoroSyncEngine {
 				}
 			}
 
+			// CRITICAL FIX: Commit imported ops so container nodes (LoroTree/LoroText) update
+			doc.commit();
+
 			const snapshot = doc.export({ mode: 'snapshot' });
 			await this.localStore.saveDocumentState(documentId, snapshot);
 

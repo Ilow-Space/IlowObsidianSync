@@ -73,7 +73,6 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD, wipeDb = false) {
         });
     }, { timeout: 30000, timeoutMsg: 'Plugin failed to initialize in memory.' });
 
-    // Patch console.log to capture background sync logs
     await browser.execute(() => {
         if ((window as any).__logsAttached) return;
         (window as any).__logsAttached = true;
@@ -88,7 +87,7 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD, wipeDb = false) {
         };
     });
 
-    await browser.execute(async (pass) => {
+    await browser.execute(async (pass, backendUrl) => {
         const app = (window as any).app;
         if (app.internalPlugins?.plugins?.sync?.enabled) {
             await app.internalPlugins.plugins.sync.disable();
@@ -98,16 +97,18 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD, wipeDb = false) {
         if (!plugin) return;
 
         plugin.settings.syncDebounceMs = 100;
+        plugin.settings.serverUrl = backendUrl; // Force localhost
+        await plugin.saveSettings();
 
         if (plugin?.deriveKeyFromPassword) {
             await plugin.deriveKeyFromPassword(pass);
         }
-    }, pwd);
+    }, pwd, BACKEND_URL);
 
     await browser.waitUntil(async () => {
         return await browser.execute(() => {
             const logs = (window as any).__obsidianLogs || [];
-            return logs.some((l: string) => l.includes('[SyncOrchestrator] Full Sync Complete.'));
+            return logs.some((l: string) => l.includes('[NetworkOrchestrator] Full Sync Complete.'));
         });
     }, { timeout: 15000, timeoutMsg: 'Plugin failed to complete initial background sync.' });
 }
@@ -119,53 +120,35 @@ describe('Strict Real-Time CRDT Convergence', () => {
         wipeVaultDiskFiles(vaultAPath);
         wipeVaultDiskFiles(vaultBPath);
 
-        // 1. Wipe Vault A cleanly using clearAll() and unloadKey()
         await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
         await browser.execute(async () => {
             const app = (window as any).app;
             const pluginId = 'ilow-sync';
-            if (app.plugins.enabledPlugins.has(pluginId)) {
-                const plugin = app.plugins.plugins[pluginId];
-                if (plugin) {
-                    if (plugin.yjsEngine && plugin.yjsEngine.localStore) {
-                        await plugin.yjsEngine.localStore.clearAll();
-                    }
-                    await plugin.unloadKey();
-                }
-            } else {
+            if (!app.plugins.enabledPlugins.has(pluginId)) {
                 await app.plugins.enablePlugin(pluginId);
-                const plugin = app.plugins.plugins[pluginId];
-                if (plugin) {
-                    if (plugin.yjsEngine && plugin.yjsEngine.localStore) {
-                        await plugin.yjsEngine.localStore.clearAll();
-                    }
-                    await plugin.unloadKey();
+            }
+            const plugin = app.plugins.plugins[pluginId];
+            if (plugin) {
+                if (plugin.syncEngine && plugin.syncEngine.localStore) {
+                    await plugin.syncEngine.localStore.clearAll();
                 }
+                await plugin.unloadKey();
             }
         });
 
-        // 2. Wipe Vault B cleanly using clearAll() and unloadKey()
         await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
         await browser.execute(async () => {
             const app = (window as any).app;
             const pluginId = 'ilow-sync';
-            if (app.plugins.enabledPlugins.has(pluginId)) {
-                const plugin = app.plugins.plugins[pluginId];
-                if (plugin) {
-                    if (plugin.yjsEngine && plugin.yjsEngine.localStore) {
-                        await plugin.yjsEngine.localStore.clearAll();
-                    }
-                    await plugin.unloadKey();
-                }
-            } else {
+            if (!app.plugins.enabledPlugins.has(pluginId)) {
                 await app.plugins.enablePlugin(pluginId);
-                const plugin = app.plugins.plugins[pluginId];
-                if (plugin) {
-                    if (plugin.yjsEngine && plugin.yjsEngine.localStore) {
-                        await plugin.yjsEngine.localStore.clearAll();
-                    }
-                    await plugin.unloadKey();
+            }
+            const plugin = app.plugins.plugins[pluginId];
+            if (plugin) {
+                if (plugin.syncEngine && plugin.syncEngine.localStore) {
+                    await plugin.syncEngine.localStore.clearAll();
                 }
+                await plugin.unloadKey();
             }
         });
     });
@@ -200,6 +183,9 @@ describe('Strict Real-Time CRDT Convergence', () => {
         await browser.waitUntil(async () => {
             return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('LiveSync.md') !== null);
         }, { timeout: 25000 });
+        
+        // Wait out the suppression lock to avoid ignoring our manual edit
+        await browser.pause(150);
 
         await browser.execute(async () => {
             const app = (window as any).app;
@@ -218,6 +204,9 @@ describe('Strict Real-Time CRDT Convergence', () => {
                 return content.includes('Appended by Vault B');
             });
         }, { timeout: 25000 });
+
+        // Wait out the suppression lock again
+        await browser.pause(150);
 
         await browser.execute(async () => {
             const app = (window as any).app;
@@ -260,6 +249,8 @@ describe('Strict Real-Time CRDT Convergence', () => {
         await browser.waitUntil(async () => {
             return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('RapidTyping.md') !== null);
         }, { timeout: 25000 });
+
+        await browser.pause(150);
 
         await browser.execute(async () => {
             const app = (window as any).app;

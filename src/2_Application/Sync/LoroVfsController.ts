@@ -307,6 +307,7 @@ export class LoroVfsController {
 						isFolder
 					});
 				} else if (oldPath !== newPath) {
+					console.log(`[VFS Remote Move Signal] Node ${uuid} shifted path: "${oldPath}" -> "${newPath}"`);
 					this.eventBus.emit('CrdtNodeMoved', {
 						uuid,
 						oldPath,

@@ -51,8 +51,16 @@ export class NetworkOrchestrator {
 		this.eventBus.on('LocalDeltaReadyForPush', this.handleLocalDeltaReadyForPush.bind(this));
 		this.eventBus.on('LocalFileModified', this.handleLocalFileModified.bind(this));
 		this.eventBus.on('CrdtNodeCreated', this.handleRemoteNodeDiscovered.bind(this));
+		
+		// Garbage collect UUID tracking maps when a file is deleted locally
+		this.eventBus.on('LocalFileDeleted', (payload) => {
+			const documentId = this.vfsController.getUuidForPath(payload.path);
+			if (documentId) {
+				this.fileLastSyncIds.delete(documentId);
+				this.fileUpdateCounters.delete(documentId);
+			}
+		});
 	}
-
 	private async handleRemoteNodeDiscovered(payload: { uuid: string; path: string; isFolder: boolean }): Promise<void> {
 		if (payload.isFolder || !this.activeKey || !this.isInitialized) return;
 		await this.pullDocument(payload.uuid, payload.path, true);
@@ -115,27 +123,31 @@ export class NetworkOrchestrator {
 	}
 
 	private async handleLocalDeltaReadyForPush(payload: LocalDeltaReadyForPush): Promise<void> {
-		if (!this.activeKey) return;
-
-		this.addActiveTask(payload.path || 'System Index');
-
-		try {
-			const encryptedUpdate = await this.crypto.encrypt(payload.updateBinary, this.activeKey!);
-			let encryptedPath = null;
-			if (payload.path) {
-				const pathBytes = new TextEncoder().encode(payload.path);
-				encryptedPath = await this.crypto.encrypt(pathBytes, this.activeKey!);
-			}
-
-			await this.remoteStore.pushUpdate(payload.documentId, encryptedUpdate, encryptedPath);
-			this.hasConnectionError = false;
-		} catch (err) {
-			this.hasConnectionError = true;
-			this.lastErrorMessage = 'Connection failed';
-			this.pendingRetries.push(payload);
-		} finally {
-			this.removeActiveTask(payload.path || 'System Index');
-		}
+	    // CRITICAL FIX: Queue offline/locked edits instead of dropping them!
+	    if (!this.activeKey) {
+	        this.pendingRetries.push(payload);
+	        return;
+	    }
+	
+	    this.addActiveTask(payload.path || 'System Index');
+	
+	    try {
+	        const encryptedUpdate = await this.crypto.encrypt(payload.updateBinary, this.activeKey!);
+	        let encryptedPath = null;
+	        if (payload.path) {
+	            const pathBytes = new TextEncoder().encode(payload.path);
+	            encryptedPath = await this.crypto.encrypt(pathBytes, this.activeKey!);
+	        }
+		
+	        await this.remoteStore.pushUpdate(payload.documentId, encryptedUpdate, encryptedPath);
+	        this.hasConnectionError = false;
+	    } catch (err) {
+	        this.hasConnectionError = true;
+	        this.lastErrorMessage = 'Connection failed';
+	        this.pendingRetries.push(payload);
+	    } finally {
+	        this.removeActiveTask(payload.path || 'System Index');
+	    }
 	}
 
 	private async handleLocalFileModified(payload: { path: string; content: string }): Promise<void> {
@@ -162,58 +174,90 @@ export class NetworkOrchestrator {
 	}
 
 	public async runFullSync(): Promise<void> {
-		if (!this.activeKey || this.isSyncingFull) return;
-		this.isSyncingFull = true;
-		this.addActiveTask('System Index');
+	    if (!this.activeKey || this.isSyncingFull) return;
+	    this.isSyncingFull = true;
+	    this.addActiveTask('System Index');
 
-		try {
-			console.log('[NetworkOrchestrator] Starting VFS Index Sync...');
+	    try {
+	        console.log('[NetworkOrchestrator] Starting VFS Index Sync...');
 
-			if (this.pendingRetries.length > 0) {
-				const retries = [...this.pendingRetries];
-				this.pendingRetries = [];
-				for (const retryItem of retries) {
-					await this.handleLocalDeltaReadyForPush(retryItem);
-				}
-			}
+	        if (this.pendingRetries.length > 0) {
+	            const retries = [...this.pendingRetries];
+	            this.pendingRetries = [];
+	            for (const retryItem of retries) {
+	                await this.handleLocalDeltaReadyForPush(retryItem);
+	            }
+	        }
 
-			let bulkUpdates: Record<string, number> = {};
-			try {
-				bulkUpdates = await this.remoteStore.getBulkLatestUpdateIds();
-			} catch (e) {
-				console.warn('[NetworkOrchestrator] Bulk fetch failed, falling back to sequential checks.');
-			}
+	        let bulkUpdates: Record<string, number> = {};
+	        try {
+	            bulkUpdates = await this.remoteStore.getBulkLatestUpdateIds();
+	        } catch (e) {
+	            console.warn('[NetworkOrchestrator] Bulk fetch failed, falling back to sequential checks.');
+	        }
 
-			const indexLatest = bulkUpdates['shard-index'] || 0;
-			await this.pullDocument('shard-index', null, true, indexLatest);
+	        // --- INGEST OFFLINE MODIFICATIONS AND CREATIONS FIRST ---
+	        const localPaths = typeof this.noteRepo.listAllNotes === 'function' ? await this.noteRepo.listAllNotes() : [];
+	        for (const path of localPaths) {
+	            let documentId = this.vfsController.getUuidForPath(path);
+	            const localContent = await this.noteRepo.readNote(path);
+			
+	            if (!documentId) {
+	                this.eventBus.emit('LocalFileCreated', {
+	                    path: path,
+	                    isFolder: false,
+	                    content: localContent || ''
+	                });
+	                documentId = this.vfsController.getUuidForPath(path);
+	                if (documentId && localContent) {
+	                    const updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent);
+	                    if (updateBinary) {
+	                        await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
+	                    }
+	                }
+	            } else if (localContent !== null) {
+	                const doc = await this.crdtEngine.getOrCreateDoc(documentId);
+	                const crdtContent = doc.getText('markdown').toString();
+	                if (localContent !== crdtContent) {
+	                    const updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent);
+	                    if (updateBinary) {
+	                        await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
+	                    }
+	                }
+	            }
+	        }
 
-			if (this.hasConnectionError) {
-				throw new Error(this.lastErrorMessage || 'Sync failed');
-			}
+	        // --- THEN PULL REMOTE INDEX (Remote Deletions/Moves Will Cleanly Override) ---
+	        const indexLatest = bulkUpdates['shard-index'] || 0;
+	        await this.pullDocument('shard-index', null, true, indexLatest);
 
-			this.vfsController.processRemoteVfsUpdates();
+	        if (this.hasConnectionError) {
+	            throw new Error(this.lastErrorMessage || 'Sync failed');
+	        }
 
-			const activeFiles = this.vfsController.getActiveFiles().filter(file => file.type !== 'folder');
-			const limit = pLimit(20);
-			const pullPromises = activeFiles.map(file =>
-				limit(async () => {
-					if (this.hasConnectionError) return;
-					const latestRemoteId = bulkUpdates[file.uuid] || 0;
-					await this.pullDocument(file.uuid, file.path, true, latestRemoteId);
-				})
-			);
-			await Promise.all(pullPromises);
+	        this.vfsController.processRemoteVfsUpdates();
 
-			this.isInitialized = true;
-			console.log('[NetworkOrchestrator] Full Sync Complete.');
-		} catch (error) {
-			console.error('[NetworkOrchestrator] Sync failed:', error);
-			this.hasConnectionError = true;
-			this.lastErrorMessage = 'Sync failed';
-		} finally {
-			this.removeActiveTask('System Index');
-			this.isSyncingFull = false;
-		}
+	        const activeFiles = this.vfsController.getActiveFiles().filter(file => file.type !== 'folder');
+	        const limit = pLimit(20);
+	        const pullPromises = activeFiles.map(file =>
+	            limit(async () => {
+	                if (this.hasConnectionError) return;
+	                const latestRemoteId = bulkUpdates[file.uuid] || 0;
+	                await this.pullDocument(file.uuid, file.path, true, latestRemoteId);
+	            })
+	        );
+	        await Promise.all(pullPromises);
+
+	        this.isInitialized = true;
+	        console.log('[NetworkOrchestrator] Full Sync Complete.');
+	    } catch (error) {
+	        console.error('[NetworkOrchestrator] Sync failed:', error);
+	        this.hasConnectionError = true;
+	        this.lastErrorMessage = 'Sync failed';
+	    } finally {
+	        this.removeActiveTask('System Index');
+	        this.isSyncingFull = false;
+	    }
 	}
 
 	public async pullDocument(documentId: string, path: string | null = null, isSilent: boolean = false, knownLatestRemoteId?: number): Promise<void> {
@@ -244,6 +288,7 @@ export class NetworkOrchestrator {
 			let updates: any[] = [];
 			const decryptedUpdates: Uint8Array[] = [];
 
+			// 1. NETWORK FETCH OUTSIDE MUTEX (Restores Concurrency!)
 			try {
 				details = await this.remoteStore.fetchSnapshotDetails(documentId);
 				const currentLastId = this.fileLastSyncIds.get(documentId) || 0;
@@ -260,6 +305,7 @@ export class NetworkOrchestrator {
 				return;
 			}
 
+			// 2. DISK WRITES INSIDE MUTEX (Maintains Thread Safety!)
 			await this.orchestratorMutex.runExclusive(async () => {
 				const currentLastId = this.fileLastSyncIds.get(documentId) || 0;
 
@@ -288,7 +334,9 @@ export class NetworkOrchestrator {
 					const maxId = Math.max(...updates.map(u => u.id));
 					this.fileLastSyncIds.set(documentId, maxId);
 
-					if (documentId !== 'shard-index' && path) {
+					if (documentId === 'shard-index') {
+						this.vfsController.processRemoteVfsUpdates();
+					} else if (path) {
 						this.eventBus.emit('CrdtTextChanged', {
 							uuid: documentId,
 							path,
@@ -346,19 +394,26 @@ export class NetworkOrchestrator {
 	}
 
 	public async forceSyncAndCompact(documentId: string): Promise<void> {
-		await this.pullDocument(documentId);
-		if (!this.activeKey) return;
-		const doc = await this.crdtEngine.getOrCreateDoc(documentId);
-		try {
-			const snapshotBytes = doc.export({ mode: 'snapshot' });
-			const newState = await this.crypto.encrypt(snapshotBytes, this.activeKey);
-			const maxId = this.fileLastSyncIds.get(documentId) || 0;
-			await this.remoteStore.compactSnapshot(documentId, newState, maxId, false);
-		} finally {
-			this.crdtEngine.removeDoc(documentId);
-		}
+	    await this.pullDocument(documentId);
+	    if (!this.activeKey) return;
+	    const doc = await this.crdtEngine.getOrCreateDoc(documentId);
+	    try {
+	        const snapshotBytes = doc.export({ mode: 'snapshot' });
+	        const newState = await this.crypto.encrypt(snapshotBytes, this.activeKey);
+	        const maxId = this.fileLastSyncIds.get(documentId) || 0;
+		
+	        let encryptedPath = null;
+	        const path = this.vfsController.getPathForUuid(documentId);
+	        if (path) {
+	            const pathBytes = new TextEncoder().encode(path);
+	            encryptedPath = await this.crypto.encrypt(pathBytes, this.activeKey);
+	        }
+		
+	        await this.remoteStore.compactSnapshot(documentId, newState, maxId, false, encryptedPath);
+	    } finally {
+	        this.crdtEngine.removeDoc(documentId);
+	    }
 	}
-
 	public async deleteRemoteSnapshot(documentId: string): Promise<void> {
 		this.fileLastSyncIds.delete(documentId);
 		this.fileUpdateCounters.delete(documentId);
