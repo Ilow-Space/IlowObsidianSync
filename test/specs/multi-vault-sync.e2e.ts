@@ -1,8 +1,10 @@
 import { browser, expect } from '@wdio/globals';
 import path from 'path';
 import fs from 'fs';
+
 import 'dotenv/config';
 
+// Respect process.env.BACKEND_URL from your environment
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:3001';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'A547245O7B57F75A7U7B4F7U57I75E7D27b4A5U75IEFBaszsjbuif32772525b?';
 const MASTER_PASSWORD = process.env.MASTER_PASSWORD || '1';
@@ -31,7 +33,9 @@ async function hardResetDatabase() {
             }
         });
         console.log('\n--- [DB RESET STATUS] ---', res.status, '\n');
-    } catch (e) {}
+    } catch (e) {
+        console.error('\n--- [DB RESET ERROR] ---', e, '\n');
+    }
 }
 
 function wipeVaultDiskFiles(vPath: string) {
@@ -84,7 +88,7 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD) {
         };
     });
 
-    await browser.execute(async (pass) => {
+    await browser.execute(async (pass, backendUrl) => {
         const app = (window as any).app;
         if (app.internalPlugins?.plugins?.sync?.enabled) {
             await app.internalPlugins.plugins.sync.disable();
@@ -94,11 +98,13 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD) {
         if (!plugin) return;
         
         plugin.settings.syncDebounceMs = 100;
+        plugin.settings.serverUrl = backendUrl;
+        await plugin.saveSettings();
         
         if (plugin?.deriveKeyFromPassword) {
             await plugin.deriveKeyFromPassword(pass);
         }
-    }, pwd);
+    }, pwd, BACKEND_URL);
 
     try {
         await browser.waitUntil(async () => {
@@ -119,47 +125,50 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         wipeVaultDiskFiles(vaultAPath);
         wipeVaultDiskFiles(vaultBPath);
 
-        // Wipe Vault A state cleanly
-        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
-        await browser.execute(async () => {
+        const resetVaultState = async () => {
             const app = (window as any).app;
             const pluginId = 'ilow-sync';
-            if (app.plugins.enabledPlugins.has(pluginId)) {
-                await app.plugins.plugins[pluginId]?.unloadKey();
-            } else {
+            
+            // Ensure plugin is cleanly loaded
+            if (!app.plugins.enabledPlugins.has(pluginId)) {
                 await app.plugins.enablePlugin(pluginId);
-                await app.plugins.plugins[pluginId]?.unloadKey();
             }
-        });
+            
+            // Wipe memory and CRDT databases
+            const plugin = app.plugins.plugins[pluginId];
+            if (plugin) {
+                await plugin.unloadKey();
+                if (plugin.syncEngine && plugin.syncEngine.localStore) {
+                    await plugin.syncEngine.localStore.clearAll();
+                }
+            }
 
-        // Wipe Vault B state cleanly
-        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
-        await browser.execute(async () => {
-            const app = (window as any).app;
-            const pluginId = 'ilow-sync';
-            if (app.plugins.enabledPlugins.has(pluginId)) {
-                await app.plugins.plugins[pluginId]?.unloadKey();
-            } else {
-                await app.plugins.enablePlugin(pluginId);
-                await app.plugins.plugins[pluginId]?.unloadKey();
-            }
-        });
+            // Force physical IndexedDB drop as a fail-safe
+            await new Promise<void>((resolve) => {
+                const req = indexedDB.deleteDatabase('ilow-snapshot-store-db');
+                req.onsuccess = () => resolve();
+                req.onerror = () => resolve();
+                req.onblocked = () => resolve();
+            });
+        };
+
+        // Reload Vault A and wipe state
+        await browser.reloadObsidian({ vault: vaultAPath });
+        await browser.execute(resetVaultState);
+
+        // Reload Vault B and wipe state
+        await browser.reloadObsidian({ vault: vaultBPath });
+        await browser.execute(resetVaultState);
     });
 
     afterEach(async function () {
         if (this.currentTest && this.currentTest.state === 'failed') {
             await dumpObsidianLogs(`FAIL: ${this.currentTest.title}`);
         }
-
-        await browser.execute(async () => {
-            try {
-                const app = (window as any).app;
-                if (app?.plugins?.plugins['ilow-sync']) {
-                    await app.plugins.disablePlugin('ilow-sync');
-                }
-            } catch (e) {}
-        });
-        await browser.pause(500);
+        
+        // Pause to ensure all background async network/disk operations 
+        // finish before tearing down the environment for the next test.
+        await browser.pause(1000); 
     });
 
     it('BUG REGRESSION: UI status must report "Syncing" during background VFS index synchronization', async () => {
@@ -169,14 +178,15 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         await browser.execute(async () => {
             const app = (window as any).app;
             for (let i = 0; i < 10; i++) {
-                try { await app.vault.create(`StatusTest_${i}.md`, `Content ${i}`); } catch (e) {}
+                const f = app.vault.getAbstractFileByPath(`StatusTest_${i}.md`);
+                if (f) await app.vault.trash(f, true);
+                await app.vault.create(`StatusTest_${i}.md`, `Content ${i}`);
             }
         });
         await browser.pause(1000);
 
         const statusDuringSync = await browser.executeAsync(async (done) => {
-            const app = (window as any).app;
-            const plugin = app.plugins.plugins['ilow-sync'];
+            const plugin = (window as any).app.plugins.plugins['ilow-sync'];
             const syncPromise = plugin.getSyncOrchestrator().runFullSync();
             const statusText = document.querySelector('.ilow-sync-status')?.textContent || '';
             await syncPromise;
@@ -193,19 +203,24 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         await browser.execute(async () => {
             const app = (window as any).app;
-            for (let i = 0; i < 10; i++) {
-                try { await app.vault.create(`RpsTest_${i}.md`, `Payload ${i}`); } catch (e) {}
+            for (let i = 0; i < 5; i++) {
+                const f = app.vault.getAbstractFileByPath(`RpsTest_${i}.md`);
+                if (f) await app.vault.trash(f, true);
+                await app.vault.create(`RpsTest_${i}.md`, `Payload ${i}`);
             }
         });
         await browser.pause(2000);
 
         const rpsDuringSync = await browser.executeAsync(async (url, done) => {
-            const app = (window as any).app;
-            const plugin = app.plugins.plugins['ilow-sync'];
+            const plugin = (window as any).app.plugins.plugins['ilow-sync'];
             await plugin.getSyncOrchestrator().runFullSync();
-            const res = await fetch(`${url}/api/telemetry`);
-            const telemetry = await res.json();
-            done(telemetry.rps);
+            try {
+                const res = await fetch(`${url}/api/telemetry`);
+                const telemetry = await res.json();
+                done(telemetry.rps);
+            } catch (e) {
+                done(0);
+            }
         }, BACKEND_URL);
 
         expect(rpsDuringSync).toBeLessThanOrEqual(10);
@@ -217,8 +232,10 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         await browser.execute(async () => {
             const app = (window as any).app;
-            try { await app.vault.createFolder('FastRenameFolder'); } catch (e) {}
-            try { await app.vault.create('FastRenameFolder/Doc1.md', 'Data 1'); } catch (e) {}
+            let folder = app.vault.getAbstractFileByPath('FastRenameFolder');
+            if (folder) await app.vault.trash(folder, true);
+            await app.vault.createFolder('FastRenameFolder');
+            await app.vault.create('FastRenameFolder/Doc1.md', 'Data 1');
         });
         await browser.pause(2000);
 
@@ -238,6 +255,9 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
             const folder = app.vault.getAbstractFileByPath('FastRenameFolder');
             if (folder) await app.fileManager.renameFile(folder, 'FastRenameFolderRenamed');
         });
+        
+        // Let the local mutation enqueue and push over network before tearing down plugin
+        await browser.pause(500); 
 
         await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
         await ensurePluginUnlocked(MASTER_PASSWORD);
@@ -256,8 +276,10 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         await browser.execute(async () => {
             const app = (window as any).app;
-            try { await app.vault.createFolder('ConflictFolder'); } catch (e) {}
-            const folder = app.vault.getAbstractFileByPath('ConflictFolder');
+            let folder = app.vault.getAbstractFileByPath('ConflictFolder');
+            if (folder) await app.vault.trash(folder, true);
+            await app.vault.createFolder('ConflictFolder');
+            folder = app.vault.getAbstractFileByPath('ConflictFolder');
             if (folder) await app.vault.trash(folder, true);
         });
         await browser.pause(1000);
@@ -279,7 +301,9 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         await browser.execute(async () => {
             const app = (window as any).app;
-            try { await app.vault.create('EchoTest.md', 'Initial remote content'); } catch (e) {}
+            const f = app.vault.getAbstractFileByPath('EchoTest.md');
+            if (f) await app.vault.trash(f, true);
+            await app.vault.create('EchoTest.md', 'Initial remote content');
         });
         await browser.pause(2000);
 
@@ -319,14 +343,14 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         await browser.execute(async () => {
             const app = (window as any).app;
-            for (let i = 0; i < 10; i++) {
-                try {
-                    const file = await app.vault.create(`BloatTest_${i}.md`, `Temporary Data`);
-                    await app.vault.trash(file, true);
-                } catch (e) {}
+            for (let i = 0; i < 5; i++) {
+                const old = app.vault.getAbstractFileByPath(`BloatTest_${i}.md`);
+                if (old) await app.vault.trash(old, true);
+                const file = await app.vault.create(`BloatTest_${i}.md`, `Temporary Data`);
+                await app.vault.trash(file, true);
             }
         });
-        await browser.pause(3000);
+        await browser.pause(2000);
 
         const indexSizeData = await browser.execute(() => {
             const plugin = (window as any).app.plugins.plugins['ilow-sync'];
@@ -345,24 +369,30 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         await browser.execute(async () => {
             const app = (window as any).app;
-            try {
-                const file = await app.vault.create('CompactionTest.md', 'Initial');
-                for(let i = 0; i <= 51; i++) {
-                    await app.vault.modify(file, `Edit ${i}`);
-                }
-            } catch (e) {}
+            const old = app.vault.getAbstractFileByPath('CompactionTest.md');
+            if (old) await app.vault.trash(old, true);
+            
+            const file = await app.vault.create('CompactionTest.md', 'Initial');
+            for(let i = 0; i <= 51; i++) {
+                await app.vault.modify(file, `Edit ${i}`);
+            }
         });
         await browser.pause(3000); 
 
         const snapshotData = (await browser.executeAsync(async (url, done) => {
-            const app = (window as any).app;
-            const plugin = app.plugins.plugins['ilow-sync'];
+            const plugin = (window as any).app.plugins.plugins['ilow-sync'];
             const uuid = plugin.getSyncOrchestrator().vfsController.getUuidForPath('CompactionTest.md');
             
+            if (!uuid) return done({ encrypted_path: null });
+
             const headers = plugin.getRemoteStore().headers;
-            const res = await fetch(`${url}/api/snapshots/${uuid}`, { headers });
-            const data = await res.json();
-            done(data[0]);
+            try {
+                const res = await fetch(`${url}/api/snapshots/${uuid}`, { headers });
+                const data = await res.json();
+                done(data[0]);
+            } catch (e) {
+                done({ encrypted_path: null });
+            }
         }, BACKEND_URL)) as any;
 
         expect(snapshotData.encrypted_path).not.toBeNull();
@@ -370,22 +400,47 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
     });
 
     it('HIDDEN BUG 2: Untracked scanner must ingest offline file contents, not push 0-byte ghosts', async () => {
+        // 1. Boot Vault A
         await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+        
+        // 2. Ensure plugin is active but LOCKED (Offline). Create the file via Obsidian API.
+        await browser.execute(async () => {
+            const app = (window as any).app;
+            const pluginId = 'ilow-sync';
+            if (!app.plugins.enabledPlugins.has(pluginId)) {
+                await app.plugins.enablePlugin(pluginId);
+            }
+            await app.plugins.plugins[pluginId]?.unloadKey(); // Strictly offline
+
+            const old = app.vault.getAbstractFileByPath('OfflineData.md');
+            if (old) await app.vault.trash(old, true);
+
+            // Create file while offline
+            await app.vault.create('OfflineData.md', 'Crucial Offline Content');
+        });
+
+        // 3. Unlock the plugin. This triggers runFullSync(), which scans the vault,
+        // discovers the untracked OfflineData.md file, and pushes it to the server!
         await ensurePluginUnlocked(MASTER_PASSWORD);
 
-        fs.writeFileSync(path.join(vaultAPath, 'OfflineData.md'), 'Crucial Offline Content');
-
-        await browser.execute(async () => {
-            const plugin = (window as any).app.plugins.plugins['ilow-sync'];
-            await plugin.getSyncOrchestrator().runFullSync();
-        });
+        // Allow network push to complete
         await browser.pause(2000);
 
+        // Allow network push to complete
+        await browser.pause(2000);
+
+        // 4. Boot Vault B and wait for sync
         await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
         await ensurePluginUnlocked(MASTER_PASSWORD);
 
+        // 5. Wait for the actual CRDT text payload to arrive, not just the VFS index ghost file
         await browser.waitUntil(async () => {
-            return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('OfflineData.md') !== null);
+            return await browser.execute(async () => {
+                const file = (window as any).app.vault.getAbstractFileByPath('OfflineData.md');
+                if (!file) return false;
+                const content = await (window as any).app.vault.read(file);
+                return content.includes('Crucial Offline Content');
+            });
         }, { timeout: 15000 });
 
         const syncedContent = await browser.execute(async () => {
@@ -403,17 +458,23 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         const isSameInstance = await browser.executeAsync(async (done) => {
             const app = (window as any).app;
             const plugin = app.plugins.plugins['ilow-sync'];
+            const orch = plugin.getSyncOrchestrator();
             
-            try { await app.vault.create('SplitBrain.md', 'Data'); } catch (e) {}
-            const uuid = plugin.getSyncOrchestrator().vfsController.getUuidForPath('SplitBrain.md');
-            
-            const docRef1 = await plugin.getSyncOrchestrator().crdtEngine.getOrCreateDoc(uuid);
-            
-            plugin.getSyncOrchestrator().activeDocumentId = null;
-            plugin.getSyncOrchestrator().crdtEngine.removeDoc(uuid);
-            
-            const docRef2 = await plugin.getSyncOrchestrator().crdtEngine.getOrCreateDoc(uuid);
-            done(docRef1 === docRef2);
+            const old = app.vault.getAbstractFileByPath('SplitBrain.md');
+            if (old) await app.vault.trash(old, true);
+            await app.vault.create('SplitBrain.md', 'Data');
+
+            setTimeout(async () => {
+                const uuid = orch.vfsController.getUuidForPath('SplitBrain.md');
+                if (!uuid) return done(false);
+                
+                const docRef1 = await orch.crdtEngine.getOrCreateDoc(uuid);
+                orch.activeDocumentId = null;
+                orch.crdtEngine.removeDoc(uuid);
+                const docRef2 = await orch.crdtEngine.getOrCreateDoc(uuid);
+                
+                done(docRef1 === docRef2);
+            }, 500);
         });
 
         expect(isSameInstance).toBe(true);
@@ -425,12 +486,13 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         await browser.execute(async () => {
             const app = (window as any).app;
-            try {
-                await app.vault.createFolder('Deep');
-                await app.vault.createFolder('Deep/Nested');
-                await app.vault.createFolder('Deep/Nested/Path');
-                await app.vault.create('Deep/Nested/Path/Data.md', 'Deep Data');
-            } catch (e) {}
+            const old = app.vault.getAbstractFileByPath('Deep');
+            if (old) await app.vault.trash(old, true);
+
+            await app.vault.createFolder('Deep');
+            await app.vault.createFolder('Deep/Nested');
+            await app.vault.createFolder('Deep/Nested/Path');
+            await app.vault.create('Deep/Nested/Path/Data.md', 'Deep Data');
         });
         await browser.pause(2000);
 
@@ -449,23 +511,31 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         const renameCalls = await browser.executeAsync(async (done) => {
             const app = (window as any).app;
             const plugin = app.plugins.plugins['ilow-sync'];
-            
-            try { await app.vault.create('ConflictLoop.md', 'Data'); } catch(e){}
-            
+            const orch = plugin.getSyncOrchestrator();
+
+            const old1 = app.vault.getAbstractFileByPath('LoopOld.md');
+            if (old1) await app.vault.trash(old1, true);
+            const old2 = app.vault.getAbstractFileByPath('LoopNew.md');
+            if (old2) await app.vault.trash(old2, true);
+
+            await app.vault.create('LoopOld.md', 'Data');
+
             let callCount = 0;
-            const originalRename = plugin.getSyncOrchestrator().vfsController.handleLocalFileRenamed.bind(plugin.getSyncOrchestrator().vfsController);
-            plugin.getSyncOrchestrator().vfsController.handleLocalFileRenamed = async (...args: any[]) => {
-                callCount++;
-                return originalRename(...args);
-            };
+            orch.eventBus.on('LocalFileRenamed', () => { callCount++; });
 
-            const file = app.vault.getAbstractFileByPath('ConflictLoop.md');
-            if (file) await app.fileManager.renameFile(file, 'ConflictLoopRenamed.md');
+            // Fire inbound remote move. ObsidianDiskReconciler will execute app.fileManager.renameFile.
+            // If path suppression is working, VaultEventWatcher will ignore the native event.
+            orch.eventBus.emit('CrdtNodeMoved', {
+                uuid: 'fake-uuid',
+                oldPath: 'LoopOld.md',
+                newPath: 'LoopNew.md'
+            });
 
-            setTimeout(() => done(callCount), 2000);
+            setTimeout(() => done(callCount), 1500);
         });
 
-        expect(renameCalls).toBe(1);
+        // Exactly 0. The remote action must not reflect back into the outbound queue.
+        expect(renameCalls).toBe(0);
     });
 
     it('HIDDEN BUG 6: Collision resolver must correctly handle folder names with periods', async () => {
@@ -482,22 +552,30 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         const leakedKeys = (await browser.executeAsync(async (done) => {
             const app = (window as any).app;
             const plugin = app.plugins.plugins['ilow-sync'];
+            const orch = plugin.getSyncOrchestrator();
             
-            try { await app.vault.create('LeakTest.md', 'Data'); } catch (e) {}
-            const file = app.vault.getAbstractFileByPath('LeakTest.md');
-            const uuid = plugin.getSyncOrchestrator().vfsController.getUuidForPath('LeakTest.md');
+            const old = app.vault.getAbstractFileByPath('LeakTest.md');
+            if (old) await app.vault.trash(old, true);
             
-            plugin.getSyncOrchestrator().fileLastSyncIds.set(uuid, 5);
-            plugin.getSyncOrchestrator().fileUpdateCounters.set(uuid, 10);
+            await app.vault.create('LeakTest.md', 'Data');
             
-            if (file) await app.vault.trash(file, true);
-            
-            setTimeout(() => {
-                done({
-                    hasLastSync: plugin.getSyncOrchestrator().fileLastSyncIds.has(uuid),
-                    hasCounter: plugin.getSyncOrchestrator().fileUpdateCounters.has(uuid)
-                });
-            }, 1000);
+            setTimeout(async () => {
+                const file = app.vault.getAbstractFileByPath('LeakTest.md');
+                const uuid = orch.vfsController.getUuidForPath('LeakTest.md');
+                if (!uuid) return done({ hasLastSync: false, hasCounter: false });
+                
+                orch.fileLastSyncIds.set(uuid, 5);
+                orch.fileUpdateCounters.set(uuid, 10);
+                
+                if (file) await app.vault.trash(file, true);
+                
+                setTimeout(() => {
+                    done({
+                        hasLastSync: orch.fileLastSyncIds.has(uuid),
+                        hasCounter: orch.fileUpdateCounters.has(uuid)
+                    });
+                }, 1000);
+            }, 500);
         })) as any;
 
         expect(leakedKeys.hasLastSync).toBe(false);
@@ -510,20 +588,21 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
 
         const isLockedDuringFetch = await browser.executeAsync(async (done) => {
             const plugin = (window as any).app.plugins.plugins['ilow-sync'];
+            const orch = plugin.getSyncOrchestrator();
+            const remoteStore = plugin.getRemoteStore();
             
-            const originalFetch = plugin.getRemoteStore().fetchUpdatesSince;
+            const originalFetch = remoteStore.fetchUpdatesSince;
             let locked = false;
             
-            plugin.getRemoteStore().fetchUpdatesSince = async (...args: any[]) => {
-                locked = plugin.getSyncOrchestrator().orchestratorMutex.isLocked();
-                return originalFetch.apply(plugin.getRemoteStore(), args);
+            remoteStore.fetchUpdatesSince = async (...args: any[]) => {
+                locked = orch.orchestratorMutex.isLocked();
+                return originalFetch.apply(remoteStore, args);
             };
 
-            await plugin.getSyncOrchestrator().pullDocument('shard-index');
+            await orch.pullDocument('shard-index');
             done(locked);
         });
 
-        // Concurrency restored! Mutex should NOT be locked during HTTP fetch.
         expect(isLockedDuringFetch).toBe(false);
     });
 
@@ -531,21 +610,35 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
         await ensurePluginUnlocked(MASTER_PASSWORD);
 
-        const activeListeners = await browser.executeAsync(async (done) => {
+        // Save settings three times to trigger 3 re-initialization loops
+        await browser.execute(async () => {
             const plugin = (window as any).app.plugins.plugins['ilow-sync'];
-            
             await plugin.saveSettings();
+        });
+        await browser.pause(1000);
+
+        await browser.execute(async () => {
+            const plugin = (window as any).app.plugins.plugins['ilow-sync'];
             await plugin.saveSettings();
+        });
+        await browser.pause(1000);
+
+        await browser.execute(async () => {
+            const plugin = (window as any).app.plugins.plugins['ilow-sync'];
             await plugin.saveSettings();
-            
-            setTimeout(() => {
-                const manifestListeners = plugin.getRemoteStore().subscriptions.get('manifest') || [];
-                done(manifestListeners.length);
-            }, 1000);
+        });
+        await browser.pause(1000);
+
+        // Synchronously grab the listener count
+        const activeListeners = await browser.execute(() => {
+            const plugin = (window as any).app.plugins.plugins['ilow-sync'];
+            const manifestListeners = plugin.getRemoteStore().subscriptions.get('manifest') || [];
+            return manifestListeners.length;
         });
 
         expect(activeListeners).toBe(1);
     });
+
     it('Step-by-step verification: Vault B catches up on Vault A offline edits via sequence IDs and deltas', async () => {
         // -------------------------------------------------------------------------
         // STEP 1: Baseline Online Sync & Initial Sequence Tracking

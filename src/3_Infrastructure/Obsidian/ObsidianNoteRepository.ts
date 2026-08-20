@@ -1,22 +1,8 @@
 import { INoteRepository } from '@domain/Interfaces/INoteRepository';
-import { App, TFile, TAbstractFile } from 'obsidian';
+import { App, TFile } from 'obsidian';
 
 export class ObsidianNoteRepository implements INoteRepository {
-	private changeCallbacks: Array<(path: string, content: string) => void> = [];
-
-	constructor(private app: App) {
-		// Listen to vault changes
-		this.app.vault.on('modify', async (file: TAbstractFile) => {
-			if (file instanceof TFile && file.extension === 'md') {
-				const content = await this.readNote(file.path);
-				if (content !== null) {
-					for (const cb of this.changeCallbacks) {
-						cb(file.path, content);
-					}
-				}
-			}
-		});
-	}
+	constructor(private app: App) {}
 
 	public async readNote(path: string): Promise<string | null> {
 		const file = this.app.vault.getAbstractFileByPath(path);
@@ -31,7 +17,6 @@ export class ObsidianNoteRepository implements INoteRepository {
 		if (file instanceof TFile) {
 			await this.app.vault.modify(file, content);
 		} else {
-			// Create nested folders if needed
 			const parts = path.split('/');
 			if (parts.length > 1) {
 				const folderParts = parts.slice(0, -1);
@@ -53,6 +38,6 @@ export class ObsidianNoteRepository implements INoteRepository {
 	}
 
 	public onNoteChange(callback: (path: string, content: string) => void): void {
-		this.changeCallbacks.push(callback);
+		// Deprecated: VaultEventWatcher now handles event emission
 	}
 }

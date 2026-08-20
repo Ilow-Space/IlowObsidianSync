@@ -75,18 +75,25 @@ export class LoroVfsController {
 		if (this.pushTimeout) clearTimeout(this.pushTimeout);
 
 		this.pushTimeout = setTimeout(() => {
-			if (this.pendingFrontier) {
-				const updateBinary = new Uint8Array(this.treeDoc.export({ mode: 'update', from: this.pendingFrontier }));
-				this.pendingFrontier = null;
-
-				this.eventBus.emit('LocalDeltaReadyForPush', {
-					documentId: 'shard-index',
-					updateBinary,
-					path: null
-				});
-			}
-			this.pushTimeout = null;
+			this.flushPendingPush();
 		}, 50);
+	}
+
+	public flushPendingPush(): void {
+		if (this.pushTimeout) {
+			clearTimeout(this.pushTimeout);
+			this.pushTimeout = null;
+		}
+		if (this.pendingFrontier) {
+			const updateBinary = new Uint8Array(this.treeDoc.export({ mode: 'update', from: this.pendingFrontier }));
+			this.pendingFrontier = null;
+
+			this.eventBus.emit('LocalDeltaReadyForPush', {
+				documentId: 'shard-index',
+				updateBinary,
+				path: null
+			});
+		}
 	}
 
 	public getUuidForPath(path: string): string | null {
@@ -384,6 +391,7 @@ export class LoroVfsController {
 	}
 
 	public destroy(): void {
+		this.flushPendingPush();
 		this.eventBus.off('LocalFileCreated', this.boundCreated);
 		this.eventBus.off('LocalFileRenamed', this.boundRenamed);
 		this.eventBus.off('LocalFileDeleted', this.boundDeleted);

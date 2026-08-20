@@ -426,6 +426,9 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         // Allow network push to complete
         await browser.pause(2000);
 
+        // Allow network push to complete
+        await browser.pause(2000);
+
         // 4. Boot Vault B and wait for sync
         await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
         await ensurePluginUnlocked(MASTER_PASSWORD);

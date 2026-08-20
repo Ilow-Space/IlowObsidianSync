@@ -4,6 +4,7 @@ import PQueue from 'p-queue';
 import { SyncEventBus } from './SyncEventBus';
 import { LoroSyncEngine } from '@infrastructure/Crdt/LoroSyncEngine';
 
+
 export class ObsidianDiskReconciler {
 	private fileLocks = new Map<string, Mutex>();
 	private diskQueue = new PQueue({ concurrency: 5 });
@@ -128,15 +129,40 @@ export class ObsidianDiskReconciler {
 	            await mutex.runExclusive(async () => {
 	                const file = this.app.vault.getAbstractFileByPath(payload.oldPath);
 	                if (!file) {
-					    // Source file is missing from disk; rehydrate/create it at the new destination path
-					    const content = await this.crdtEngine.getDocText(payload.uuid);
-					    await this.handleCrdtNodeCreated({
-					        uuid: payload.uuid,
-					        path: payload.newPath,
-					        isFolder: false,
-					        content: content || ''
-					    });
-					    return;
+					    // 1. Rehydrate the document content
+					    const doc = await this.syncEngine.getOrCreateDoc(payload.uuid);
+					    const content = doc.getText('markdown').toString();
+					    this.syncEngine.removeDoc(payload.uuid);
+									
+					    // 2. Resolve collisions directly without calling handleCrdtNodeCreated
+					    let targetPath = payload.newPath;
+					    let targetExists = this.app.vault.getAbstractFileByPath(targetPath);
+									
+					    if (targetExists) {
+					        let counter = 1;
+					        const extIdx = targetPath.lastIndexOf('.');
+					        const base = extIdx > 0 ? targetPath.substring(0, extIdx) : targetPath;
+					        const ext = extIdx > 0 ? targetPath.substring(extIdx) : '';
+					        while (this.app.vault.getAbstractFileByPath(targetPath)) {
+					            targetPath = `${base} (Conflict ${counter})${ext}`;
+					            counter++;
+					        }
+					    }
+
+	    // 3. Write directly to disk using the mutex lock we already hold
+	    ObsidianDiskReconciler.suppressPath(targetPath);
+	    try {
+	        const parentPath = targetPath.substring(0, targetPath.lastIndexOf('/'));
+	        if (parentPath && parentPath !== targetPath) {
+	            await this.ensureFolderExists(parentPath);
+	        }
+	        await this.app.vault.create(targetPath, content || '');
+	    } catch (e) {
+	        console.error('[ObsidianDiskReconciler] Failed to rehydrate missing moved file:', e);
+	    } finally {
+	        ObsidianDiskReconciler.unsuppressPath(targetPath);
+	    }
+	    return;
 					}
 
 	                let targetPath = payload.newPath;

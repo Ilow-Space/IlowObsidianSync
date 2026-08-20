@@ -208,8 +208,9 @@ export class NetworkOrchestrator {
 	                    isFolder: false,
 	                    content: localContent || ''
 	                });
+	                this.vfsController.flushPendingPush();
 	                documentId = this.vfsController.getUuidForPath(path);
-	                if (documentId && localContent) {
+	                if (documentId && localContent !== null) {
 	                    const updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent);
 	                    if (updateBinary) {
 	                        await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
@@ -223,6 +224,16 @@ export class NetworkOrchestrator {
 	                    if (updateBinary) {
 	                        await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
 	                    }
+	                } else {
+	                    // If CRDT text is identical to localContent but hasn't been pushed remotely yet (lastId == 0), force push snapshot!
+	                    const lastSyncId = this.fileLastSyncIds.get(documentId) || 0;
+	                    const remoteLatestId = bulkUpdates[documentId] || 0;
+	                    if (lastSyncId === 0 && remoteLatestId === 0 && localContent.length > 0) {
+	                        const snapshotBytes = doc.export({ mode: 'snapshot' });
+	                        if (snapshotBytes && snapshotBytes.length > 0) {
+	                            await this.handleLocalDeltaReadyForPush({ documentId, updateBinary: snapshotBytes, path });
+	                        }
+	                    }
 	                }
 	            }
 	        }
@@ -235,6 +246,7 @@ export class NetworkOrchestrator {
 	            throw new Error(this.lastErrorMessage || 'Sync failed');
 	        }
 
+	        this.vfsController.flushPendingPush();
 	        this.vfsController.processRemoteVfsUpdates();
 
 	        const activeFiles = this.vfsController.getActiveFiles().filter(file => file.type !== 'folder');
