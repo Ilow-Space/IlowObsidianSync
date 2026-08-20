@@ -700,13 +700,13 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
         await browser.pause(1500);
 
         // Verify PostgreSQL server accumulated new sequential update IDs higher than Vault B's lastId
-        const serverLatestState = await browser.executeAsync(async (url, docUuid, done) => {
+        const serverLatestState = (await browser.executeAsync(async (url, docUuid, done) => {
             const plugin = (window as any).app.plugins.plugins['ilow-sync'];
             const headers = plugin.getRemoteStore().headers;
             const res = await fetch(`${url}/api/snapshots/${docUuid}/latest_id`, { headers });
             const data = await res.json();
             done(data.id);
-        }, BACKEND_URL, initialSyncState.docUuid);
+        }, BACKEND_URL, initialSyncState.docUuid)) as number;
 
         expect(serverLatestState).toBeGreaterThan(initialSyncState.initialLastSyncId);
 
