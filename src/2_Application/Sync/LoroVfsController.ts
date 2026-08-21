@@ -169,6 +169,14 @@ export class LoroVfsController {
 		if (payload.path.startsWith('.') || payload.path === '/') return;
 		if (this.pathToUuid.has(payload.path)) return;
 
+		// 🚨 ARCHITECTURAL FIX: Prevent Ghost Resurrections
+		// If Obsidian fires a native 'create' event on an old path during the disk queue delay,
+		// ignore it completely so we don't push a duplicate node back to the server.
+		const filename = payload.path.substring(payload.path.lastIndexOf('/') + 1);
+		if (this.findMovedFileMatch(filename, payload.path)) {
+			return;
+		}
+
 		this.captureFrontierIfNeeded();
 
 		const { dirPath, name } = this.splitPath(payload.path);
@@ -285,6 +293,10 @@ export class LoroVfsController {
 			} catch (e) {}
 		}
 
+		// Track seen paths to detect and soft-delete duplicate CRDT nodes
+		const seenPaths = new Map<string, { uuid: string; nodeId: any }>();
+		let hasTreeMutations = false;
+
 		for (const node of nodes) {
 			try {
 				if (node.isDeleted() || node.data.get('isDeleted') === true) continue;
@@ -293,11 +305,31 @@ export class LoroVfsController {
 				if (!nodeUuid) continue;
 
 				const resolvedPath = this.resolvePathForNode(node, nodeMap);
-				if (resolvedPath) {
-					this.pathToUuid.set(resolvedPath, nodeUuid);
-					this.uuidToLastKnownPath.set(nodeUuid, resolvedPath);
+				if (!resolvedPath) continue;
+
+				// 🚨 DEDUPLICATION FIX: If another active CRDT node already claims this exact path
+				if (seenPaths.has(resolvedPath)) {
+					const existing = seenPaths.get(resolvedPath)!;
+					
+					// Keep the existing node in cache, soft-delete this duplicate node from LoroTree
+					node.data.set('isDeleted', true);
+					try {
+						this.loroTree.delete(node.id);
+					} catch (e) {}
+					
+					hasTreeMutations = true;
+					console.warn(`[VFS Cache] Purged duplicate CRDT node (${nodeUuid}) for path: "${resolvedPath}"`);
+					continue;
 				}
+
+				seenPaths.set(resolvedPath, { uuid: nodeUuid, nodeId: node.id });
+				this.pathToUuid.set(resolvedPath, nodeUuid);
+				this.uuidToLastKnownPath.set(nodeUuid, resolvedPath);
 			} catch (e) {}
+		}
+
+		if (hasTreeMutations) {
+			this.treeDoc.commit();
 		}
 	}
 

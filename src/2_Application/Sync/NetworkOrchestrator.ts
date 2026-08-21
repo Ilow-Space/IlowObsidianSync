@@ -153,16 +153,29 @@ export class NetworkOrchestrator {
 	}
 
 	private async handleLocalFileModified(payload: { path: string; content: string }): Promise<void> {
-
 		let documentId = this.vfsController.getUuidForPath(payload.path);
+		
 		if (!documentId) {
-			this.eventBus.emit('LocalFileCreated', {
-				path: payload.path,
-				isFolder: false,
-				content: payload.content
-			});
-			documentId = this.vfsController.getUuidForPath(payload.path);
+			// 🚨 ARCHITECTURAL FIX: Prevent Ghost Resurrections
+			// Check if this path is just an old location of a file that was moved remotely,
+			// but hasn't physically finished moving on the disk yet.
+			const filename = payload.path.substring(payload.path.lastIndexOf('/') + 1);
+			const movedMatch = this.vfsController.findMovedFileMatch(filename, payload.path);
+
+			if (movedMatch) {
+				// The file is just lagging. Use the correct UUID to apply the text update,
+				// and DO NOT emit a LocalFileCreated event.
+				documentId = movedMatch.uuid;
+			} else {
+				this.eventBus.emit('LocalFileCreated', {
+					path: payload.path,
+					isFolder: false,
+					content: payload.content
+				});
+				documentId = this.vfsController.getUuidForPath(payload.path);
+			}
 		}
+		
 		if (!documentId) return;
 
 		const updateBinary = await this.crdtEngine.handleLocalChange(documentId, payload.content);
@@ -239,6 +252,7 @@ export class NetworkOrchestrator {
 	        if (this.diskReconciler) {
 	            await this.diskReconciler.onIdle();
 	        }
+			console.log('[NetworkOrchestrator] 🟢 REMOTE CHANGES PULLED AND SETTLED. Now ingesting and pushing local offline state...');
 
 	        // --- THEN INGEST OFFLINE LOCAL MODIFICATIONS AND CREATIONS ---
 	        await this.ingestLocalOfflineNotes(bulkUpdates);

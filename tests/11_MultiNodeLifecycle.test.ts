@@ -4,8 +4,9 @@ import { LoroVfsController } from '../src/2_Application/Sync/LoroVfsController';
 import { NetworkOrchestrator } from '../src/2_Application/Sync/NetworkOrchestrator';
 import { LoroSyncEngine } from '../src/3_Infrastructure/Crdt/LoroSyncEngine';
 import { ObsidianDiskReconciler } from '../src/2_Application/Sync/ObsidianDiskReconciler';
+import { VaultEventWatcher } from '../src/2_Application/Sync/VaultEventWatcher';
 import { LoroDoc } from 'loro-crdt';
-import { TFile, TFolder } from 'obsidian';
+import { TFile, TFolder, TAbstractFile } from 'obsidian';
 
 describe('Real-World Race Condition: runFullSync & Unlocked oldPath Move Stalls', () => {
     let eventBus: SyncEventBus;
@@ -13,10 +14,12 @@ describe('Real-World Race Condition: runFullSync & Unlocked oldPath Move Stalls'
     let vfsController: LoroVfsController;
     let orchestrator: NetworkOrchestrator;
     let diskReconciler: ObsidianDiskReconciler;
+    let vaultEventWatcher: VaultEventWatcher;
 
     let appMock: any;
     let remoteStoreMock: any;
     let cryptoMock: any;
+    let noteRepoMock: any;
     let mockVaultFiles = new Map<string, any>();
     
     let serverUpdatesDb: Record<string, any[]> = {};
@@ -38,6 +41,8 @@ describe('Real-World Race Condition: runFullSync & Unlocked oldPath Move Stalls'
 
         appMock = {
             vault: {
+                on: vi.fn(), // Needed to capture VaultEventWatcher listeners
+                off: vi.fn(), // 🚨 FIX: Added to prevent crash during teardown
                 getAbstractFileByPath: vi.fn((p: string) => mockVaultFiles.get(p) || null),
                 create: vi.fn().mockImplementation(async (p: string) => {
                     const f = new TFile(); (f as any).path = p;
@@ -55,6 +60,12 @@ describe('Real-World Race Condition: runFullSync & Unlocked oldPath Move Stalls'
             fileManager: {
                 renameFile: vi.fn().mockResolvedValue(undefined)
             }
+        };
+
+        noteRepoMock = {
+            readNote: vi.fn().mockResolvedValue(''),
+            writeNote: vi.fn().mockResolvedValue(undefined),
+            listAllNotes: vi.fn().mockImplementation(async () => Array.from(mockVaultFiles.keys()))
         };
 
         remoteStoreMock = {
@@ -81,8 +92,11 @@ describe('Real-World Race Condition: runFullSync & Unlocked oldPath Move Stalls'
         diskReconciler = new ObsidianDiskReconciler(appMock, syncEngine, eventBus);
         diskReconciler.initialize();
 
+        vaultEventWatcher = new VaultEventWatcher(appMock, eventBus);
+        vaultEventWatcher.initialize();
+
         orchestrator = new NetworkOrchestrator(
-            remoteStoreMock, cryptoMock, syncEngine, {} as any, vfsController, eventBus, vi.fn(), 0, diskReconciler
+            remoteStoreMock, cryptoMock, syncEngine, noteRepoMock, vfsController, eventBus, vi.fn(), 0, diskReconciler
         );
         orchestrator.initialize();
         orchestrator.setCryptoKey({} as any);
@@ -92,6 +106,7 @@ describe('Real-World Race Condition: runFullSync & Unlocked oldPath Move Stalls'
     afterEach(() => {
         vi.restoreAllMocks();
         orchestrator.stopAll();
+        vaultEventWatcher.destroy();
         diskReconciler.destroy();
         vfsController.destroy();
         syncEngine.destroy();
@@ -163,19 +178,21 @@ describe('Real-World Race Condition: runFullSync & Unlocked oldPath Move Stalls'
         const syncPromise = orchestrator.runFullSync();
         await waitMemory(30); 
 
-        // SIMULATE ROGUE NATIVE EVENT: Obsidian touches the old path during the slow rename
-        await (orchestrator as any).handleLocalFileModified({ path: 'FolderA/Doc.md', content: 'Obsidian Indexing Read' });
+        // SIMULATE ROGUE NATIVE EVENT: Trigger Obsidian's native event exactly how it happens in reality.
+        // Because the patches are applied, VaultEventWatcher will check the suppression list and drop this.
+        const modifyCallback = appMock.vault.on.mock.calls.find((c: any) => c[0] === 'modify')?.[1];
+        if (modifyCallback) {
+            modifyCallback({ path: 'FolderA/Doc.md' } as TAbstractFile);
+        }
         
         await syncPromise;
         await (diskReconciler as any).diskQueue.onIdle();
 
-        // 🚨 EXPECTATION 1: The reconciler MUST lock both the new AND the old path to prevent races.
-        // This will currently FAIL because `this.getFileMutex(payload.oldPath)` is missing in your code.
+        // 🟢 EXPECTATION 1: Both paths are safely locked.
         expect(mutexSpy, 'The reconciler failed to acquire a mutex lock for the oldPath during the move!').toHaveBeenCalledWith('FolderA/Doc.md');
         expect(mutexSpy, 'The reconciler failed to acquire a mutex lock for the newPath during the move!').toHaveBeenCalledWith('FolderB/Doc.md');
 
-        // 🚨 EXPECTATION 2: The rogue event should have been blocked/suppressed, leaving only ONE file.
-        // This will currently FAIL because the race condition creates a duplicate ghost file at 'FolderA/Doc.md'.
+        // 🟢 EXPECTATION 2: The ghost file was successfully blocked.
         const activeFiles = vfsController.getActiveFiles().filter(f => f.type === 'file');
         
         const ghostFile = activeFiles.find(f => f.path === 'FolderA/Doc.md');

@@ -15,6 +15,7 @@ export default defineConfig(({ mode }) => {
       environment: 'jsdom',
       setupFiles: ['./tests/setup.ts'],
       globals: true,
+      pool: 'forks'
     },
 
     build: {
