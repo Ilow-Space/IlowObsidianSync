@@ -222,13 +222,22 @@ export class ObsidianDiskReconciler {
 								await this.ensureFolderExists(parentPath);
 							}
 							await this.app.fileManager.renameFile(file, targetPath);
+
+							// 🚨 HANDLE CONTINUITY: Write CRDT text directly to the in-memory TFile handle
+							const doc = await this.syncEngine.getOrCreateDoc(payload.uuid);
+							const crdtContent = doc.getText('markdown').toString();
+							if (crdtContent && file instanceof TFile) {
+								ObsidianDiskReconciler.suppressPath(targetPath);
+								await this.app.vault.modify(file, crdtContent);
+								ObsidianDiskReconciler.unsuppressPath(targetPath);
+							}
 						} catch (e) {
 							console.error('[ObsidianDiskReconciler] Failed to rename file:', e);
 						} finally {
-							setTimeout(() => {
-								for (const p of pathsToSuppress) ObsidianDiskReconciler.unsuppressPath(p);
-							}, 1000);
-						}
+	                        setTimeout(() => {
+	                            for (const p of pathsToSuppress) ObsidianDiskReconciler.unsuppressPath(p);
+	                        }, 1000);
+	                    }
 					});
 				});
 			} finally {
@@ -270,11 +279,16 @@ export class ObsidianDiskReconciler {
 			const mutex = this.getFileMutex(payload.path);
 			try {
 				await mutex.runExclusive(async () => {
-					const file = this.app.vault.getAbstractFileByPath(payload.path);
+					// 🚨 CACHE FALLBACK SCAN: If cache map is lagging, search vault files array directly
+					let file = this.app.vault.getAbstractFileByPath(payload.path);
+					if (!file) {
+						file = this.app.vault.getFiles().find(f => f.path === payload.path) || null;
+					}
+
 					if (file && file instanceof TFile) {
 						try {
 							const currentDiskContent = await this.app.vault.read(file);
-							if (currentDiskContent !== payload.content) {
+							if (currentDiskContent.replace(/\r\n/g, '\n') !== payload.content.replace(/\r\n/g, '\n')) {
 								ObsidianDiskReconciler.suppressPath(payload.path);
 								await this.app.vault.modify(file, payload.content);
 							}
