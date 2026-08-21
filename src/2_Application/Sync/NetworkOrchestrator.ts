@@ -24,6 +24,7 @@ export class NetworkOrchestrator {
 	private activeSubscriptions = new Map<string, () => void>();
 	private pendingRetries: LocalDeltaReadyForPush[] = [];
 	private isInitialized = false;
+	private syncStartTime = 0;
 
 	private activeTasks = new Set<string>();
 	private statusIdleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -153,19 +154,25 @@ export class NetworkOrchestrator {
 	    }
 	}
 
+	private async safeWriteNote(path: string, content: string): Promise<void> {
+		ObsidianDiskReconciler.suppressPath(path);
+		try {
+			await this.noteRepo.writeNote(path, content);
+		} finally {
+			ObsidianDiskReconciler.unsuppressPath(path, 1500);
+		}
+	}
+
 	private async handleLocalFileModified(payload: { path: string; content: string }): Promise<void> {
+		if (this.isSyncingFull || ObsidianDiskReconciler.suppressedPaths.has(payload.path)) return;
+
 		let documentId = this.vfsController.getUuidForPath(payload.path);
 		
 		if (!documentId) {
-			// 🚨 ARCHITECTURAL FIX: Prevent Ghost Resurrections
-			// Check if this path is just an old location of a file that was moved remotely,
-			// but hasn't physically finished moving on the disk yet.
 			const filename = payload.path.substring(payload.path.lastIndexOf('/') + 1);
 			const movedMatch = this.vfsController.findMovedFileMatch(filename, payload.path);
 
 			if (movedMatch) {
-				// The file is just lagging. Use the correct UUID to apply the text update,
-				// and DO NOT emit a LocalFileCreated event.
 				documentId = movedMatch.uuid;
 			} else {
 				this.eventBus.emit('LocalFileCreated', {
@@ -369,16 +376,14 @@ export class NetworkOrchestrator {
 		const crdtContent = doc.getText('markdown').toString();
 		if (localContent === crdtContent) return;
 
-		// 🚨 BASELINE CHECK: If local disk matches the CRDT state BEFORE the remote pull,
-		// the user did NOT edit this note offline. Simply update disk with remote edits and DO NOT push!
 		const baselineContent = this.prePullBaselineContents.get(documentId);
 		if (baselineContent !== undefined && localContent.trim() === baselineContent.trim()) {
-			await this.noteRepo.writeNote(path, crdtContent);
+			await this.safeWriteNote(path, crdtContent);
 			return;
 		}
 
 		if (crdtContent.length > 0 && crdtContent.includes(localContent.trim())) {
-			await this.noteRepo.writeNote(path, crdtContent);
+			await this.safeWriteNote(path, crdtContent);
 			return;
 		}
 

@@ -26,10 +26,10 @@ export class ObsidianDiskReconciler {
 		ObsidianDiskReconciler.suppressedPaths.add(path);
 	}
 
-	public static unsuppressPath(path: string): void {
+	public static unsuppressPath(path: string, delayMs = 1500): void {
 		setTimeout(() => {
 			ObsidianDiskReconciler.suppressedPaths.delete(path);
-		}, 50);
+		}, delayMs);
 	}
 
 	private getFileMutex(path: string): Mutex {
@@ -48,15 +48,20 @@ export class ObsidianDiskReconciler {
 		}
 	}
 
-	private async ensureFolderExists(path: string): Promise<void> {
-		if (!path || path === '/') return;
-		const parts = path.split('/');
-		let current = '';
+	private async ensureFolderExists(folderPath: string): Promise<void> {
+		if (!folderPath || folderPath === '.' || folderPath === '/') return;
+		const parts = folderPath.split('/').filter(Boolean);
+		let currentPath = '';
+
 		for (const part of parts) {
-			current = current ? `${current}/${part}` : part;
-			const folder = this.app.vault.getAbstractFileByPath(current);
-			if (!folder) {
-				try { await this.app.vault.createFolder(current); } catch (e) {}
+			currentPath = currentPath ? `${currentPath}/${part}` : part;
+			const existing = this.app.vault.getAbstractFileByPath(currentPath);
+			if (!existing) {
+				try {
+					await this.app.vault.createFolder(currentPath);
+				} catch (e) {
+					// Ignore if created concurrently or already exists in vault
+				}
 			}
 		}
 	}
