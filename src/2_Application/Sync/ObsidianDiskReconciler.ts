@@ -4,7 +4,6 @@ import PQueue from 'p-queue';
 import { SyncEventBus } from './SyncEventBus';
 import { LoroSyncEngine } from '@infrastructure/Crdt/LoroSyncEngine';
 
-
 export class ObsidianDiskReconciler {
 	private fileLocks = new Map<string, Mutex>();
 	private diskQueue = new PQueue({ concurrency: 5 });
@@ -49,7 +48,6 @@ export class ObsidianDiskReconciler {
 		}
 	}
 
-	// FIX: Safely and recursively generates deep subfolders
 	private async ensureFolderExists(path: string): Promise<void> {
 		if (!path || path === '/') return;
 		const parts = path.split('/');
@@ -58,11 +56,38 @@ export class ObsidianDiskReconciler {
 			current = current ? `${current}/${part}` : part;
 			const folder = this.app.vault.getAbstractFileByPath(current);
 			if (!folder) {
-				try {
-					await this.app.vault.createFolder(current);
-				} catch (e) {}
+				try { await this.app.vault.createFolder(current); } catch (e) {}
 			}
 		}
+	}
+
+	private resolveConflictPath(targetPath: string): string {
+		let counter = 1;
+		const extIdx = targetPath.lastIndexOf('.');
+		const base = extIdx > 0 ? targetPath.substring(0, extIdx) : targetPath;
+		const ext = extIdx > 0 ? targetPath.substring(extIdx) : '';
+		let resolvedPath = targetPath;
+	    
+		while (this.app.vault.getAbstractFileByPath(resolvedPath)) {
+			resolvedPath = `${base} (Conflict ${counter})${ext}`;
+			counter++;
+		}
+		return resolvedPath;
+	}
+
+	private getPathsToSuppress(oldPath: string, newPath: string): string[] {
+		const paths = [oldPath, newPath];
+		const prefix = oldPath.endsWith('/') ? oldPath : oldPath + '/';
+		const allFiles = (this.app.vault as any).getAllLoadedFiles ? (this.app.vault as any).getAllLoadedFiles() : [];
+	    
+		for (const f of allFiles) {
+			if (f.path && f.path.startsWith(prefix)) {
+				paths.push(f.path);
+				const suffix = f.path.substring(oldPath.length);
+				paths.push(newPath + suffix);
+			}
+		}
+		return paths;
 	}
 
 	private async handleCrdtNodeCreated(payload: { uuid: string; path: string; isFolder: boolean; content?: string }): Promise<void> {
@@ -75,35 +100,17 @@ export class ObsidianDiskReconciler {
 					let isConflict = false;
 
 					if (existing) {
-						let isIdentical = false;
-
-						if (!payload.isFolder && existing instanceof TFile) {
-							try {
-								const localContent = await this.app.vault.read(existing);
-								const remoteContent = payload.content || '';
-								isIdentical = (localContent === remoteContent);
-							} catch (e) {}
-						}
-
-						if (isIdentical) {
-							this.eventBus.emit('RebalancePathUuid', {
-								path: payload.path,
-								remoteUuid: payload.uuid
-							});
-						} else {
-							isConflict = true;
-							let counter = 1;
-							const extIdx = payload.path.lastIndexOf('.');
-							const hasExt = extIdx > 0 && !payload.isFolder;
-							const base = hasExt ? payload.path.substring(0, extIdx) : payload.path;
-							const ext = hasExt ? payload.path.substring(extIdx) : '';
-
-							while (existing) {
-								targetPath = `${base} (Conflict ${counter})${ext}`;
-								existing = this.app.vault.getAbstractFileByPath(targetPath);
-								counter++;
+						// 🚨 PATH COLLISION SELF-HEALING: Compare identical texts and purge dupe node
+						if (!payload.isFolder) {
+							const diskContent = await this.app.vault.read(existing as any).catch(() => null);
+							if (diskContent === (payload.content || '')) {
+							    this.eventBus.emit('RebalancePathUuid' as any, { remoteUuid: payload.uuid, path: targetPath });
+							    return; // Content is identical, abort file creation
 							}
 						}
+
+						isConflict = true;
+						targetPath = this.resolveConflictPath(targetPath);
 					}
 
 					ObsidianDiskReconciler.suppressPath(targetPath);
@@ -115,17 +122,9 @@ export class ObsidianDiskReconciler {
 							if (parentPath && parentPath !== targetPath) {
 								await this.ensureFolderExists(parentPath);
 							}
-
-							const fileObj = this.app.vault.getAbstractFileByPath(targetPath);
-							if (fileObj && fileObj instanceof TFile) {
-							// Overwrite identical disk file with remote priority content
-								await this.app.vault.modify(fileObj, payload.content || '');
-							} else {
-								await this.app.vault.create(targetPath, payload.content || '');
-							}
+							await this.app.vault.create(targetPath, payload.content || '');
 						}
 
-						// Only trigger local rename emission if an actual conflict path was created
 						if (isConflict) {
 							setTimeout(() => {
 								this.eventBus.emit('LocalFileRenamed', {
@@ -135,7 +134,7 @@ export class ObsidianDiskReconciler {
 							}, 50);
 						}
 					} catch (e) {
-						console.error('[ObsidianDiskReconciler] Failed to create/reconcile file or folder:', e);
+						console.error('[ObsidianDiskReconciler] Failed to create file/folder:', e);
 					} finally {
 						ObsidianDiskReconciler.unsuppressPath(targetPath);
 					}
@@ -147,104 +146,98 @@ export class ObsidianDiskReconciler {
 	}
 
 	private async handleCrdtNodeMoved(payload: { uuid: string; oldPath: string; newPath: string }): Promise<void> {
-	    console.log(`[Reconciler Inbound Move Received] UUID: ${payload.uuid} | "${payload.oldPath}" -> "${payload.newPath}"`);
-	    return this.diskQueue.add(async () => {
-	        const oldMutex = this.getFileMutex(payload.oldPath);
-	        const newMutex = this.getFileMutex(payload.newPath);
+		console.log(`[Reconciler Inbound Move Received] UUID: ${payload.uuid} | "${payload.oldPath}" -> "${payload.newPath}"`);
+		return this.diskQueue.add(async () => {
+			const oldMutex = this.getFileMutex(payload.oldPath);
+			const newMutex = this.getFileMutex(payload.newPath);
 	        
-	        try {
-	            await oldMutex.runExclusive(async () => {
-	                await newMutex.runExclusive(async () => {
-	                    const file = this.app.vault.getAbstractFileByPath(payload.oldPath);
+			try {
+				await oldMutex.runExclusive(async () => {
+					await newMutex.runExclusive(async () => {
+						const file = this.app.vault.getAbstractFileByPath(payload.oldPath);
 	                    
-	                    if (!file) {
-						    let targetPath = payload.newPath;
-						    let targetExists = this.app.vault.getAbstractFileByPath(targetPath);
+						if (!file) {
+							let targetPath = payload.newPath;
+							let targetExists = this.app.vault.getAbstractFileByPath(targetPath);
 						    
-						    if (targetExists) return;
+							// If old path is missing but file is already at new path, it was a cascading rename.
+							if (targetExists) return; 
 
-						    const doc = await this.syncEngine.getOrCreateDoc(payload.uuid);
-						    const content = doc.getText('markdown').toString();
-						    this.syncEngine.removeDoc(payload.uuid);
+							const doc = await this.syncEngine.getOrCreateDoc(payload.uuid);
+							const content = doc.getText('markdown').toString();
+							this.syncEngine.removeDoc(payload.uuid);
 										
-						    ObsidianDiskReconciler.suppressPath(targetPath);
-						    try {
-						        const parentPath = targetPath.substring(0, targetPath.lastIndexOf('/'));
-						        if (parentPath && parentPath !== targetPath) {
-						            await this.ensureFolderExists(parentPath);
-						        }
-						        await this.app.vault.create(targetPath, content || '');
-						    } catch (e) {
-						        console.error('[ObsidianDiskReconciler] Failed to rehydrate missing moved file:', e);
-						    } finally {
-						        ObsidianDiskReconciler.unsuppressPath(targetPath);
-						    }
-						    return;
+							if (targetExists) {
+								targetPath = this.resolveConflictPath(targetPath);
+							}
+
+							ObsidianDiskReconciler.suppressPath(targetPath);
+							try {
+								const parentPath = targetPath.substring(0, targetPath.lastIndexOf('/'));
+								if (parentPath && parentPath !== targetPath) {
+									await this.ensureFolderExists(parentPath);
+								}
+								await this.app.vault.create(targetPath, content || '');
+							} catch (e) {
+								console.error('[ObsidianDiskReconciler] Failed to rehydrate missing moved file:', e);
+							} finally {
+								ObsidianDiskReconciler.unsuppressPath(targetPath);
+							}
+							return;
 						}
 
-	                    let targetPath = payload.newPath;
-	                    let targetExists = this.app.vault.getAbstractFileByPath(targetPath);
+						let targetPath = payload.newPath;
+						let targetExists = this.app.vault.getAbstractFileByPath(targetPath);
 
-	                    if (targetExists && targetExists.path !== payload.oldPath) {
-	                        if ((targetExists as any).stat?.size === 0) {
-	                            try { await this.app.vault.trash(targetExists, true); } catch (e) {}
-	                        } else {
-	                            targetPath = this.resolveConflictPath(targetPath);
-	                        }
-	                    }
+						if (targetExists && targetExists.path !== payload.oldPath) {
+							if ((targetExists as any).stat?.size === 0) {
+								try { await this.app.vault.trash(targetExists, true); } catch (e) {}
+							} else {
+								// 🚨 PATH COLLISION SELF-HEALING FOR MOVES
+								const doc = await this.syncEngine.getOrCreateDoc(payload.uuid);
+								const incomingContent = doc.getText('markdown').toString();
+								const diskContent = await this.app.vault.read(targetExists as any).catch(() => null);
+                                
+								if (diskContent === incomingContent) {
+								    this.eventBus.emit('RebalancePathUuid' as any, { remoteUuid: payload.uuid, path: targetPath });
+								    return;
+								}
 
-	                    const pathsToSuppress = this.getPathsToSuppress(payload.oldPath, targetPath);
-	                    for (const p of pathsToSuppress) ObsidianDiskReconciler.suppressPath(p);
+								targetPath = this.resolveConflictPath(targetPath);
+								setTimeout(() => {
+									this.eventBus.emit('LocalFileRenamed', {
+										oldPath: payload.newPath,
+										newPath: targetPath
+									});
+								}, 50);
+							}
+						}
 
-	                    try {
-	                        const parentPath = targetPath.substring(0, targetPath.lastIndexOf('/'));
-	                        if (parentPath && parentPath !== targetPath) {
-	                            await this.ensureFolderExists(parentPath);
-	                        }
-	                        await this.app.fileManager.renameFile(file, targetPath);
-	                    } catch (e) {
-	                        console.error('[ObsidianDiskReconciler] Failed to rename file:', e);
-	                    } finally {
-	                        setTimeout(() => {
-	                            for (const p of pathsToSuppress) ObsidianDiskReconciler.unsuppressPath(p);
-	                        }, 1000);
-	                    }
-	                });
-	            });
-	        } finally {
-	            this.releaseFileMutex(payload.newPath);
-	            this.releaseFileMutex(payload.oldPath);
-	        }
-	    });
+						const pathsToSuppress = this.getPathsToSuppress(payload.oldPath, targetPath);
+						for (const p of pathsToSuppress) ObsidianDiskReconciler.suppressPath(p);
+
+						try {
+							const parentPath = targetPath.substring(0, targetPath.lastIndexOf('/'));
+							if (parentPath && parentPath !== targetPath) {
+								await this.ensureFolderExists(parentPath);
+							}
+							await this.app.fileManager.renameFile(file, targetPath);
+						} catch (e) {
+							console.error('[ObsidianDiskReconciler] Failed to rename file:', e);
+						} finally {
+							setTimeout(() => {
+								for (const p of pathsToSuppress) ObsidianDiskReconciler.unsuppressPath(p);
+							}, 1000);
+						}
+					});
+				});
+			} finally {
+				this.releaseFileMutex(payload.newPath);
+				this.releaseFileMutex(payload.oldPath);
+			}
+		});
 	}
-	private resolveConflictPath(targetPath: string): string {
-	    let counter = 1;
-	    const extIdx = targetPath.lastIndexOf('.');
-	    const base = extIdx > 0 ? targetPath.substring(0, extIdx) : targetPath;
-	    const ext = extIdx > 0 ? targetPath.substring(extIdx) : '';
-	    let resolvedPath = targetPath;
-	    
-	    while (this.app.vault.getAbstractFileByPath(resolvedPath)) {
-	        resolvedPath = `${base} (Conflict ${counter})${ext}`;
-	        counter++;
-	    }
-	    return resolvedPath;
-	}
 
-	private getPathsToSuppress(oldPath: string, newPath: string): string[] {
-	    const paths = [oldPath, newPath];
-	    const prefix = oldPath.endsWith('/') ? oldPath : oldPath + '/';
-	    const allFiles = (this.app.vault as any).getAllLoadedFiles ? (this.app.vault as any).getAllLoadedFiles() : [];
-	    
-	    for (const f of allFiles) {
-	        if (f.path && f.path.startsWith(prefix)) {
-	            paths.push(f.path);
-	            const suffix = f.path.substring(oldPath.length);
-	            paths.push(newPath + suffix);
-	        }
-	    }
-	    return paths;
-	}
 	private async handleCrdtNodeSoftDeleted(payload: { uuid: string; path: string }): Promise<void> {
 		return this.diskQueue.add(async () => {
 			const mutex = this.getFileMutex(payload.path);
