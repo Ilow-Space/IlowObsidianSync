@@ -1,81 +1,105 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Configuration Defaults
-REPO_SLUG="${1:-your-org/ilow-sync}"  # Pass repo as $1 or edit default
+REPO_SLUG="Ilow-Space/IlowObsidianSync"
+SSH_REPO="git@github.com:Ilow-Space/IlowObsidianSync.git"
 INSTALL_DIR="/opt/ilow-backend"
 DB_NAME="ilow_db"
 DB_USER="ilow_user"
-PORT="3001"                            # Matches default backend port[cite: 2]
+PORT="3001"
 
 if [ "$EUID" -ne 0 ]; then
   echo "[-] Please run this script with sudo or as root."
   exit 1
 fi
 
-echo "[+] Step 1: Checking and installing PostgreSQL..."
-if ! command -v psql &> /dev/null; then
-    echo "[*] PostgreSQL not found. Installing PostgreSQL and dependencies..."
-    apt-get update
-    apt-get install -y postgresql postgresql-contrib curl jq
-else
-    echo "[*] PostgreSQL is already installed."
-fi
+echo "[+] Step 1: Installing system dependencies..."
+apt-get update
+apt-get install -y postgresql postgresql-contrib curl jq git
 
 systemctl enable postgresql
 systemctl start postgresql
 
-echo "[+] Step 2: Generating secrets and credentials..."
+echo "[+] Step 2: Generating database credentials..."
 DB_PASS=$(openssl rand -hex 16)
 ADMIN_KEY=$(openssl rand -hex 32)
 
-echo "[+] Step 3: Provisioning PostgreSQL user and database..."
-# Check and create user
+echo "[+] Step 3: Provisioning PostgreSQL database..."
 USER_EXISTS=$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'")
 if [ "$USER_EXISTS" != "1" ]; then
-    echo "[*] Creating database user '$DB_USER'..."
     sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';"
 else
-    echo "[*] User '$DB_USER' exists. Updating password..."
     sudo -u postgres psql -c "ALTER USER $DB_USER WITH PASSWORD '$DB_PASS';"
 fi
 
-# Check and create database
 DB_EXISTS=$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'")
 if [ "$DB_EXISTS" != "1" ]; then
-    echo "[*] Creating database '$DB_NAME'..."
     sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;"
 fi
 
-echo "[+] Step 4: Granting database privileges..."
+echo "[+] Step 4: Configuring permissions..."
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;"
 sudo -u postgres psql -d "$DB_NAME" -c "GRANT ALL ON SCHEMA public TO $DB_USER;"
 
-echo "[+] Step 5: Testing database connectivity..."
+echo "[+] Step 5: Testing PostgreSQL connection..."
 if PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1;" > /dev/null 2>&1; then
-    echo "[*] Database connection test successful!"
+    echo "[*] Database connection verified!"
 else
     echo "[-] Database connection failed."
     exit 1
 fi
 
-echo "[+] Step 6: Setting up application directory at $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR"
+DOWNLOAD_SUCCESS=0
 
-echo "[+] Step 7: Downloading latest release binary from GitHub ($REPO_SLUG)..."
-LATEST_RELEASE_JSON=$(curl -sL "https://api.github.com/repos/$REPO_SLUG/releases/latest")
-DOWNLOAD_URL=$(echo "$LATEST_RELEASE_JSON" | jq -r '.assets[] | select(.name=="ilow-backend") | .browser_download_url')
+echo "[+] Step 6: Obtaining backend binary..."
 
-if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" == "null" ]; then
-    echo "[-] Failed to fetch 'ilow-backend' asset URL from repo '$REPO_SLUG'."
-    echo "    Ensure GitHub Release exists with an uploaded 'ilow-backend' binary."
-    exit 1
+# Method 1: Try GitHub CLI if authenticated
+if command -v gh &> /dev/null && gh auth status &>/dev/null; then
+    echo "[*] Attempting download via GitHub CLI..."
+    if gh release download --repo "$REPO_SLUG" --pattern "ilow-backend" --dir "$INSTALL_DIR" --clobber &>/dev/null; then
+        DOWNLOAD_SUCCESS=1
+    fi
 fi
 
-curl -sL "$DOWNLOAD_URL" -o "$INSTALL_DIR/ilow-backend"
+# Method 2: Try direct GitHub download
+if [ "$DOWNLOAD_SUCCESS" -ne 1 ]; then
+    echo "[*] Trying direct release URL download..."
+    CURL_AUTH=()
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        CURL_AUTH=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    fi
+    DIRECT_URL="https://github.com/${REPO_SLUG}/releases/latest/download/ilow-backend"
+    HTTP_CODE=$(curl -sL -w "%{http_code}" "${CURL_AUTH[@]}" "$DIRECT_URL" -o "$INSTALL_DIR/ilow-backend" || true)
+    if [ "$HTTP_CODE" -eq 200 ] && [ -s "$INSTALL_DIR/ilow-backend" ]; then
+        DOWNLOAD_SUCCESS=1
+    fi
+fi
+
+# Method 3: Fallback - Compile directly from source using server SSH key
+if [ "$DOWNLOAD_SUCCESS" -ne 1 ]; then
+    echo "[!] Release download skipped or unavailable."
+    echo "[*] Falling back to local compilation via Go and SSH key..."
+
+    if ! command -v go &> /dev/null; then
+        echo "[*] Installing Go compiler..."
+        apt-get install -y golang-go
+    fi
+
+    BUILD_TMP=$(mktemp -d)
+    echo "[*] Cloning repository via SSH ($SSH_REPO)..."
+    git clone "$SSH_REPO" "$BUILD_TMP"
+    
+    echo "[*] Compiling backend binary..."
+    (cd "$BUILD_TMP/backend" && CGO_ENABLED=0 go build -ldflags="-s -w" -o "$INSTALL_DIR/ilow-backend")
+    
+    rm -rf "$BUILD_TMP"
+    DOWNLOAD_SUCCESS=1
+fi
+
 chmod +x "$INSTALL_DIR/ilow-backend"
 
-echo "[+] Step 8: Generating secure .env configuration..."
+echo "[+] Step 7: Generating secure .env file..."
 cat <<EOF > "$INSTALL_DIR/.env"
 PORT=${PORT}
 DATABASE_URL=postgres://${DB_USER}:${DB_PASS}@localhost:5432/${DB_NAME}?sslmode=disable
@@ -83,7 +107,7 @@ ADMIN_API_KEY=${ADMIN_KEY}
 EOF
 chmod 600 "$INSTALL_DIR/.env"
 
-echo "[+] Step 9: Creating and registering systemd service..."
+echo "[+] Step 8: Configuring systemd service..."
 cat <<EOF > /etc/systemd/system/ilow-backend.service
 [Unit]
 Description=Ilow Sync Backend Service
@@ -103,12 +127,12 @@ EnvironmentFile=${INSTALL_DIR}/.env
 WantedBy=multi-user.target
 EOF
 
-echo "[+] Step 10: Enabling and starting service..."
+echo "[+] Step 9: Starting backend service..."
 systemctl daemon-reload
 systemctl enable ilow-backend
 systemctl restart ilow-backend
 
-echo "[+] Deployment completed successfully!"
+echo "[+] Deployment completed!"
 echo "--------------------------------------------------------"
 echo " Service Status  : $(systemctl is-active ilow-backend)"
 echo " Service Endpoint: http://localhost:${PORT}"
