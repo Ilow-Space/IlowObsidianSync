@@ -8,6 +8,8 @@ DB_NAME="ilow_db"
 DB_USER="ilow_user"
 PORT="3001"
 
+ENDPOINT="http://localhost:${PORT}"
+
 if [ "$EUID" -ne 0 ]; then
   echo "[-] Please run this script with sudo or as root."
   exit 1
@@ -20,8 +22,9 @@ apt-get install -y postgresql postgresql-contrib curl jq git
 systemctl enable postgresql
 systemctl start postgresql
 
-echo "[+] Step 2: Generating database credentials..."
+echo "[+] Step 2: Generating database credentials, API keys, and admin secrets..."
 DB_PASS=$(openssl rand -hex 16)
+ACCESS_KEY=$(openssl rand -hex 32)
 ADMIN_KEY=$(openssl rand -hex 32)
 
 echo "[+] Step 3: Provisioning PostgreSQL database..."
@@ -103,6 +106,7 @@ echo "[+] Step 7: Generating secure .env file..."
 cat <<EOF > "$INSTALL_DIR/.env"
 PORT=${PORT}
 DATABASE_URL=postgres://${DB_USER}:${DB_PASS}@localhost:5432/${DB_NAME}?sslmode=disable
+API_KEY=${ACCESS_KEY}
 ADMIN_API_KEY=${ADMIN_KEY}
 EOF
 chmod 600 "$INSTALL_DIR/.env"
@@ -132,9 +136,69 @@ systemctl daemon-reload
 systemctl enable ilow-backend
 systemctl restart ilow-backend
 
+echo "[+] Step 10: Inspecting Nginx configuration..."
+if command -v nginx &> /dev/null; then
+    echo "[*] Nginx detected on system."
+    NGINX_MATCH=$(grep -rnE "proxy_pass\s+http://(localhost|127\.0\.0\.1):${PORT}" /etc/nginx/ 2>/dev/null | head -n 1 || true)
+    
+    if [ -n "$NGINX_MATCH" ]; then
+        CONFIG_FILE=$(echo "$NGINX_MATCH" | cut -d: -f1)
+        echo "[*] Found active proxy configuration for port $PORT in: $CONFIG_FILE"
+        
+        # Discover domain name from server_name directive
+        SERVER_NAMES=$(grep -iE "^\s*server_name\s+" "$CONFIG_FILE" | head -n 1 | sed -E 's/^\s*server_name\s+([^;]+);/\1/' | tr -s ' ' || true)
+        DISCOVERED_DOMAIN=""
+        
+        for SNAME in $SERVER_NAMES; do
+            if [ "$SNAME" != "_" ] && [ "$SNAME" != "localhost" ]; then
+                DISCOVERED_DOMAIN="$SNAME"
+                break
+            fi
+        done
+        
+        if [ -n "$DISCOVERED_DOMAIN" ]; then
+            if grep -qE "listen\s+.*443|ssl_certificate" "$CONFIG_FILE"; then
+                ENDPOINT="https://${DISCOVERED_DOMAIN}"
+            else
+                ENDPOINT="http://${DISCOVERED_DOMAIN}"
+            fi
+            echo "[*] Discovered public domain route: ${ENDPOINT}"
+        fi
+
+        # Check for existing header checks in Nginx config
+        if grep -qE "(x_api_key|http_x_api_key|http_authorization|ADMIN_API_KEY)" "$CONFIG_FILE"; then
+            echo "[*] Nginx configuration already contains token header validation logic."
+        else
+            echo "[!] No API token verification header detected in Nginx config."
+            read -rp "[?] Would you like to inject access token verification into Nginx? (y/N): " INJECT_TOKEN || true
+            if [[ "${INJECT_TOKEN:-}" =~ ^[Yy]$ ]]; then
+                echo "[*] Creating backup: ${CONFIG_FILE}.bak"
+                cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+                
+                sed -i "/proxy_pass http:\/\/\(localhost\|127\.0\.0\.1\):${PORT}/i \        if (\$http_x_api_key != \"${ACCESS_KEY}\") { return 401; }" "$CONFIG_FILE"
+                
+                echo "[*] Testing updated Nginx configuration..."
+                if nginx -t; then
+                    systemctl reload nginx
+                    echo "[*] Nginx reloaded successfully! Client requests now require 'X-API-Key: ${ACCESS_KEY}'."
+                else
+                    echo "[-] Nginx configuration test failed. Restoring original backup..."
+                    mv "${CONFIG_FILE}.bak" "$CONFIG_FILE"
+                    systemctl reload nginx || true
+                fi
+            fi
+        fi
+    else
+        echo "[*] No active Nginx proxy rule found pointing to localhost:$PORT."
+    fi
+else
+    echo "[*] Nginx is not installed. Skipping web server integration."
+fi
+
 echo "[+] Deployment completed!"
 echo "--------------------------------------------------------"
 echo " Service Status  : $(systemctl is-active ilow-backend)"
-echo " Service Endpoint: http://localhost:${PORT}"
+echo " Service Endpoint: ${ENDPOINT}"
+echo " Access API Key  : ${ACCESS_KEY}"
 echo " Admin API Key   : ${ADMIN_KEY}"
 echo "--------------------------------------------------------"
