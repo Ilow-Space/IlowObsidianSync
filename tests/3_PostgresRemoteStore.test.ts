@@ -26,11 +26,14 @@ describe('PostgresRemoteStore Performance', () => {
 			store.subscribeToUpdates(`doc-${i}`, vi.fn());
 		}
 
+		store.setVaultAliasId('test-alias-id-123');
+
 		// Connect WebSocket which instantiates MockWebSocket and sets onopen
 		store.connectWebSocket('ws://localhost:3001');
 
 		expect(createdWs).not.toBeNull();
 		expect(typeof createdWs.onopen).toBe('function');
+		expect(createdWs.url).toContain('vault_alias_id=test-alias-id-123');
 
 		// Trigger actual onopen set by PostgresRemoteStore
 		createdWs.onopen();
@@ -39,6 +42,9 @@ describe('PostgresRemoteStore Performance', () => {
 		expect(createdWs.send).toHaveBeenCalledTimes(1);
 		expect(createdWs.send).toHaveBeenCalledWith(
 			expect.stringContaining('"action":"subscribe_bulk"')
+		);
+		expect(createdWs.send).toHaveBeenCalledWith(
+			expect.stringContaining('"vault_alias_id":"test-alias-id-123"')
 		);
 
 		vi.unstubAllGlobals();

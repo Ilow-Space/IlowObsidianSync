@@ -99,6 +99,11 @@ export default class MyPlugin extends Plugin {
 				this.updateStatusBar('syncing', 'Loading key...');
 				this.derivedKey = await this.cryptoService.importKey(keyData);
 
+				if (this.remoteStore) {
+					const vaultAliasId = await this.cryptoService.getVaultAliasId(this.derivedKey);
+					this.remoteStore.setVaultAliasId(vaultAliasId);
+				}
+
 				if (this.networkOrchestrator) {
 					this.networkOrchestrator.setCryptoKey(this.derivedKey);
 					this.runBackgroundBootstrap().catch(console.error);
@@ -157,7 +162,9 @@ export default class MyPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
-		this.initializeSyncOrchestrator();
+		if (this.derivedKey) {
+			this.initializeSyncOrchestrator();
+		}
 	}
 
 	public getRemoteStore(): PostgresRemoteStore | null {
@@ -202,9 +209,9 @@ export default class MyPlugin extends Plugin {
 			this.derivedKey = await this.cryptoService.deriveKey(password, this.settings.salt);
 
 			const exportedKey = await this.cryptoService.exportKey(this.derivedKey);
-			await (this.app as any).secretStorage.setSecret('ilow-master-key', exportedKey);
+			(this.app as any).secretStorage?.setSecret('ilow-master-key', exportedKey)?.catch(() => {});
 
-			this.initializeSyncOrchestrator();
+			await this.initializeSyncOrchestrator();
 
 			if (this.networkOrchestrator) {
 				this.networkOrchestrator.setCryptoKey(this.derivedKey);
@@ -238,19 +245,20 @@ export default class MyPlugin extends Plugin {
 					this.networkOrchestrator?.pullDocument('shard-index', null, true).catch(console.error);
 				} else {
 					// Pull just the specific file that changed
-					const path = this.vfsController!.getPathForUuid(docId);
-					if (path) {
-						this.networkOrchestrator?.pullDocument(docId, path, true).catch(console.error);
-					}
+					(async () => {
+						let path = this.vfsController!.getPathForUuid(docId);
+						if (!path) {
+							await this.networkOrchestrator?.pullDocument('shard-index', null, true);
+							path = this.vfsController!.getPathForUuid(docId);
+						}
+						if (path) {
+							await this.networkOrchestrator?.pullDocument(docId, path, true);
+						}
+					})().catch(console.error);
 				}
 			});
 
 			await this.networkOrchestrator.runFullSync();
-
-			const activeFile = this.app.workspace.getActiveFile();
-			if (activeFile && activeFile.extension === 'md') {
-				await this.networkOrchestrator.pullDocument(activeFile.path);
-			}
 
 			this.updateStatusBar('synced', 'Fully synced');
 		} catch (err) {
@@ -276,7 +284,7 @@ export default class MyPlugin extends Plugin {
 		}
 	}
 
-	private initializeSyncOrchestrator() {
+	private async initializeSyncOrchestrator() {
 		if (this.manifestUnsubscribe) {
 			this.manifestUnsubscribe();
 			this.manifestUnsubscribe = null;
@@ -304,6 +312,11 @@ export default class MyPlugin extends Plugin {
 
 		if (this.settings.serverUrl) {
 			this.remoteStore = new PostgresRemoteStore(this.settings.serverUrl, this.settings.headers);
+			if (this.derivedKey) {
+				const vaultAliasId = await this.cryptoService.getVaultAliasId(this.derivedKey);
+				this.remoteStore.setVaultAliasId(vaultAliasId);
+			}
+
 			const socketUrl = this.settings.serverUrl.replace(/^http/i, 'ws');
 
 			this.vfsController = new LoroVfsController(this.syncEngine, this.eventBus);
@@ -317,10 +330,11 @@ export default class MyPlugin extends Plugin {
 				this.vfsController,
 				this.eventBus,
 				(status, msg) => this.updateStatusBar(status, msg),
-				this.settings.syncDebounceMs
+				this.settings.syncDebounceMs,
+				this.diskReconciler
 			);
 
-			this.vfsController.initialize();
+			await this.vfsController.initialize();
 			this.diskReconciler.initialize();
 			this.vaultEventWatcher.initialize();
 			this.networkOrchestrator.initialize();

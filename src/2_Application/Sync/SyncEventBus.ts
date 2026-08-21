@@ -61,6 +61,11 @@ export const LocalDeltaReadyForPushSchema = z.object({
 	path: z.string().nullable().optional()
 });
 
+export const RebalancePathUuidSchema = z.object({
+	path: z.string(),
+	remoteUuid: z.string()
+});
+
 export type LocalFileCreated = z.infer<typeof LocalFileCreatedSchema>;
 export type LocalFileRenamed = z.infer<typeof LocalFileRenamedSchema>;
 export type LocalFileModified = z.infer<typeof LocalFileModifiedSchema>;
@@ -74,6 +79,8 @@ export type CrdtNodeSoftDeleted = z.infer<typeof CrdtNodeSoftDeletedSchema>;
 export type RemoteSnapshotReceived = z.infer<typeof RemoteSnapshotReceivedSchema>;
 export type IncrementalUpdatesReceived = z.infer<typeof IncrementalUpdatesReceivedSchema>;
 export type LocalDeltaReadyForPush = z.infer<typeof LocalDeltaReadyForPushSchema>;
+
+export type RebalancePathUuid = z.infer<typeof RebalancePathUuidSchema>;
 
 export type SyncEvents = {
 	LocalFileCreated: LocalFileCreated;
@@ -89,6 +96,7 @@ export type SyncEvents = {
 	RemoteSnapshotReceived: RemoteSnapshotReceived;
 	IncrementalUpdatesReceived: IncrementalUpdatesReceived;
 	LocalDeltaReadyForPush: LocalDeltaReadyForPush;
+	RebalancePathUuid: RebalancePathUuid;
 };
 
 export class SyncEventBus {
@@ -153,6 +161,9 @@ export class SyncEventBus {
 				break;
 			case 'LocalDeltaReadyForPush':
 				LocalDeltaReadyForPushSchema.parse(payload);
+				break;
+			case 'RebalancePathUuid':
+				RebalancePathUuidSchema.parse(payload);
 				break;
 			default:
 				throw new Error(`Unknown event type to validate: ${event}`);

@@ -3,13 +3,41 @@ import { EncryptedBlob } from '../../1_Domain/ValueObjects/CryptoTypes';
 import { CryptoUtils } from './CryptoUtils';
 
 export class WebCryptoService implements ICryptography {
+	private static derivedKeyCache = new Map<string, CryptoKey>();
+	private static aliasIdCache = new WeakMap<CryptoKey, string>();
+
 	public generateSalt(): string {
 		const array = new Uint8Array(16);
 		window.crypto.getRandomValues(array);
 		return CryptoUtils.bufToHex(array);
 	}
 
+	public async getVaultAliasId(key: CryptoKey): Promise<string> {
+		if (WebCryptoService.aliasIdCache.has(key)) {
+			return WebCryptoService.aliasIdCache.get(key)!;
+		}
+		const rawKeyBuffer = await window.crypto.subtle.exportKey('raw', key);
+		const hashBuffer = await window.crypto.subtle.digest('SHA-256', rawKeyBuffer);
+		const aliasId = CryptoUtils.bufToHex(new Uint8Array(hashBuffer));
+		WebCryptoService.aliasIdCache.set(key, aliasId);
+		return aliasId;
+	}
+
 	public async deriveKey(password: string, salt: string): Promise<CryptoKey> {
+		const cacheKey = `${password}:${salt}`;
+		if (WebCryptoService.derivedKeyCache.has(cacheKey)) {
+			return WebCryptoService.derivedKeyCache.get(cacheKey)!;
+		}
+
+		try {
+			const cachedJwk = window.sessionStorage?.getItem(`ilow-key-${cacheKey}`);
+			if (cachedJwk) {
+				const key = await this.importKey(cachedJwk);
+				WebCryptoService.derivedKeyCache.set(cacheKey, key);
+				return key;
+			}
+		} catch (e) {}
+
 		const enc = new TextEncoder();
 		const keyMaterial = await window.crypto.subtle.importKey(
 			'raw',
@@ -21,7 +49,7 @@ export class WebCryptoService implements ICryptography {
 
 		const saltBuffer = CryptoUtils.hexToBuf(salt);
 
-		return await window.crypto.subtle.deriveKey(
+		const derivedKey = await window.crypto.subtle.deriveKey(
 			{
 				name: 'PBKDF2',
 				salt: saltBuffer as any,
@@ -33,6 +61,14 @@ export class WebCryptoService implements ICryptography {
 			true, // ⚡ CHANGED TO TRUE: Allows the key to be exported to disk
 			['encrypt', 'decrypt']
 		);
+
+		try {
+			const jwkString = await this.exportKey(derivedKey);
+			window.sessionStorage?.setItem(`ilow-key-${cacheKey}`, jwkString);
+		} catch (e) {}
+
+		WebCryptoService.derivedKeyCache.set(cacheKey, derivedKey);
+		return derivedKey;
 	}
 
 	public async exportKey(key: CryptoKey): Promise<string> {

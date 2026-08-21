@@ -38,7 +38,8 @@ describe('NetworkOrchestrator & Sync Tests', () => {
 
 		noteRepoMock = {
 			readNote: vi.fn().mockResolvedValue('Hello Content'),
-			writeNote: vi.fn().mockResolvedValue(undefined)
+			writeNote: vi.fn().mockResolvedValue(undefined),
+			listAllNotes: vi.fn().mockResolvedValue([])
 		};
 
 		orchestrator = new NetworkOrchestrator(

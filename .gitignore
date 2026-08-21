@@ -6,6 +6,7 @@ styles.css
 node_modules/
 .obsidian-cache
 .vite
+.env
 
 project_context.txt
 input.txt

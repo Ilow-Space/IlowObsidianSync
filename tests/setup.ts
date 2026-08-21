@@ -1,4 +1,4 @@
-﻿import 'fake-indexeddb/auto';
+import 'fake-indexeddb/auto';
 import { webcrypto } from 'node:crypto';
 
 // Polyfill WebCrypto...
@@ -14,3 +14,7 @@ export class App {}
 export class TFile {}
 export class TFolder {}
 export class TAbstractFile {}
+
+export const requestUrl = async (options: any) => {
+    return { status: 200, json: {}, text: '' };
+};

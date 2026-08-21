@@ -20,6 +20,24 @@ describe('Cryptography & Data Pipeline', () => {
         expect(exported1).toEqual(exported2);
     });
 
+    it('Deterministic Vault Alias ID Derivation and Isolation', async () => {
+        const salt = service.generateSalt();
+        const password1 = 'user-a-password';
+        const password2 = 'user-b-password';
+
+        const keyA1 = await service.deriveKey(password1, salt);
+        const keyA2 = await service.deriveKey(password1, salt);
+        const keyB = await service.deriveKey(password2, salt);
+
+        const aliasA1 = await service.getVaultAliasId(keyA1);
+        const aliasA2 = await service.getVaultAliasId(keyA2);
+        const aliasB = await service.getVaultAliasId(keyB);
+
+        expect(aliasA1).toEqual(aliasA2);
+        expect(aliasA1).not.toEqual(aliasB);
+        expect(aliasA1.length).toBe(64); // SHA-256 hex string length
+    });
+
     it('Encryption/Decryption Symmetry', async () => {
         const salt = service.generateSalt();
         const key = await service.deriveKey('symmetry-test', salt);
