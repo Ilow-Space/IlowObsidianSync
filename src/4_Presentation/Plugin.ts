@@ -12,12 +12,16 @@ import { LoroVfsController } from '@application/Sync/LoroVfsController';
 import { ObsidianDiskReconciler } from '@application/Sync/ObsidianDiskReconciler';
 import { SyncSidebarView, SYNC_SIDEBAR_VIEW_TYPE } from './Views/SyncSidebarView';
 
-interface PluginSettings {
+export interface PluginSettings {
     serverUrl: string;
     apiKey: string;
     salt: string;
     adminToken: string;
     syncDebounceMs: number;
+    syncPluginSettings: boolean;
+    syncPluginBinaries: boolean;
+    syncThemes: boolean;
+    syncAppearance: boolean;
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
@@ -25,7 +29,11 @@ const DEFAULT_SETTINGS: PluginSettings = {
 	apiKey: '',
 	salt: '',
 	adminToken: '',
-	syncDebounceMs: 1000
+	syncDebounceMs: 1000,
+	syncPluginSettings: true,
+	syncPluginBinaries: false,
+	syncThemes: true,
+	syncAppearance: true
 };
 
 export default class MyPlugin extends Plugin {
@@ -62,7 +70,7 @@ export default class MyPlugin extends Plugin {
 		this.eventBus = new SyncEventBus();
 		this.syncEngine = new LoroSyncEngine();
 		this.cryptoService = new WebCryptoService();
-		this.noteRepo = new ObsidianNoteRepository(this.app);
+		this.noteRepo = new ObsidianNoteRepository(this.app, this.settings);
 
 		// Ensure salt is initialized if missing
 		if (!this.settings.salt) {
@@ -317,9 +325,11 @@ export default class MyPlugin extends Plugin {
 
 			const socketUrl = this.settings.serverUrl.replace(/^http/i, 'ws');
 
-			this.vfsController = new LoroVfsController(this.syncEngine, this.eventBus);
+			const configDir = (this.app.vault as any).configDir || '.obsidian';
+			this.noteRepo = new ObsidianNoteRepository(this.app, this.settings);
+			this.vfsController = new LoroVfsController(this.syncEngine, this.eventBus, this.settings, configDir);
 			this.diskReconciler = new ObsidianDiskReconciler(this.app, this.syncEngine, this.eventBus);
-			this.vaultEventWatcher = new VaultEventWatcher(this.app, this.eventBus);
+			this.vaultEventWatcher = new VaultEventWatcher(this.app, this.eventBus, this.settings);
 			this.networkOrchestrator = new NetworkOrchestrator(
 				this.remoteStore,
 				this.cryptoService,

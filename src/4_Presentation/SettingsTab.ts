@@ -177,6 +177,60 @@ export class SettingsTab extends PluginSettingTab {
 					})
 			);
 
+		containerEl.createEl('h3', { text: 'Extension & Theme Sync Settings' });
+
+		// Sync Plugin Settings
+		new Setting(containerEl)
+			.setName('Sync Plugin Settings')
+			.setDesc('Synchronize plugin settings (data.json files).')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.syncPluginSettings)
+					.onChange(async (value) => {
+						this.plugin.settings.syncPluginSettings = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		// Sync Plugin Binaries
+		new Setting(containerEl)
+			.setName('Sync Plugin Binaries')
+			.setDesc('Synchronize plugin main.js, manifest.json, and styles.css files.')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.syncPluginBinaries)
+					.onChange(async (value) => {
+						this.plugin.settings.syncPluginBinaries = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		// Sync Themes
+		new Setting(containerEl)
+			.setName('Sync Themes')
+			.setDesc('Synchronize custom installed themes (.obsidian/themes/).')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.syncThemes)
+					.onChange(async (value) => {
+						this.plugin.settings.syncThemes = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		// Sync Appearance & Core Settings
+		new Setting(containerEl)
+			.setName('Sync Appearance & Core Settings')
+			.setDesc('Synchronize appearance.json, community-plugins.json, and hotkeys.json.')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.syncAppearance)
+					.onChange(async (value) => {
+						this.plugin.settings.syncAppearance = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
 		containerEl.createEl('h3', { text: 'Multi-Device Onboarding' });
 
 		// Generate Setup QR Code

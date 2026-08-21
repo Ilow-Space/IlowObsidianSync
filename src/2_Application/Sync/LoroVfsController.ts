@@ -1,6 +1,8 @@
 import { LoroDoc, LoroTree, LoroTreeNode } from 'loro-crdt';
 import { SyncEventBus } from './SyncEventBus';
 import { LoroSyncEngine } from '@infrastructure/Crdt/LoroSyncEngine';
+import { PluginSettings } from '@presentation/Plugin';
+import { isAllowedConfigPath } from '@domain/Utils/ConfigPathFilter';
 
 export class LoroVfsController {
 	public treeDoc!: LoroDoc;
@@ -23,7 +25,9 @@ export class LoroVfsController {
 
 	constructor(
 		private syncEngine: LoroSyncEngine,
-		private eventBus: SyncEventBus
+		private eventBus: SyncEventBus,
+		private settings?: PluginSettings,
+		private configDir: string = '.obsidian'
 	) {}
 
 	public prepareForRemoteVfsUpdate(): void {
@@ -158,7 +162,8 @@ export class LoroVfsController {
 	}
 
 	private handleLocalFileCreated(payload: { path: string; isFolder: boolean; content?: string }): void {
-		if (payload.path.startsWith('.') || payload.path === '/') return;
+		if (payload.path === '/') return;
+		if (!isAllowedConfigPath(payload.path, this.configDir, this.settings)) return;
 		if (this.pathToUuid.has(payload.path)) return;
 
 		const filename = payload.path.substring(payload.path.lastIndexOf('/') + 1);

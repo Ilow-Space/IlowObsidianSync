@@ -2,14 +2,19 @@ import { App, TAbstractFile, TFile, TFolder } from 'obsidian';
 import { SyncEventBus } from './SyncEventBus';
 import { ObsidianDiskReconciler } from './ObsidianDiskReconciler';
 import { NetworkOrchestrator } from './NetworkOrchestrator';
+import { PluginSettings } from '@presentation/Plugin';
+import { isAllowedConfigPath } from '@domain/Utils/ConfigPathFilter';
 
 export class VaultEventWatcher {
 	private activeListeners: Array<{ eventName: string; ref: any }> = [];
 	private orchestrator: NetworkOrchestrator | null = null;
+	private configPollTimer: any = null;
+	private knownConfigContents = new Map<string, string>();
 
 	constructor(
 		private app: App,
-		private eventBus: SyncEventBus
+		private eventBus: SyncEventBus,
+		private settings?: PluginSettings
 	) {}
 
 	public setOrchestrator(orchestrator: NetworkOrchestrator): void {
@@ -19,6 +24,8 @@ export class VaultEventWatcher {
 	private shouldIgnore(path: string): boolean {
 		if (ObsidianDiskReconciler.suppressedPaths.has(path)) return true;
 		if (this.orchestrator && (this.orchestrator as any).isSyncingFull) return true;
+		const configDir = this.app.vault.configDir || '.obsidian';
+		if (!isAllowedConfigPath(path, configDir, this.settings)) return true;
 		return false;
 	}
 
@@ -95,12 +102,59 @@ export class VaultEventWatcher {
 			{ eventName: 'delete', ref: onDelete },
 			{ eventName: 'modify', ref: onModify }
 		);
+
+		this.configPollTimer = setInterval(() => {
+			this.pollConfigFiles().catch(() => {});
+		}, 2000);
+	}
+
+	private async pollConfigFiles(): Promise<void> {
+		if (this.orchestrator && (this.orchestrator as any).isSyncingFull) return;
+		const configDir = this.app.vault.configDir || '.obsidian';
+		try {
+			if (!this.app.vault.adapter || !(await this.app.vault.adapter.exists(configDir))) return;
+			const allowedFiles: string[] = [];
+			const walk = async (dir: string) => {
+				const res = await this.app.vault.adapter.list(dir);
+				for (const f of res.files) {
+					if (isAllowedConfigPath(f, configDir, this.settings)) {
+						allowedFiles.push(f);
+					}
+				}
+				for (const sub of res.folders) {
+					if (isAllowedConfigPath(sub, configDir, this.settings)) {
+						await walk(sub);
+					}
+				}
+			};
+			await walk(configDir);
+
+			for (const path of allowedFiles) {
+				if (this.shouldIgnore(path)) continue;
+				try {
+					const content = await this.app.vault.adapter.read(path);
+					const prev = this.knownConfigContents.get(path);
+					if (prev === undefined) {
+						this.knownConfigContents.set(path, content);
+						this.eventBus.emit('LocalFileCreated', { path, isFolder: false, content });
+					} else if (prev !== content) {
+						this.knownConfigContents.set(path, content);
+						this.eventBus.emit('LocalFileModified', { path, content });
+					}
+				} catch (e) {}
+			}
+		} catch (e) {}
 	}
 
 	public destroy(): void {
+		if (this.configPollTimer) {
+			clearInterval(this.configPollTimer);
+			this.configPollTimer = null;
+		}
 		for (const listener of this.activeListeners) {
 			this.app.vault.off(listener.eventName as any, listener.ref);
 		}
 		this.activeListeners = [];
+		this.knownConfigContents.clear();
 	}
 }

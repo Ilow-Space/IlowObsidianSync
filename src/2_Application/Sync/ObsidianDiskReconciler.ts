@@ -289,7 +289,31 @@ export class ObsidianDiskReconciler {
 						file = this.app.vault.getFiles().find((f: any) => f.path === payload.path) || null;
 					}
 
-					if (file && file instanceof TFile) {
+					const configDir = this.app.vault.configDir || '.obsidian';
+					if (payload.path.startsWith(configDir)) {
+						try {
+							let currentDiskContent = '';
+							if (await this.app.vault.adapter.exists(payload.path)) {
+								currentDiskContent = await this.app.vault.adapter.read(payload.path);
+							}
+							if (currentDiskContent.replace(/\r\n/g, '\n') !== payload.content.replace(/\r\n/g, '\n')) {
+								ObsidianDiskReconciler.suppressPath(payload.path);
+								const parts = payload.path.split('/');
+								if (parts.length > 1) {
+									const parentFolder = parts.slice(0, -1).join('/');
+									if (!(await this.app.vault.adapter.exists(parentFolder))) {
+										await this.app.vault.adapter.mkdir(parentFolder);
+									}
+								}
+								await this.app.vault.adapter.write(payload.path, payload.content);
+								this.triggerHotReload(payload.path);
+							}
+						} catch (e) {
+							console.error('[ObsidianDiskReconciler] Failed to write config file:', e);
+						} finally {
+							ObsidianDiskReconciler.unsuppressPath(payload.path);
+						}
+					} else if (file && file instanceof TFile) {
 						try {
 							const currentDiskContent = await this.app.vault.read(file);
 							if (currentDiskContent.replace(/\r\n/g, '\n') !== payload.content.replace(/\r\n/g, '\n')) {
@@ -307,6 +331,27 @@ export class ObsidianDiskReconciler {
 				this.releaseFileMutex(payload.path);
 			}
 		});
+	}
+
+	private triggerHotReload(configFilePath: string): void {
+		try {
+			if (configFilePath.includes('/themes/') || configFilePath.endsWith('appearance.json')) {
+				if (typeof (this.app as any).customCss?.loadManifests === 'function') {
+					(this.app as any).customCss.loadManifests();
+				}
+			} else if (configFilePath.endsWith('data.json')) {
+				const match = configFilePath.match(/plugins\/([^/]+)\/data\.json$/);
+				if (match && match[1]) {
+					const pluginId = match[1];
+					const plugin = (this.app as any).plugins?.getPlugin(pluginId);
+					if (plugin && typeof plugin.loadData === 'function') {
+						plugin.loadData().catch(console.error);
+					}
+				}
+			}
+		} catch (e) {
+			console.error('[ObsidianDiskReconciler] Error during hot reload trigger:', e);
+		}
 	}
 
 	public async onIdle(): Promise<void> {
