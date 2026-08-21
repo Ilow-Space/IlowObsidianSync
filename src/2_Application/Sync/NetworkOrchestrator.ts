@@ -208,6 +208,11 @@ export class NetworkOrchestrator {
 
 	        this.vfsController.flushPendingPush();
 	        this.vfsController.processRemoteVfsUpdates();
+
+			if (this.diskReconciler) {
+	            await this.diskReconciler.onIdle();
+	        }
+
 	        console.log('[NetworkOrchestrator] VFS Index Processed.');
 
 	        const indexRemoteLatest = bulkUpdates['shard-index'] || 0;
