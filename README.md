@@ -1,37 +1,37 @@
 # Ilow Sync
 
-An end-to-end encrypted (E2EE), real-time synchronization plugin for Obsidian powered by Loro CRDT and a Go/PostgreSQL backend. It delivers multi-vault document convergence, structure-aware Virtual File System (VFS) reconciliation, offline change merging, and zero-knowledge snapshot storage.
+An end-to-end encrypted (E2EE), real-time synchronization plugin for Obsidian powered by the Loro CRDT engine and a Go/PostgreSQL backend. It delivers multi-vault document convergence, structure-aware Virtual File System (VFS) reconciliation, offline change merging, and zero-knowledge snapshot storage.
 
 ---
 
-## Architecture Overview
+## Architecture
 
-The codebase is structured according to Domain-Driven Design (DDD) principles across client layers and an autonomous backend:
+The codebase strictly follows Domain-Driven Design (DDD) principles across client layers and an autonomous backend:
 
 * **Domain Layer (`src/1_Domain`)**: Contains entity definitions (`Note`, `CRDTSnapshot`, `CRDTUpdate`, `VFSNode`), domain contracts (`ICryptography`, `IRemoteStore`, `INoteRepository`), and value objects.
 
 
-* **Application Layer (`src/2_Application`)**: Handles runtime coordination:
+* **Application Layer (`src/2_Application`)**: Manages runtime subsystem coordination:
 
 
 * `NetworkOrchestrator`: Coordinates polling, push queues, WebSocket listener events, and full vault hydration.
 
 
-* `LoroVfsController`: Manages hierarchical tree operations, path tracking, and UUID-to-node mapping.
+* `LoroVfsController`: Handles hierarchical tree operations, path tracking, and UUID-to-node mapping.
 
 
 * `ObsidianDiskReconciler`: Translates CRDT graph changes into non-blocking vault file operations.
 
 
-* `SyncEventBus`: Type-safe event emitter (`mitt` + `zod`) enforcing contract payloads across subsystems.
+* `SyncEventBus`: Provides a type-safe event emitter (`mitt` + `zod`) enforcing contract payloads.
 
 
-* `VaultEventWatcher`: Captures Obsidian native vault hooks (`create`, `modify`, `rename`, `delete`).
+* `VaultEventWatcher`: Listens to native Obsidian vault lifecycle hooks (`create`, `modify`, `rename`, `delete`).
 
 
 
 
-* **Infrastructure Layer (`src/3_Infrastructure`)**: Concrete persistence and wire implementations:
+* **Infrastructure Layer (`src/3_Infrastructure`)**: Concrete persistence and network transport drivers:
 
 
 * `LoroSyncEngine`: Controls Loro document lifetimes, state vectors, diff generation (`fast-diff`), and Dexie cache persistence.
@@ -43,29 +43,29 @@ The codebase is structured according to Domain-Driven Design (DDD) principles ac
 * `WebCryptoService`: Browser Web Crypto API service implementing PBKDF2 key derivation and 256-bit AES-GCM encryption.
 
 
-* `PostgresRemoteStore`: REST and WebSocket communication driver using Obsidian's `requestUrl` API.
+* `PostgresRemoteStore`: REST and WebSocket communication driver utilizing Obsidian's `requestUrl` API.
 
 
 
 
-* **Presentation Layer (`src/4_Presentation`)**: User interface and settings management:
+* **Presentation Layer (`src/4_Presentation`)**: User interfaces and configuration management:
 
 
-* `Plugin.ts`: Plugin entrypoint managing secret storage, event hooks, and lifecycle bootstrap.
+* `Plugin.ts`: Entrypoint managing secret storage, event hooks, and lifecycle bootstrap.
 
 
-* `SettingsTab.ts`: Configuration view for server credentials, key derivation, and manual maintenance triggers.
+* `SettingsTab.ts`: View for server credentials, key derivation, and manual maintenance triggers.
 
 
-* `SyncSidebarView.ts`: Live status view showing server health, throughput metrics, and active sync queues.
+* `SyncSidebarView.ts`: Live status view displaying server health, throughput metrics, and active sync queues.
 
 
-* `Modals`: QR code scanner and generator (`QrScannerModal`, `QrDisplayModal`) for quick multi-device onboarding.
+* `Modals`: QR code scanner and generator (`QrScannerModal`, `QrDisplayModal`) for multi-device onboarding.
 
 
 
 
-* **Backend (`backend/`)**: High-throughput Go server providing PostgreSQL LISTEN/NOTIFY bridging, WebSocket streaming, and automatic maintenance tasks.
+* **Backend (`backend/`)**: High-throughput Go server providing PostgreSQL LISTEN/NOTIFY bridging, WebSocket streaming, and background maintenance tasks.
 
 
 
@@ -73,7 +73,7 @@ The codebase is structured according to Domain-Driven Design (DDD) principles ac
 
 ## Technical Specifications
 
-| Feature | Implementation Detail |
+| Feature | Specification Details |
 | --- | --- |
 | **CRDT Engine** | `loro-crdt` (Rope text CRDT & Moveable Tree CRDT)
 
@@ -84,10 +84,10 @@ The codebase is structured according to Domain-Driven Design (DDD) principles ac
 | **Key Derivation** | PBKDF2 (SHA-256, 100,000 iterations, custom hex salt)
 
  |
-| **Local Cache** | Dexie / IndexedDB (`ilow-snapshot-store-db`)
+| **Local Storage** | Dexie / IndexedDB (`ilow-snapshot-store-db`)
 
  |
-| **Concurrency Control** | `async-mutex` for disk locks, `p-limit` for concurrent pulls, `p-queue` for write queues
+| **Concurrency Control** | `async-mutex` (disk locks), `p-limit` (concurrent pulls), `p-queue` (write queues)
 
  |
 | **Transport Protocol** | HTTP REST + PostgreSQL LISTEN/NOTIFY over WebSocket
@@ -100,9 +100,9 @@ The codebase is structured according to Domain-Driven Design (DDD) principles ac
 
 The Go server exposes REST endpoints for synchronization and streams live database mutations via PostgreSQL channels.
 
-### REST Endpoints
+### REST API Reference
 
-| Method | Endpoint | Description |
+| Method | Endpoint | Function |
 | --- | --- | --- |
 | `GET` | `/` | Upgrades client connection to WebSocket for realtime notifications
 
@@ -119,7 +119,7 @@ The Go server exposes REST endpoints for synchronization and streams live databa
 | `GET` | `/api/snapshots/{id}` | Reads snapshot metadata and state payload for a specific document ID
 
  |
-| `GET` | `/api/snapshots/{id}/updates?since={N}` | Fetches incremental update deltas created after ID `N`<br> |
+| `GET` | `/api/snapshots/{id}/updates?since={N}` | Fetches incremental update deltas created after update ID `N`<br> |
 | `GET` | `/api/snapshots/{id}/latest_id` | Fetches the latest update sequence ID for a single document
 
  |
@@ -136,9 +136,9 @@ The Go server exposes REST endpoints for synchronization and streams live databa
 
 ### Server Self-Optimization
 
-The Go server continuously monitors traffic. After **5 minutes (300 seconds) of API silence**, it automatically executes background maintenance:
+After **5 minutes (300 seconds) of API inactivity**, the Go server automatically executes background maintenance routines:
 
-1. Invokes `debug.FreeOSMemory()` to release unallocated RAM back to the operating system.
+1. Calls `debug.FreeOSMemory()` to release unallocated memory back to the host system.
 
 
 2. Runs non-blocking `VACUUM ANALYZE vault_snapshots, vault_updates;` on PostgreSQL to defragment storage and recalculate query planner indices.
@@ -147,9 +147,9 @@ The Go server continuously monitors traffic. After **5 minutes (300 seconds) of 
 
 ---
 
-## Database Schema & Migrations
+## Database Schema
 
-The Go service automatically initializes the following PostgreSQL schema on startup:
+The Go service provisions the PostgreSQL schema on startup:
 
 ```sql
 CREATE TABLE IF NOT EXISTS vault_snapshots (
@@ -172,17 +172,17 @@ CREATE INDEX IF NOT EXISTS idx_vault_updates_doc_id ON vault_updates(document_id
 
 ```
 
-An automatic trigger publishes payload JSON objects to the `vault_updates_channel` whenever new updates are inserted.
+An automated database trigger publishes payload JSON objects to the `vault_updates_channel` whenever new updates are inserted.
 
 ---
 
 ## Environment Configuration
 
-### Backend Environment Variables (`backend/.env`)
+### Backend Setup (`backend/.env`)
 
 | Variable | Default Value | Description |
 | --- | --- | --- |
-| `PORT` | `3001` | HTTP & WebSocket server port
+| `PORT` | `3001` | Server port for HTTP & WebSocket connections
 
  |
 | `DATABASE_URL` | `postgres://postgres:your_password@localhost:5432/your_db?sslmode=disable` | PostgreSQL connection string
@@ -192,9 +192,9 @@ An automatic trigger publishes payload JSON objects to the `vault_updates_channe
 
 ---
 
-## Project Build & Development Commands
+## Development & Build Commands
 
-All client tasks are managed using `npm` scripts defined in `package.json`.
+Client scripts are managed using `npm` commands:
 
 ```bash
 # Start development watcher (Vite CJS compilation)
@@ -203,13 +203,13 @@ npm run dev
 # Production build (typecheck, bundle, copy manifest to dist/)
 npm run build
 
-# Type check TypeScript files without emitting code
+# Typecheck TypeScript without emitting JS code
 npm run typecheck
 
-# Run unit & integration tests (Vitest)
+# Run unit & integration tests via Vitest
 npm run test:unit
 
-# Run full WebdriverIO multi-vault E2E test suite in real Obsidian instances
+# Run full WebdriverIO multi-vault E2E tests in real Obsidian instances
 npm run test:e2e
 
 # Execute code duplication checks (jscpd) and linter rules (ESLint)
