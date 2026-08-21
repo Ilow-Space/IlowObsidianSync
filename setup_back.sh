@@ -145,7 +145,6 @@ if command -v nginx &> /dev/null; then
         CONFIG_FILE=$(echo "$NGINX_MATCH" | cut -d: -f1)
         echo "[*] Found active proxy configuration for port $PORT in: $CONFIG_FILE"
         
-        # Discover domain name from server_name directive
         SERVER_NAMES=$(grep -iE "^\s*server_name\s+" "$CONFIG_FILE" | head -n 1 | sed -E 's/^\s*server_name\s+([^;]+);/\1/' | tr -s ' ' || true)
         DISCOVERED_DOMAIN=""
         
@@ -165,22 +164,29 @@ if command -v nginx &> /dev/null; then
             echo "[*] Discovered public domain route: ${ENDPOINT}"
         fi
 
-        # Check for existing header checks in Nginx config
-        if grep -qE "(x_api_key|http_x_api_key|http_authorization|ADMIN_API_KEY)" "$CONFIG_FILE"; then
-            echo "[*] Nginx configuration already contains token header validation logic."
+        if grep -qE "(auth_ok|http_x_api_key|http_authorization|ADMIN_API_KEY)" "$CONFIG_FILE"; then
+            echo "[*] Nginx configuration already contains API validation rules."
         else
             echo "[!] No API token verification header detected in Nginx config."
-            read -rp "[?] Would you like to inject access token verification into Nginx? (y/N): " INJECT_TOKEN || true
+            read -rp "[?] Would you like to inject access token & WebSocket verification into Nginx? (y/N): " INJECT_TOKEN || true
             if [[ "${INJECT_TOKEN:-}" =~ ^[Yy]$ ]]; then
                 echo "[*] Creating backup: ${CONFIG_FILE}.bak"
                 cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
                 
-                sed -i "/proxy_pass http:\/\/\(localhost\|127\.0\.0\.1\):${PORT}/i \        if (\$http_x_api_key != \"${ACCESS_KEY}\") { return 401; }" "$CONFIG_FILE"
+                # Inject WebSocket headers if missing
+                if ! grep -q "proxy_set_header Upgrade" "$CONFIG_FILE"; then
+                    sed -i "/proxy_pass http:\/\/\(localhost\|127\.0\.0\.1\):${PORT}/i \        proxy_http_version 1.1;\n        proxy_set_header Upgrade \$http_upgrade;\n        proxy_set_header Connection \"Upgrade\";" "$CONFIG_FILE"
+                fi
+
+                # Inject dual-mode authentication (Header OR URL Query Param)
+                NGINX_AUTH_BLOCK="        set \$auth_ok 0;\n        if (\$http_x_api_key = \"${ACCESS_KEY}\") { set \$auth_ok 1; }\n        if (\$arg_api_key = \"${ACCESS_KEY}\") { set \$auth_ok 1; }\n        if (\$arg_token = \"${ACCESS_KEY}\") { set \$auth_ok 1; }\n        if (\$auth_ok = 0) { return 401; }"
+                
+                sed -i "/proxy_pass http:\/\/\(localhost\|127\.0\.0\.1\):${PORT}/i \\${NGINX_AUTH_BLOCK}" "$CONFIG_FILE"
                 
                 echo "[*] Testing updated Nginx configuration..."
                 if nginx -t; then
                     systemctl reload nginx
-                    echo "[*] Nginx reloaded successfully! Client requests now require 'X-API-Key: ${ACCESS_KEY}'."
+                    echo "[*] Nginx reloaded! Supports 'X-API-Key' header & 'wss://domain/?api_key=${ACCESS_KEY}' WebSockets."
                 else
                     echo "[-] Nginx configuration test failed. Restoring original backup..."
                     mv "${CONFIG_FILE}.bak" "$CONFIG_FILE"

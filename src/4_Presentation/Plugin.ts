@@ -14,7 +14,7 @@ import { SyncSidebarView, SYNC_SIDEBAR_VIEW_TYPE } from './Views/SyncSidebarView
 
 interface PluginSettings {
     serverUrl: string;
-    headers: Record<string, string>;
+    apiKey: string;
     salt: string;
     adminToken: string;
     syncDebounceMs: number;
@@ -22,7 +22,7 @@ interface PluginSettings {
 
 const DEFAULT_SETTINGS: PluginSettings = {
 	serverUrl: '',
-	headers: {},
+	apiKey: '',
 	salt: '',
 	adminToken: '',
 	syncDebounceMs: 1000
@@ -236,15 +236,12 @@ export default class MyPlugin extends Plugin {
 				this.manifestUnsubscribe();
 			}
 
-			// REWRITTEN: Abandon full-sync polling. React instantly to precise WS broadcasts.
 			this.manifestUnsubscribe = this.remoteStore.subscribeToUpdates('manifest', (docId, action) => {
 				if (!docId) return;
 
 				if (docId === 'shard-index') {
-					// Pull just the index. (This will emit CrdtNodeCreated, triggering Task 1!)
 					this.networkOrchestrator?.pullDocument('shard-index', null, true).catch(console.error);
 				} else {
-					// Pull just the specific file that changed
 					(async () => {
 						let path = this.vfsController!.getPathForUuid(docId);
 						if (!path) {
@@ -311,7 +308,8 @@ export default class MyPlugin extends Plugin {
 		}
 
 		if (this.settings.serverUrl) {
-			this.remoteStore = new PostgresRemoteStore(this.settings.serverUrl, this.settings.headers);
+			// Pass serverUrl and apiKey directly into the updated store constructor
+			this.remoteStore = new PostgresRemoteStore(this.settings.serverUrl, this.settings.apiKey);
 			if (this.derivedKey) {
 				const vaultAliasId = await this.cryptoService.getVaultAliasId(this.derivedKey);
 				this.remoteStore.setVaultAliasId(vaultAliasId);

@@ -25,35 +25,33 @@ export class SettingsTab extends PluginSettingTab {
 			warning.createEl('p', { text: 'For Ilow Sync to function correctly and avoid data corruption, please disable the official Obsidian Sync plugin in your Core Plugins settings.' });
 		}
 
-		// PostgREST URL
+		// Server URL
 		new Setting(containerEl)
-			.setName('PostgREST Base URL')
-			.setDesc('Enter your PostgREST HTTP endpoint (e.g., https://api.my-domain.com/rest/v1).')
+			.setName('Base URL')
+			.setDesc('Enter your backend HTTP endpoint (e.g., https://api.my-domain.com).')
 			.addText((text) =>
 				text
 					.setPlaceholder('https://...')
 					.setValue(this.plugin.settings.serverUrl)
 					.onChange(async (value) => {
-						this.plugin.settings.serverUrl = value;
+						this.plugin.settings.serverUrl = value.trim();
 						await this.plugin.saveSettings();
 					})
 			);
 
-		// Custom/Authorization Headers
+		// Single API Key Input
 		new Setting(containerEl)
-			.setName('Connection Headers')
-			.setDesc('Headers to pass for authorization in JSON format (e.g., {"apikey": "...", "Authorization": "Bearer ..."})')
-			.addTextArea((text) =>
+			.setName('API Key')
+			.setDesc('Enter the API Key used to authenticate REST and WebSocket connections.')
+			.addText((text) =>
 				text
-					.setPlaceholder('{"Authorization": "Bearer ..."}')
-					.setValue(JSON.stringify(this.plugin.settings.headers, null, 2))
+					.setPlaceholder('Enter your API key')
+					.setValue(this.plugin.settings.apiKey || '')
 					.onChange(async (value) => {
-						try {
-							const parsed = JSON.parse(value);
-							this.plugin.settings.headers = parsed;
-							await this.plugin.saveSettings();
-						} catch (e: unknown) {
-							console.debug('Invalid JSON payload typed in settings; waiting for correction.', e);
+						this.plugin.settings.apiKey = value.trim();
+						await this.plugin.saveSettings();
+						if (this.plugin.getRemoteStore()) {
+							this.plugin.getRemoteStore()?.setApiKey(value.trim());
 						}
 					})
 			);
@@ -67,7 +65,7 @@ export class SettingsTab extends PluginSettingTab {
 					.setPlaceholder('Enter admin token')
 					.setValue(this.plugin.settings.adminToken || '')
 					.onChange(async (value) => {
-						this.plugin.settings.adminToken = value;
+						this.plugin.settings.adminToken = value.trim();
 						await this.plugin.saveSettings();
 					})
 			);
@@ -86,7 +84,7 @@ export class SettingsTab extends PluginSettingTab {
 					.setButtonText('Regenerate Salt')
 					.setWarning()
 					.onClick(async () => {
-						if (confirm('Warning: Regenerating the salt will change your encryption key. You will lose access to any previously encrypted data in the remote Postgres database unless they are re-encrypted.')) {
+						if (confirm('Warning: Regenerating the salt will change your encryption key. You will lose access to any previously encrypted data in the remote database unless they are re-encrypted.')) {
 							this.plugin.settings.salt = this.plugin.cryptoService.generateSalt();
 							await this.plugin.saveSettings();
 							this.display();
@@ -104,7 +102,6 @@ export class SettingsTab extends PluginSettingTab {
 					.setPlaceholder('Enter secure password')
 					.setDisabled(this.plugin.isKeyDerived)
 					.onChange(async (value) => {
-						// Temp cache for derivation
 						(this as any).tempPassword = value;
 					})
 			)
@@ -140,7 +137,7 @@ export class SettingsTab extends PluginSettingTab {
 		// Test Connection Button
 		new Setting(containerEl)
 			.setName('Test Connection')
-			.setDesc('Verify that the PostgREST server is reachable and configured correctly.')
+			.setDesc('Verify that the backend server is reachable and configured correctly.')
 			.addButton((btn) =>
 				btn.setButtonText('Test')
 					.onClick(async () => {
@@ -151,9 +148,9 @@ export class SettingsTab extends PluginSettingTab {
 						}
 						const ok = await store.testConnection();
 						if (ok) {
-							new Notice('PostgREST connection test successful!');
+							new Notice('Connection test successful!');
 						} else {
-							new Notice('Connection failed. Please check your URL, headers, and CORS settings.');
+							new Notice('Connection failed. Please check your URL and API Key.');
 						}
 					})
 			);
@@ -185,7 +182,7 @@ export class SettingsTab extends PluginSettingTab {
 		// Generate Setup QR Code
 		new Setting(containerEl)
 			.setName('Generate Network QR Code')
-			.setDesc('Display a secure QR code containing Server URL, Headers, and Salt to easily onboard another device.')
+			.setDesc('Display a secure QR code containing Server URL, API Key, and Salt to easily onboard another device.')
 			.addButton((btn) =>
 				btn.setButtonText('Show QR Code')
 					.onClick(() => {
@@ -195,7 +192,7 @@ export class SettingsTab extends PluginSettingTab {
 						}
 						const payload = {
 							serverUrl: this.plugin.settings.serverUrl,
-							headers: this.plugin.settings.headers,
+							apiKey: this.plugin.settings.apiKey,
 							salt: this.plugin.settings.salt
 						};
 						const modal = new QrDisplayModal(this.app, 'ilow-sync://' + btoa(JSON.stringify(payload)));
@@ -218,9 +215,9 @@ export class SettingsTab extends PluginSettingTab {
 							try {
 								const base64 = text.replace('ilow-sync://', '');
 								const parsed = JSON.parse(atob(base64));
-								if (parsed.serverUrl && parsed.headers && parsed.salt) {
+								if (parsed.serverUrl && parsed.apiKey !== undefined && parsed.salt) {
 									this.plugin.settings.serverUrl = parsed.serverUrl;
-									this.plugin.settings.headers = parsed.headers;
+									this.plugin.settings.apiKey = parsed.apiKey;
 									this.plugin.settings.salt = parsed.salt;
 									await this.plugin.saveSettings();
 									this.display();
@@ -256,7 +253,6 @@ export class SettingsTab extends PluginSettingTab {
 								new Notice('Local state hard reset successful! Initiating fresh re-sync...');
 
 								if (this.plugin.isKeyDerived && this.plugin.getSyncOrchestrator()) {
-									// Make sure you bypass typing if indexManager is private or not strongly typed on `MyPlugin`
 									await (this.plugin as any).treeIndexManager?.initialize();
 									await this.plugin.getSyncOrchestrator()?.runFullSync();
 									new Notice('Local re-sync completed successfully!');

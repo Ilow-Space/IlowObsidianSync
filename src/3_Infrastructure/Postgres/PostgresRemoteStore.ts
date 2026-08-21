@@ -6,17 +6,29 @@ import { requestUrl } from 'obsidian';
 
 export class PostgresRemoteStore implements IRemoteStore {
 	private serverUrl: string;
+	private apiKey: string;
 	private headers: Record<string, string>;
 	private vaultAliasId: string = '';
 	private socket: WebSocket | null = null;
 	private subscriptions = new Map<string, Array<(docId?: string, action?: string) => void>>();
 
-	constructor(serverUrl: string, headers: Record<string, string>) {
+	constructor(serverUrl: string, apiKey: string, customHeaders: Record<string, string> = {}) {
 		this.serverUrl = serverUrl.replace(/\/$/, '');
+		this.apiKey = apiKey;
 		this.headers = {
 			'Content-Type': 'application/json',
-			...headers
+			'X-API-Key': apiKey, // Injected for REST HTTP requests
+			...customHeaders
 		};
+	}
+
+	public setApiKey(apiKey: string) {
+		this.apiKey = apiKey;
+		this.headers['X-API-Key'] = apiKey;
+		if (this.socket) {
+			this.disconnect();
+			this.connectWebSocket(this.serverUrl.replace(/^http/i, 'ws'));
+		}
 	}
 
 	public setVaultAliasId(vaultAliasId: string) {
@@ -33,7 +45,6 @@ export class PostgresRemoteStore implements IRemoteStore {
 		}
 	}
 
-	// NEW BULK FETCH IMPLEMENTATION
 	public async getBulkLatestUpdateIds(): Promise<Record<string, number>> {
 		try {
 			const url = `${this.serverUrl}/api/vault/latest_ids`;
@@ -56,6 +67,12 @@ export class PostgresRemoteStore implements IRemoteStore {
 	public connectWebSocket(wssUrl: string) {
 		try {
 			const socketUrl = new URL(wssUrl);
+
+			// Pass API key via query parameter to satisfy Nginx $arg_api_key validation
+			if (this.apiKey) {
+				socketUrl.searchParams.set('api_key', this.apiKey);
+			}
+
 			if (this.vaultAliasId) {
 				socketUrl.searchParams.set('vault_alias_id', this.vaultAliasId);
 			}
@@ -127,27 +144,27 @@ export class PostgresRemoteStore implements IRemoteStore {
 			this.subscriptions.set(documentId, []);
 		}
 
-		this.subscriptions.get(documentId)!.push(onUpdateDetected);
+        this.subscriptions.get(documentId)!.push(onUpdateDetected);
 
-		if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-			this.socket.send(JSON.stringify({
-				action: 'subscribe',
-				filter: `document_id=eq.${documentId}`,
-				vault_alias_id: this.vaultAliasId
-			}));
-		}
+        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+        	this.socket.send(JSON.stringify({
+        		action: 'subscribe',
+        		filter: `document_id=eq.${documentId}`,
+        		vault_alias_id: this.vaultAliasId
+        	}));
+        }
 
-		return () => {
-			const callbacks = this.subscriptions.get(documentId);
-			if (callbacks) {
-				const remaining = callbacks.filter(cb => cb !== onUpdateDetected);
-				if (remaining.length === 0) {
-					this.subscriptions.delete(documentId);
-				} else {
-					this.subscriptions.set(documentId, remaining);
-				}
-			}
-		};
+        return () => {
+        	const callbacks = this.subscriptions.get(documentId);
+        	if (callbacks) {
+        		const remaining = callbacks.filter(cb => cb !== onUpdateDetected);
+        		if (remaining.length === 0) {
+        			this.subscriptions.delete(documentId);
+        		} else {
+        			this.subscriptions.set(documentId, remaining);
+        		}
+        	}
+        };
 	}
 
 	public disconnect() {
