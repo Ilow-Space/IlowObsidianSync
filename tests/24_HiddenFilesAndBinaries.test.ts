@@ -33,6 +33,18 @@ describe('Hidden Files (Config) & Binary Assets Sync Operations', () => {
             vault: {
                 configDir: '.obsidian',
                 getAbstractFileByPath: vi.fn((p: string) => mockVaultFiles.get(p) || null),
+                create: vi.fn(async (p: string, content: string) => {
+                    const f = { path: p, content };
+                    mockVaultFiles.set(p, f);
+                    return f;
+                }),
+                createFolder: vi.fn(async (p: string) => {
+                    const f = { path: p, isFolder: true };
+                    mockVaultFiles.set(p, f);
+                    return f;
+                }),
+                read: vi.fn(async (f: any) => f.content || ''),
+                modify: vi.fn(async (f: any, content: string) => { f.content = content; }),
                 adapter: {
                     exists: vi.fn(async (p: string) => mockAdapterFiles.has(p)),
                     read: vi.fn(async (p: string) => mockAdapterFiles.get(p)),
@@ -201,14 +213,15 @@ describe('Hidden Files (Config) & Binary Assets Sync Operations', () => {
         });
 
         it('Conflict: Rebalances duplicate image paths gracefully', async () => {
-            // Disk already has the image
-            mockVaultFiles.set('Attachments/diagram.png', { path: 'Attachments/diagram.png', isBinary: true });
+            // Disk already has the image with different content
+            mockVaultFiles.set('Attachments/diagram.png', { path: 'Attachments/diagram.png', isBinary: true, content: 'local-binary-data' });
 
-            // Remote node creation arrives
+            // Remote node creation arrives with different content
             eventBus.emit('CrdtNodeCreated', {
                 uuid: 'remote-diagram-uuid',
                 path: 'Attachments/diagram.png',
-                isFolder: false
+                isFolder: false,
+                content: 'remote-binary-data'
             });
 
             await diskReconciler.onIdle();
