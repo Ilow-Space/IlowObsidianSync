@@ -37,6 +37,7 @@ var (
 	activeWebSockets int64
 	reqsLastSecond   uint64
 	reqsLastHour     uint64
+	gcReclaimedBytes uint64
 	currentRPS       float64
 	currentRPM       float64
 	telemetryMux     sync.Mutex
@@ -51,6 +52,7 @@ type ServerTelemetry struct {
 	MemoryAllocMB        float64 `json:"memoryAllocMb"`
 	DBConnections        int     `json:"dbConnections"`
 	SystemHealth         string  `json:"systemHealth"`
+	GCReclaimedBytes     uint64  `json:"gcReclaimedBytes"`
 }
 
 var upgrader = websocket.Upgrader{
@@ -174,7 +176,52 @@ func runIdleOptimizations() {
 		}
 	}
 
+	// 3. Blob Garbage Collection
+	go runBlobGarbageCollection()
+
 	log.Println("[Self-Optimization] Maintenance complete. Server is operating at peak efficiency.")
+}
+
+func runBlobGarbageCollection() {
+	if db == nil {
+		return
+	}
+	log.Println("[Blob-GC] Starting background blob garbage collection cycle...")
+	start := time.Now()
+
+	query := `
+		DELETE FROM vault_blobs
+		WHERE created_at < NOW() - INTERVAL '7 days'
+		  AND vault_alias_id IN (SELECT vault_alias_id FROM vault_blob_manifests)
+		  AND NOT EXISTS (
+			  SELECT 1 FROM vault_blob_manifests m
+			  WHERE m.vault_alias_id = vault_blobs.vault_alias_id
+			    AND m.active_hashes @> jsonb_build_array(vault_blobs.blob_hash)
+		  )
+		RETURNING COALESCE(OCTET_LENGTH(data), 0);
+	`
+
+	rows, err := db.Query(query)
+	if err != nil {
+		log.Printf("[Blob-GC] Error running blob garbage collection: %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	var totalReclaimed uint64
+	for rows.Next() {
+		var size uint64
+		if err := rows.Scan(&size); err == nil {
+			totalReclaimed += size
+		}
+	}
+
+	if totalReclaimed > 0 {
+		atomic.AddUint64(&gcReclaimedBytes, totalReclaimed)
+		log.Printf("[Blob-GC] Cleaned up unreferenced blobs, reclaimed %d bytes in %v.\n", totalReclaimed, time.Since(start))
+	} else {
+		log.Printf("[Blob-GC] Garbage collection finished in %v. No unreferenced blobs to purge.\n", time.Since(start))
+	}
 }
 
 func main() {
@@ -221,6 +268,7 @@ func main() {
 	mux.HandleFunc("GET /", handleWebSocket)
 	mux.HandleFunc("GET /api/telemetry", handleGetTelemetry)
 	mux.HandleFunc("GET /api/vault/manifest", handleGetManifest)
+	mux.HandleFunc("POST /api/blobs/manifest", handlePostBlobManifest)
 	mux.HandleFunc("GET /api/vault/latest_ids", handleGetBulkLatestUpdateIDs) // NEW BULK ENDPOINT
 	mux.HandleFunc("GET /api/snapshots/{id}", handleGetSnapshot)
 	mux.HandleFunc("GET /api/snapshots/{id}/updates", handleGetUpdates)
@@ -339,6 +387,19 @@ func runMigrations() {
 		`CREATE TRIGGER vault_update_trigger
 		AFTER INSERT ON vault_updates
 		FOR EACH ROW EXECUTE FUNCTION notify_vault_update();`,
+		`CREATE TABLE IF NOT EXISTS vault_blob_manifests (
+			vault_alias_id TEXT PRIMARY KEY,
+			active_hashes JSONB NOT NULL DEFAULT '[]'::jsonb,
+			updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS vault_blobs (
+			vault_alias_id TEXT NOT NULL,
+			blob_hash TEXT NOT NULL,
+			data BYTEA,
+			created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (vault_alias_id, blob_hash)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_vault_blobs_created_at ON vault_blobs(created_at);`,
 	}
 
 	for idx, query := range migrations {
@@ -387,7 +448,53 @@ func handleGetTelemetry(w http.ResponseWriter, r *http.Request) {
 		MemoryAllocMB:        float64(memStats.Alloc) / 1024 / 1024,
 		DBConnections:        openConns,
 		SystemHealth:         "healthy",
+		GCReclaimedBytes:     atomic.LoadUint64(&gcReclaimedBytes),
 	})
+}
+
+type BlobManifestPayload struct {
+	ActiveHashes []string `json:"active_hashes"`
+}
+
+func handlePostBlobManifest(w http.ResponseWriter, r *http.Request) {
+	vaultAliasID := getVaultAliasIDHeader(r)
+	if vaultAliasID == "" {
+		http.Error(w, "X-Vault-Alias-ID header is required", http.StatusBadRequest)
+		return
+	}
+
+	var payload BlobManifestPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if payload.ActiveHashes == nil {
+		payload.ActiveHashes = []string{}
+	}
+
+	hashesJSON, err := json.Marshal(payload.ActiveHashes)
+	if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	query := `
+		INSERT INTO vault_blob_manifests (vault_alias_id, active_hashes, updated_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (vault_alias_id) DO UPDATE
+		SET active_hashes = EXCLUDED.active_hashes, updated_at = NOW();
+	`
+
+	_, err = db.Exec(query, vaultAliasID, hashesJSON)
+	if err != nil {
+		log.Printf("Error upserting blob manifest: %v", err)
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "manifest_received"})
 }
 
 func getVaultAliasIDHeader(r *http.Request) string {

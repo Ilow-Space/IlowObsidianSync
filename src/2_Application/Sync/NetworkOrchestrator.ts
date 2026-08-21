@@ -280,6 +280,16 @@ export class NetworkOrchestrator {
 	        // --- 3. INGEST LOCAL OFFLINE MODIFICATIONS AND CREATIONS ---
 	        await this.ingestLocalOfflineNotes(bulkUpdates);
 
+	        // --- 4. REPORT ACTIVE BLOB MANIFEST FOR SERVER-SIDE GC ---
+	        try {
+	            const activeHashes = this.vfsController.getActiveBlobHashes();
+	            if (typeof this.remoteStore.uploadBlobManifest === 'function') {
+	                await this.remoteStore.uploadBlobManifest(activeHashes);
+	            }
+	        } catch (manifestErr) {
+	            console.warn('[NetworkOrchestrator] Failed to upload active blob manifest:', manifestErr);
+	        }
+
 	        this.isInitialized = true;
 	        console.log('[NetworkOrchestrator] Full Sync Complete.');
 	    } catch (error) {

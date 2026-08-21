@@ -375,6 +375,23 @@ export class PostgresRemoteStore implements IRemoteStore {
 		}
 	}
 
+	public async uploadBlobManifest(hashes: string[]): Promise<void> {
+		const url = `${this.serverUrl}/api/blobs/manifest`;
+		const res = await requestUrl({
+			url: url,
+			method: 'POST',
+			headers: this.headers,
+			body: JSON.stringify({
+				active_hashes: hashes
+			}),
+			throw: false
+		});
+
+		if (res.status < 200 || res.status >= 300) {
+			throw new Error(`Failed to upload blob manifest: ${res.status}. Details: ${res.text}`);
+		}
+	}
+
 	public async fetchManifest(): Promise<RemoteManifestItem[]> {
 		const url = `${this.serverUrl}/api/vault/manifest`;
 		const res = await requestUrl({

@@ -35,6 +35,7 @@ func TestXVaultAliasIDHeaderRequired(t *testing.T) {
 		{"POST", "/api/updates", handlePostUpdate},
 		{"POST", "/api/snapshots/test-doc/compact", handlePostCompact},
 		{"DELETE", "/api/snapshots/test-doc", handleDeleteSnapshot},
+		{"POST", "/api/blobs/manifest", handlePostBlobManifest},
 	}
 
 	for _, ep := range endpoints {

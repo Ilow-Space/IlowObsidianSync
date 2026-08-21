@@ -17,6 +17,7 @@ export interface ServerTelemetry {
     memoryAllocMb: number;
     dbConnections: number;
     systemHealth: 'healthy' | 'degraded' | 'critical';
+    gcReclaimedBytes?: number;
 }
 
 export interface SnapshotDetails {
@@ -34,6 +35,7 @@ export interface IRemoteStore {
     pushUpdate(documentId: string, update: EncryptedBlob, encryptedPath?: EncryptedBlob | null): Promise<void>;
     compactSnapshot(documentId: string, newState: EncryptedBlob, maxId: number, isDeleted: boolean, encryptedPath?: EncryptedBlob | null): Promise<void>;
     fetchManifest(): Promise<RemoteManifestItem[]>;
+    uploadBlobManifest(hashes: string[]): Promise<void>;
     deleteSnapshot(documentId: string): Promise<void>;
     truncateServer(adminToken: string): Promise<void>;
     testConnection(): Promise<boolean>;

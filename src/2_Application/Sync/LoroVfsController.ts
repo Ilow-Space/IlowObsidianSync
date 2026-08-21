@@ -112,6 +112,24 @@ export class LoroVfsController {
 		return this.uuidToLastKnownPath.get(uuid) || null;
 	}
 
+	public getActiveBlobHashes(): string[] {
+		const hashes = new Set<string>();
+		const nodes = this.loroTree.getNodes();
+
+		for (const node of nodes) {
+			try {
+				if (!node.isDeleted() && node.data.get('isDeleted') !== true) {
+					const blobHash = node.data.get('blob_hash') as string;
+					if (blobHash && typeof blobHash === 'string' && blobHash.trim().length > 0) {
+						hashes.add(blobHash.trim());
+					}
+				}
+			} catch (e) {}
+		}
+
+		return Array.from(hashes);
+	}
+
 	public getActiveFiles(): Array<{ uuid: string; path: string; type: string }> {
 		const result: Array<{ uuid: string; path: string; type: string }> = [];
 		const nodes = this.loroTree.getNodes();
