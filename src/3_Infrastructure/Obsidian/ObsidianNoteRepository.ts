@@ -2,6 +2,8 @@ import { INoteRepository } from '@domain/Interfaces/INoteRepository';
 import { App, TFile } from 'obsidian';
 
 export class ObsidianNoteRepository implements INoteRepository {
+	public changeCallbacks: Array<(path: string, content: string) => void> = [];
+
 	constructor(private app: App) {}
 
 	public async readNote(path: string): Promise<string | null> {
@@ -38,6 +40,6 @@ export class ObsidianNoteRepository implements INoteRepository {
 	}
 
 	public onNoteChange(callback: (path: string, content: string) => void): void {
-		// Deprecated: VaultEventWatcher now handles event emission
+		this.changeCallbacks.push(callback);
 	}
 }

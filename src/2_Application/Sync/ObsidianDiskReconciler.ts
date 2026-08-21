@@ -75,17 +75,34 @@ export class ObsidianDiskReconciler {
 					let isConflict = false;
 
 					if (existing) {
-						isConflict = true;
-						let counter = 1;
-						const extIdx = payload.path.lastIndexOf('.');
-						const hasExt = extIdx > 0 && !payload.isFolder;
-						const base = hasExt ? payload.path.substring(0, extIdx) : payload.path;
-						const ext = hasExt ? payload.path.substring(extIdx) : '';
+						let isIdentical = false;
 
-						while (existing) {
-							targetPath = `${base} (Conflict ${counter})${ext}`;
-							existing = this.app.vault.getAbstractFileByPath(targetPath);
-							counter++;
+						if (!payload.isFolder && existing instanceof TFile) {
+							try {
+								const localContent = await this.app.vault.read(existing);
+								const remoteContent = payload.content || '';
+								isIdentical = (localContent === remoteContent);
+							} catch (e) {}
+						}
+
+						if (isIdentical) {
+							this.eventBus.emit('RebalancePathUuid', {
+								path: payload.path,
+								remoteUuid: payload.uuid
+							});
+						} else {
+							isConflict = true;
+							let counter = 1;
+							const extIdx = payload.path.lastIndexOf('.');
+							const hasExt = extIdx > 0 && !payload.isFolder;
+							const base = hasExt ? payload.path.substring(0, extIdx) : payload.path;
+							const ext = hasExt ? payload.path.substring(extIdx) : '';
+
+							while (existing) {
+								targetPath = `${base} (Conflict ${counter})${ext}`;
+								existing = this.app.vault.getAbstractFileByPath(targetPath);
+								counter++;
+							}
 						}
 					}
 
@@ -98,9 +115,17 @@ export class ObsidianDiskReconciler {
 							if (parentPath && parentPath !== targetPath) {
 								await this.ensureFolderExists(parentPath);
 							}
-							await this.app.vault.create(targetPath, payload.content || '');
+
+							const fileObj = this.app.vault.getAbstractFileByPath(targetPath);
+							if (fileObj && fileObj instanceof TFile) {
+							// Overwrite identical disk file with remote priority content
+								await this.app.vault.modify(fileObj, payload.content || '');
+							} else {
+								await this.app.vault.create(targetPath, payload.content || '');
+							}
 						}
 
+						// Only trigger local rename emission if an actual conflict path was created
 						if (isConflict) {
 							setTimeout(() => {
 								this.eventBus.emit('LocalFileRenamed', {
@@ -110,7 +135,7 @@ export class ObsidianDiskReconciler {
 							}, 50);
 						}
 					} catch (e) {
-						console.error('[ObsidianDiskReconciler] Failed to create file/folder:', e);
+						console.error('[ObsidianDiskReconciler] Failed to create/reconcile file or folder:', e);
 					} finally {
 						ObsidianDiskReconciler.unsuppressPath(targetPath);
 					}
@@ -170,21 +195,29 @@ export class ObsidianDiskReconciler {
 
 	                // Handle collision if target already exists instead of silent return
 	                if (targetExists && targetExists.path !== payload.oldPath) {
-	                    if ((targetExists as any).stat?.size === 0) {
-	                        // Trash 0-byte ghost files occupying the path
-	                        await this.app.vault.trash(targetExists, true);
-	                    } else {
-	                        // Generate conflict path if target is a legitimate file
-	                        let counter = 1;
-	                        const extIdx = targetPath.lastIndexOf('.');
-	                        const base = extIdx > 0 ? targetPath.substring(0, extIdx) : targetPath;
-	                        const ext = extIdx > 0 ? targetPath.substring(extIdx) : '';
-	                        while (this.app.vault.getAbstractFileByPath(targetPath)) {
-	                            targetPath = `${base} (Conflict ${counter})${ext}`;
-	                            counter++;
-	                        }
-	                    }
-	                }
+						let isIdentical = false;
+						if (targetExists instanceof TFile) {
+							try {
+								const doc = await this.syncEngine.getOrCreateDoc(payload.uuid);
+								const remoteContent = doc.getText('markdown').toString();
+								this.syncEngine.removeDoc(payload.uuid);
+								const localContent = await this.app.vault.read(targetExists);
+								isIdentical = (localContent === remoteContent);
+							} catch (e) {}
+						}
+
+						if (!isIdentical) {
+							// Generate (Conflict N) suffix only on distinct content
+							let counter = 1;
+							const extIdx = targetPath.lastIndexOf('.');
+							const base = extIdx > 0 ? targetPath.substring(0, extIdx) : targetPath;
+							const ext = extIdx > 0 ? targetPath.substring(extIdx) : '';
+							while (this.app.vault.getAbstractFileByPath(targetPath)) {
+								targetPath = `${base} (Conflict ${counter})${ext}`;
+								counter++;
+							}
+						}
+					}
 
 	                const pathsToSuppress = [payload.oldPath, targetPath];
 	                const prefix = payload.oldPath.endsWith('/') ? payload.oldPath : payload.oldPath + '/';
@@ -277,6 +310,10 @@ export class ObsidianDiskReconciler {
 				this.releaseFileMutex(payload.path);
 			}
 		});
+	}
+
+	public async onIdle(): Promise<void> {
+		await this.diskQueue.onIdle();
 	}
 
 	public destroy(): void {

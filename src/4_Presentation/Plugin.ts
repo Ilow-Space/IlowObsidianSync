@@ -162,7 +162,9 @@ export default class MyPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
-		this.initializeSyncOrchestrator();
+		if (this.derivedKey) {
+			this.initializeSyncOrchestrator();
+		}
 	}
 
 	public getRemoteStore(): PostgresRemoteStore | null {
@@ -207,7 +209,7 @@ export default class MyPlugin extends Plugin {
 			this.derivedKey = await this.cryptoService.deriveKey(password, this.settings.salt);
 
 			const exportedKey = await this.cryptoService.exportKey(this.derivedKey);
-			await (this.app as any).secretStorage.setSecret('ilow-master-key', exportedKey);
+			(this.app as any).secretStorage?.setSecret('ilow-master-key', exportedKey)?.catch(() => {});
 
 			await this.initializeSyncOrchestrator();
 
@@ -257,11 +259,6 @@ export default class MyPlugin extends Plugin {
 			});
 
 			await this.networkOrchestrator.runFullSync();
-
-			const activeFile = this.app.workspace.getActiveFile();
-			if (activeFile && activeFile.extension === 'md') {
-				await this.networkOrchestrator.pullDocument(activeFile.path);
-			}
 
 			this.updateStatusBar('synced', 'Fully synced');
 		} catch (err) {
@@ -333,10 +330,11 @@ export default class MyPlugin extends Plugin {
 				this.vfsController,
 				this.eventBus,
 				(status, msg) => this.updateStatusBar(status, msg),
-				this.settings.syncDebounceMs
+				this.settings.syncDebounceMs,
+				this.diskReconciler
 			);
 
-			this.vfsController.initialize();
+			await this.vfsController.initialize();
 			this.diskReconciler.initialize();
 			this.vaultEventWatcher.initialize();
 			this.networkOrchestrator.initialize();

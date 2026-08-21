@@ -7,7 +7,7 @@ import 'dotenv/config';
 // Respect process.env.BACKEND_URL from your environment
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:3001';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'A547245O7B57F75A7U7B4F7U57I75E7D27b4A5U75IEFBaszsjbuif32772525b?';
-const MASTER_PASSWORD = process.env.MASTER_PASSWORD || '1';
+const MASTER_PASSWORD = '1';
 
 const vaultAPath = path.join(process.cwd(), 'test', 'vaults', 'vaultA').replace(/\\/g, '/');
 const vaultBPath = path.join(process.cwd(), 'test', 'vaults', 'vaultB').replace(/\\/g, '/');
@@ -68,43 +68,40 @@ async function dumpObsidianLogs(tag: string) {
 
 async function ensurePluginUnlocked(pwd = MASTER_PASSWORD) {
     await browser.waitUntil(async () => {
-        return await browser.execute(() => {
+        return await browser.execute(async (pass, backendUrl) => {
             const app = (window as any).app;
-            return app && app.plugins && Object.keys(app.plugins.plugins).length > 0;
-        });
-    }, { timeout: 30000, timeoutMsg: 'Plugin failed to initialize in memory.' });
+            if (!app || !app.plugins || Object.keys(app.plugins.plugins).length === 0) return false;
 
-    await browser.execute(() => {
-        if ((window as any).__logsAttached) return;
-        (window as any).__logsAttached = true;
-        (window as any).__obsidianLogs = [];
+            if (!(window as any).__logsAttached) {
+                (window as any).__logsAttached = true;
+                (window as any).__obsidianLogs = [];
+                const formatArg = (a: any) => typeof a === 'object' ? JSON.stringify(a) : String(a);
+                const origLog = console.log;
+                console.log = (...args: any[]) => {
+                    (window as any).__obsidianLogs.push(`[LOG] ${args.map(formatArg).join(' ')}`);
+                    origLog.apply(console, args);
+                };
+            }
 
-        const formatArg = (a: any) => typeof a === 'object' ? JSON.stringify(a) : String(a);
-        const origLog = console.log;
+            if (app.internalPlugins?.plugins?.sync?.enabled) {
+                await app.internalPlugins.plugins.sync.disable();
+            }
+            const pluginId = Object.keys(app.plugins.plugins)[0];
+            const plugin = app.plugins.plugins[pluginId];
+            if (!plugin) return false;
 
-        console.log = (...args: any[]) => {
-            (window as any).__obsidianLogs.push(`[LOG] ${args.map(formatArg).join(' ')}`);
-            origLog.apply(console, args);
-        };
-    });
+            if (plugin.settings.serverUrl !== backendUrl || plugin.settings.syncDebounceMs !== 100) {
+                plugin.settings.syncDebounceMs = 100;
+                plugin.settings.serverUrl = backendUrl;
+                await plugin.saveSettings();
+            }
 
-    await browser.execute(async (pass, backendUrl) => {
-        const app = (window as any).app;
-        if (app.internalPlugins?.plugins?.sync?.enabled) {
-            await app.internalPlugins.plugins.sync.disable();
-        }
-        const pluginId = Object.keys(app.plugins.plugins)[0];
-        const plugin = app.plugins.plugins[pluginId];
-        if (!plugin) return;
-        
-        plugin.settings.syncDebounceMs = 100;
-        plugin.settings.serverUrl = backendUrl;
-        await plugin.saveSettings();
-        
-        if (plugin?.deriveKeyFromPassword) {
-            await plugin.deriveKeyFromPassword(pass);
-        }
-    }, pwd, BACKEND_URL);
+            if (plugin?.deriveKeyFromPassword && !plugin.derivedKey) {
+                await plugin.deriveKeyFromPassword(pass);
+            }
+            return true;
+        }, pwd, BACKEND_URL);
+    }, { timeout: 30000, interval: 50, timeoutMsg: 'Plugin failed to initialize in memory.' });
 
     try {
         await browser.waitUntil(async () => {
@@ -112,7 +109,7 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD) {
                 const logs = (window as any).__obsidianLogs || [];
                 return logs.some((l: string) => l.includes('[NetworkOrchestrator] Full Sync Complete.'));
             });
-        }, { timeout: 15000, timeoutMsg: 'Plugin failed to complete initial background sync.' });
+        }, { timeout: 15000, interval: 50, timeoutMsg: 'Plugin failed to complete initial background sync.' });
     } catch (e) {
         throw e;
     }
@@ -254,17 +251,16 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
             const app = (window as any).app;
             const folder = app.vault.getAbstractFileByPath('FastRenameFolder');
             if (folder) await app.fileManager.renameFile(folder, 'FastRenameFolderRenamed');
+            const plugin = app.plugins.plugins['ilow-sync'];
+            if (plugin?.vfsController) plugin.vfsController.flushPendingPush();
         });
-        
-        // Let the local mutation enqueue and push over network before tearing down plugin
-        await browser.pause(500); 
 
-        await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
+        await browser.reloadObsidian({ vault: vaultBPath });
         await ensurePluginUnlocked(MASTER_PASSWORD);
 
         await browser.waitUntil(async () => {
             return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('FastRenameFolderRenamed/Doc1.md') !== null);
-        }, { timeout: 25000 });
+        }, { timeout: 25000, interval: 50 });
 
         const elapsedTimeMs = Date.now() - startTime;
         expect(elapsedTimeMs).toBeLessThanOrEqual(2000);
@@ -328,8 +324,9 @@ describe('Execution Speed, Telemetry & VFS Deletion Bug Regressions', () => {
             };
 
             const file = app.vault.getAbstractFileByPath('EchoTest.md');
-            plugin.noteRepo.changeCallbacks.forEach((cb: any) => cb(file.path, 'Initial remote content'));
-            plugin.noteRepo.changeCallbacks.forEach((cb: any) => cb(file.path, 'Initial remote content'));
+            const callbacks = plugin.noteRepo?.changeCallbacks || [];
+            callbacks.forEach((cb: any) => cb(file.path, 'Initial remote content'));
+            callbacks.forEach((cb: any) => cb(file.path, 'Initial remote content'));
 
             setTimeout(() => done(pushCount), 500);
         });

@@ -59,17 +59,34 @@ describe('Bug Reproduction: Offline Moves, Crashes & Duplications', () => {
         vfsController = new LoroVfsController(syncEngine, eventBus);
         await vfsController.initialize();
 
+        mockVaultFiles.clear();
+
         appMock = {
             vault: {
                 on: vi.fn(),
-                getAbstractFileByPath: vi.fn(),
-                create: vi.fn().mockResolvedValue(undefined),
+                getAbstractFileByPath: vi.fn().mockImplementation((p: string) => mockVaultFiles.get(p) || null),
+                create: vi.fn().mockImplementation(async (path: string, content: string) => {
+                    const f = new TFile();
+                    (f as any).path = path;
+                    mockVaultFiles.set(path, f);
+                }),
+                createFolder: vi.fn().mockImplementation(async (path: string) => {
+                    const f = new TFolder();
+                    (f as any).path = path;
+                    mockVaultFiles.set(path, f);
+                }),
                 modify: vi.fn().mockResolvedValue(undefined),
-                trash: vi.fn().mockResolvedValue(undefined),
+                trash: vi.fn().mockImplementation(async (file: any) => {
+                    if (file && file.path) mockVaultFiles.delete(file.path);
+                }),
                 read: vi.fn().mockResolvedValue('Mock Content')
             },
             fileManager: {
-                renameFile: vi.fn().mockResolvedValue(undefined)
+                renameFile: vi.fn().mockImplementation(async (file: any, newPath: string) => {
+                    if (file && file.path) mockVaultFiles.delete(file.path);
+                    file.path = newPath;
+                    mockVaultFiles.set(newPath, file);
+                })
             }
         };
 
@@ -92,7 +109,10 @@ describe('Bug Reproduction: Offline Moves, Crashes & Duplications', () => {
 
         orchestrator = new NetworkOrchestrator(
             remoteStoreMock,
-            { encrypt: vi.fn(), decrypt: vi.fn() } as any, // Mock crypto
+            {
+                encrypt: vi.fn().mockImplementation(async (data: Uint8Array) => ({ ciphertext: Buffer.from(data).toString('base64') })),
+                decrypt: vi.fn().mockImplementation(async (enc: any) => new Uint8Array(Buffer.from(enc.ciphertext, 'base64')))
+            } as any,
             syncEngine,
             noteRepoMock,
             vfsController,
@@ -299,11 +319,16 @@ describe('Bug Reproduction: Offline Moves, Crashes & Duplications', () => {
         const textDelta = remoteTextDoc.export({ mode: 'update' });
 
         remoteStoreMock.getBulkLatestUpdateIds.mockResolvedValue({ 'shard-index': 0, 'edit-uuid': 103 });
-        remoteStoreMock.fetchUpdatesSince.mockResolvedValueOnce([{
-            id: 103, 
-            documentId: 'edit-uuid', 
-            encryptedUpdate: { ciphertext: Buffer.from(textDelta).toString('base64') }
-        }]);
+        remoteStoreMock.fetchUpdatesSince.mockImplementation(async (docId: string) => {
+            if (docId === 'edit-uuid') {
+                return [{
+                    id: 103, 
+                    documentId: 'edit-uuid', 
+                    encryptedUpdate: { ciphertext: Buffer.from(textDelta).toString('base64') }
+                }];
+            }
+            return [];
+        });
 
         // 4. Trigger sync
         await orchestrator.runFullSync();
@@ -526,5 +551,91 @@ it('TEST 6: Exposes massive performance leak in ObsidianNoteRepository (Vestigia
             expect(appMock.vault.trash).toHaveBeenCalledWith(expect.any(TFolder), true);
         });
     });
+describe('CRDT Node Deduplication & Path Collision Self-Healing', () => {
+
+	it('Purges duplicate CRDT tree nodes safely via RebalancePathUuid event', async () => {
+	const treeDoc = await syncEngine.getOrCreateDoc('shard-index');
+	const tree = treeDoc.getTree('vault-tree');
+
+	const node1 = tree.createNode();
+	node1.data.set('uuid', 'local-uuid');
+	node1.data.set('filename', 'test.md');
+	node1.data.set('type', 'file');
+
+	const node2 = tree.createNode();
+	node2.data.set('uuid', 'remote-uuid');
+	node2.data.set('filename', 'test.md');
+	node2.data.set('type', 'file');
+
+	treeDoc.commit();
+	vfsController.rebuildCache();
+
+	// Simulate Disk Reconciler discovering identical contents and triggering safe rebalance
+	eventBus.emit('RebalancePathUuid', { path: 'test.md', remoteUuid: 'remote-uuid' });
+	await new Promise(r => setTimeout(r, 50));
+
+	const activeFiles = vfsController.getActiveFiles();
+	expect(activeFiles.length).toBe(1);
+	expect(activeFiles[0].uuid).toBe('remote-uuid');
+
+	// FIX: Check active nodes instead of hunting for deleted ones, 
+	// since tree.delete() structurally removes the losing node entirely.
+	const remainingNodes = tree.getNodes();
+	expect(remainingNodes.length).toBe(1);
+	expect(remainingNodes[0].data.get('uuid')).toBe('remote-uuid');
+});
+
+	it('Suppresses CrdtNodeSoftDeleted when rebinding node to protect physical file on disk', async () => {
+	const softDeleteSpy = vi.fn();
+	eventBus.on('CrdtNodeSoftDeleted', softDeleteSpy);
+
+	const treeDoc = await syncEngine.getOrCreateDoc('shard-index');
+	const tree = treeDoc.getTree('vault-tree');
+
+	const node1 = tree.createNode();
+	node1.data.set('uuid', 'local-uuid');
+	node1.data.set('filename', 'test.md');
+	node1.data.set('type', 'file');
+	
+	// FIX: Inject the incoming remote node so the tree isn't left empty during the cache rebuild
+	const node2 = tree.createNode();
+	node2.data.set('uuid', 'incoming-remote-uuid');
+	node2.data.set('filename', 'test.md');
+	node2.data.set('type', 'file');
+
+	treeDoc.commit();
+	vfsController.rebuildCache();
+
+	// Execute safe rebalance
+	eventBus.emit('RebalancePathUuid', { path: 'test.md', remoteUuid: 'incoming-remote-uuid' });
+	
+	// Re-process diffs
+	(vfsController as any).rebuildCacheAndEmitRemoteDiffs();
+	
+	expect(softDeleteSpy).not.toHaveBeenCalled();
+	expect(appMock.vault.trash).not.toHaveBeenCalled();
+});
+
+	it('Prevents duplicate conflict file generation on concurrent remote moves to the same path with identical content', async () => {
+		const rebalanceSpy = vi.fn();
+		eventBus.on('RebalancePathUuid', rebalanceSpy);
+
+		// Set up file locally with 'matching content'
+		const f = new TFile(); f.path = 'test.md';
+		mockVaultFiles.set('test.md', f);
+		appMock.vault.read.mockResolvedValue('matching content');
+		
+		// Second concurrent node arrives
+		await (diskReconciler as any).handleCrdtNodeCreated({
+			uuid: 'concurrent-uuid',
+			path: 'test.md',
+			isFolder: false,
+			content: 'matching content'
+		});
+
+		expect(appMock.vault.create).not.toHaveBeenCalledWith('test (Conflict 1).md', expect.anything());
+		expect(rebalanceSpy).toHaveBeenCalledWith({ path: 'test.md', remoteUuid: 'concurrent-uuid' });
+	});
+});
 });
 

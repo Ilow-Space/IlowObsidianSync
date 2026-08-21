@@ -14,6 +14,7 @@ export class LoroVfsController {
 	private boundCreated = this.handleLocalFileCreated.bind(this);
 	private boundRenamed = this.handleLocalFileRenamed.bind(this);
 	private boundDeleted = this.handleLocalFileDeleted.bind(this);
+	private boundRebalance = this.handleRebalancePathUuid.bind(this);
 
 	private unsubscribeDoc: (() => void) | null = null;
 	private changeTimeout: any = null;
@@ -61,8 +62,47 @@ export class LoroVfsController {
 			this.changeTimeout = setTimeout(() => {
 				this.treeDoc.commit();
 				this.rebuildCacheAndEmitRemoteDiffs();
-			}, 50);
+			}, 10);
 		});
+
+		
+		this.eventBus.on('RebalancePathUuid', this.boundRebalance);
+	}
+
+	private handleRebalancePathUuid(payload: { path: string; remoteUuid: string }): void {
+	// Find ALL UUIDs that currently map to this path, except the winning remoteUuid
+		const uuidsToPurge: string[] = [];
+		for (const [uuid, knownPath] of this.uuidToLastKnownPath.entries()) {
+			if (knownPath === payload.path && uuid !== payload.remoteUuid) {
+				uuidsToPurge.push(uuid);
+			}
+		}
+
+		for (const localUuid of uuidsToPurge) {
+			const localNodeId = this.uuidToNodeId.get(localUuid);
+			if (localNodeId) {
+				try {
+					const targetIdStr = this.getNodeIdStr(localNodeId);
+					const freshNode = this.loroTree.getNodes().find(n => this.getNodeIdStr(n.id) === targetIdStr);
+					if (freshNode) freshNode.data.set('isDeleted', true);
+					this.loroTree.delete(localNodeId);
+				} catch (e) {}
+			}
+			this.uuidToLastKnownPath.delete(localUuid);
+			this.uuidToNodeId.delete(localUuid);
+		}
+
+		this.pathToUuid.set(payload.path, payload.remoteUuid);
+		this.uuidToLastKnownPath.set(payload.remoteUuid, payload.path);
+
+		const remoteNode = this.loroTree.getNodes().find(n => n.data.get('uuid') === payload.remoteUuid);
+		if (remoteNode) {
+			this.uuidToNodeId.set(payload.remoteUuid, remoteNode.id);
+			this.nodeIdToUuid.set(this.getNodeIdStr(remoteNode.id), payload.remoteUuid);
+		}
+
+		this.treeDoc.commit();
+		this.scheduleLocalPush();
 	}
 
 	private captureFrontierIfNeeded() {
@@ -76,7 +116,7 @@ export class LoroVfsController {
 
 		this.pushTimeout = setTimeout(() => {
 			this.flushPendingPush();
-		}, 50);
+		}, 10);
 	}
 
 	public flushPendingPush(): void {
@@ -194,9 +234,10 @@ export class LoroVfsController {
 		this.scheduleLocalPush();
 	}
 
-	private handleLocalFileDeleted(payload: { path: string }): void {
+	private handleLocalFileDeleted(payload: { path: string; uuid?: string }): void {
 		const nodeUuid = this.pathToUuid.get(payload.path);
 		if (!nodeUuid) return;
+		payload.uuid = nodeUuid;
 
 		const targetNodeId = this.uuidToNodeId.get(nodeUuid);
 		if (!targetNodeId) return;
@@ -308,32 +349,24 @@ export class LoroVfsController {
 				const isFolder = node ? node.data.get('type') === 'folder' : false;
 
 				if (!oldPath) {
-					this.eventBus.emit('CrdtNodeCreated', {
-						uuid,
-						path: newPath,
-						isFolder
-					});
+					this.eventBus.emit('CrdtNodeCreated', { uuid, path: newPath, isFolder });
 				} else if (oldPath !== newPath) {
-					console.log(`[VFS Remote Move Signal] Node ${uuid} shifted path: "${oldPath}" -> "${newPath}"`);
-					this.eventBus.emit('CrdtNodeMoved', {
-						uuid,
-						oldPath,
-						newPath
-					});
+					this.eventBus.emit('CrdtNodeMoved', { uuid, oldPath, newPath });
 				}
 			} catch (e) {}
 		}
 
 		for (const [uuid, oldPath] of oldUuidToLastKnown.entries()) {
 			if (!this.uuidToLastKnownPath.has(uuid)) {
-				this.eventBus.emit('CrdtNodeSoftDeleted', {
-					uuid,
-					path: oldPath
-				});
+			// CRITICAL SAFEGUARD: Do not emit SoftDeleted (which trashes the physical file)
+			// if the path is still actively claimed by the winning remote UUID.
+				if (this.pathToUuid.has(oldPath)) {
+					continue; 
+				}
+				this.eventBus.emit('CrdtNodeSoftDeleted', { uuid, path: oldPath });
 			}
 		}
 	}
-
 	private getOrCreateFolderChainUuid(dirPath: string): string | null {
 		if (!dirPath || dirPath === '.' || dirPath === '') return null;
 
@@ -390,6 +423,31 @@ export class LoroVfsController {
 		this.rebuildCacheAndEmitRemoteDiffs();
 	}
 
+	public isFilenameDeletedRemotely(filename: string, path: string): boolean {
+		const nodes = this.loroTree.getNodes();
+		for (const node of nodes) {
+			try {
+				if (node.data.get('filename') === filename && (node.isDeleted() || node.data.get('isDeleted') === true)) {
+					return true;
+				}
+			} catch (e) {}
+		}
+		return false;
+	}
+
+	public findMovedFileMatch(filename: string, oldPath: string): { uuid: string; path: string } | null {
+		const activeFiles = this.getActiveFiles();
+		for (const file of activeFiles) {
+			if (file.type === 'file') {
+				const fileFilename = file.path.substring(file.path.lastIndexOf('/') + 1);
+				if (fileFilename === filename && file.path !== oldPath) {
+					return { uuid: file.uuid, path: file.path };
+				}
+			}
+		}
+		return null;
+	}
+
 	public destroy(): void {
 		this.flushPendingPush();
 		this.eventBus.off('LocalFileCreated', this.boundCreated);
@@ -408,5 +466,7 @@ export class LoroVfsController {
 			clearTimeout(this.pushTimeout);
 			this.pushTimeout = null;
 		}
+		
+		this.eventBus.off('RebalancePathUuid', this.boundRebalance);
 	}
 }

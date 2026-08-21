@@ -4,6 +4,7 @@ import { LoroSyncEngine } from '@infrastructure/Crdt/LoroSyncEngine';
 import { INoteRepository } from '@domain/Interfaces/INoteRepository';
 import { LoroVfsController } from './LoroVfsController';
 import { SyncEventBus } from './SyncEventBus';
+import { ObsidianDiskReconciler } from './ObsidianDiskReconciler';
 import { Mutex } from 'async-mutex';
 import { backOff } from 'exponential-backoff';
 import pLimit from 'p-limit';
@@ -44,7 +45,8 @@ export class NetworkOrchestrator {
 		private vfsController: LoroVfsController,
 		private eventBus: SyncEventBus,
 		private statusCallback: (status: SyncStatus, msg: string) => void,
-		private debounceMs: number = 1000
+		private debounceMs: number = 1000,
+		private diskReconciler?: ObsidianDiskReconciler
 	) {}
 
 	public initialize(): void {
@@ -54,7 +56,7 @@ export class NetworkOrchestrator {
 		
 		// Garbage collect UUID tracking maps when a file is deleted locally
 		this.eventBus.on('LocalFileDeleted', (payload) => {
-			const documentId = this.vfsController.getUuidForPath(payload.path);
+			const documentId = this.vfsController.getUuidForPath(payload.path) || (payload as any).uuid;
 			if (documentId) {
 				this.fileLastSyncIds.delete(documentId);
 				this.fileUpdateCounters.delete(documentId);
@@ -196,49 +198,7 @@ export class NetworkOrchestrator {
 	            console.warn('[NetworkOrchestrator] Bulk fetch failed, falling back to sequential checks.');
 	        }
 
-	        // --- INGEST OFFLINE MODIFICATIONS AND CREATIONS FIRST ---
-	        const localPaths = typeof this.noteRepo.listAllNotes === 'function' ? await this.noteRepo.listAllNotes() : [];
-	        for (const path of localPaths) {
-	            let documentId = this.vfsController.getUuidForPath(path);
-	            const localContent = await this.noteRepo.readNote(path);
-			
-	            if (!documentId) {
-	                this.eventBus.emit('LocalFileCreated', {
-	                    path: path,
-	                    isFolder: false,
-	                    content: localContent || ''
-	                });
-	                this.vfsController.flushPendingPush();
-	                documentId = this.vfsController.getUuidForPath(path);
-	                if (documentId && localContent !== null) {
-	                    const updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent);
-	                    if (updateBinary) {
-	                        await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
-	                    }
-	                }
-	            } else if (localContent !== null) {
-	                const doc = await this.crdtEngine.getOrCreateDoc(documentId);
-	                const crdtContent = doc.getText('markdown').toString();
-	                if (localContent !== crdtContent) {
-	                    const updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent);
-	                    if (updateBinary) {
-	                        await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
-	                    }
-	                } else {
-	                    // If CRDT text is identical to localContent but hasn't been pushed remotely yet (lastId == 0), force push snapshot!
-	                    const lastSyncId = this.fileLastSyncIds.get(documentId) || 0;
-	                    const remoteLatestId = bulkUpdates[documentId] || 0;
-	                    if (lastSyncId === 0 && remoteLatestId === 0 && localContent.length > 0) {
-	                        const snapshotBytes = doc.export({ mode: 'snapshot' });
-	                        if (snapshotBytes && snapshotBytes.length > 0) {
-	                            await this.handleLocalDeltaReadyForPush({ documentId, updateBinary: snapshotBytes, path });
-	                        }
-	                    }
-	                }
-	            }
-	        }
-
-	        // --- THEN PULL REMOTE INDEX (Remote Deletions/Moves Will Cleanly Override) ---
+	        // --- FIRST PULL REMOTE INDEX AND DOCUMENTS ---
 	        const indexLatest = bulkUpdates['shard-index'] || 0;
 	        await this.pullDocument('shard-index', null, true, indexLatest);
 
@@ -248,6 +208,17 @@ export class NetworkOrchestrator {
 
 	        this.vfsController.flushPendingPush();
 	        this.vfsController.processRemoteVfsUpdates();
+	        console.log('[NetworkOrchestrator] VFS Index Processed.');
+
+	        const indexRemoteLatest = bulkUpdates['shard-index'] || 0;
+	        const indexLastSync = this.fileLastSyncIds.get('shard-index') || 0;
+	        if (indexLastSync === 0 && indexRemoteLatest === 0) {
+	            const indexDoc = await this.crdtEngine.getOrCreateDoc('shard-index');
+	            const indexSnapshot = indexDoc.export({ mode: 'snapshot' });
+	            if (indexSnapshot && indexSnapshot.length > 0) {
+	                await this.handleLocalDeltaReadyForPush({ documentId: 'shard-index', updateBinary: indexSnapshot, path: null });
+	            }
+	        }
 
 	        const activeFiles = this.vfsController.getActiveFiles().filter(file => file.type !== 'folder');
 	        const limit = pLimit(20);
@@ -260,6 +231,13 @@ export class NetworkOrchestrator {
 	        );
 	        await Promise.all(pullPromises);
 
+	        if (this.diskReconciler) {
+	            await this.diskReconciler.onIdle();
+	        }
+
+	        // --- THEN INGEST OFFLINE LOCAL MODIFICATIONS AND CREATIONS ---
+	        await this.ingestLocalOfflineNotes(bulkUpdates);
+
 	        this.isInitialized = true;
 	        console.log('[NetworkOrchestrator] Full Sync Complete.');
 	    } catch (error) {
@@ -269,6 +247,81 @@ export class NetworkOrchestrator {
 	    } finally {
 	        this.removeActiveTask('System Index');
 	        this.isSyncingFull = false;
+	    }
+	}
+
+	private async ingestLocalOfflineNotes(bulkUpdates: Record<string, number>): Promise<void> {
+	    const localPaths = typeof this.noteRepo.listAllNotes === 'function' ? await this.noteRepo.listAllNotes() : [];
+	    const limit = pLimit(10);
+	    await Promise.all(localPaths.map(path => limit(() => this.processSingleLocalPath(path, bulkUpdates))));
+	}
+
+	private async processSingleLocalPath(path: string, bulkUpdates: Record<string, number>): Promise<void> {
+	    let documentId = this.vfsController.getUuidForPath(path);
+	    const localContent = await this.noteRepo.readNote(path);
+
+	    if (!documentId) {
+	        const filename = path.substring(path.lastIndexOf('/') + 1);
+	        if (this.vfsController.isFilenameDeletedRemotely(filename, path)) {
+	            this.eventBus.emit('CrdtNodeSoftDeleted', { uuid: '', path });
+	            return;
+	        }
+
+	        const movedMatch = this.vfsController.findMovedFileMatch(filename, path);
+	        if (movedMatch) {
+	            documentId = movedMatch.uuid;
+	            this.eventBus.emit('CrdtNodeMoved', {
+	                uuid: documentId,
+	                oldPath: path,
+	                newPath: movedMatch.path
+	            });
+	        }
+	    }
+
+	    if (!documentId) {
+	        this.eventBus.emit('LocalFileCreated', {
+	            path: path,
+	            isFolder: false,
+	            content: localContent || ''
+	        });
+	        this.vfsController.flushPendingPush();
+	        documentId = this.vfsController.getUuidForPath(path);
+	        if (documentId && localContent !== null) {
+	            let updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent);
+	            if (!updateBinary && localContent.length > 0) {
+	                const remoteLatestId = bulkUpdates[documentId] || 0;
+	                const lastSyncId = this.fileLastSyncIds.get(documentId) || 0;
+	                if (lastSyncId === 0 && remoteLatestId === 0) {
+	                    const doc = await this.crdtEngine.getOrCreateDoc(documentId);
+	                    updateBinary = doc.export({ mode: 'snapshot' });
+	                }
+	            }
+	            if (updateBinary && updateBinary.length > 0) {
+	                await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
+	            }
+	        }
+	    } else if (localContent !== null) {
+	        const doc = await this.crdtEngine.getOrCreateDoc(documentId);
+	        const crdtContent = doc.getText('markdown').toString();
+	        if (localContent !== crdtContent) {
+	            let contentToApply = localContent;
+	            if (crdtContent.length > 0 && !localContent.includes(crdtContent.trim()) && !crdtContent.includes(localContent.trim())) {
+	                contentToApply = `${localContent.trim()}\n${crdtContent.trim()}\n`;
+	            }
+	            const updateBinary = await this.crdtEngine.handleLocalChange(documentId, contentToApply);
+	            if (updateBinary) {
+	                await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
+	            }
+	        } else {
+	            const lastSyncId = this.fileLastSyncIds.get(documentId) || 0;
+	            const remoteLatestId = bulkUpdates[documentId] || 0;
+	            if (lastSyncId === 0 && remoteLatestId === 0 && localContent.length > 0) {
+	                const snapshotBytes = doc.export({ mode: 'snapshot' });
+	                if (snapshotBytes && snapshotBytes.length > 0) {
+	                    await this.handleLocalDeltaReadyForPush({ documentId, updateBinary: snapshotBytes, path });
+	                }
+	            }
+	        }
 	    }
 	}
 
@@ -302,9 +355,11 @@ export class NetworkOrchestrator {
 
 			// 1. NETWORK FETCH OUTSIDE MUTEX (Restores Concurrency!)
 			try {
-				details = await this.remoteStore.fetchSnapshotDetails(documentId);
 				const currentLastId = this.fileLastSyncIds.get(documentId) || 0;
-				updates = await this.remoteStore.fetchUpdatesSince(documentId, currentLastId);
+				[details, updates] = await Promise.all([
+					this.remoteStore.fetchSnapshotDetails(documentId),
+					this.remoteStore.fetchUpdatesSince(documentId, currentLastId)
+				]);
 
 				for (const update of updates) {
 					const decBytes = await this.crypto.decrypt(update.encryptedUpdate, this.activeKey!);

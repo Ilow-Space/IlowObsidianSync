@@ -321,6 +321,7 @@ func runMigrations() {
 				ALTER TABLE vault_updates ADD CONSTRAINT vault_updates_vault_alias_id_document_id_fkey
 					FOREIGN KEY (vault_alias_id, document_id) REFERENCES vault_snapshots(vault_alias_id, document_id) ON DELETE CASCADE;
 			END IF;
+		EXCEPTION WHEN OTHERS THEN NULL;
 		END $$;`,
 		`CREATE INDEX IF NOT EXISTS idx_vault_updates_doc_id ON vault_updates(vault_alias_id, document_id);`,
 		`CREATE OR REPLACE FUNCTION notify_vault_update()

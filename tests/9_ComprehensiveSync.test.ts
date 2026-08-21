@@ -582,30 +582,88 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
             expect(appMock.vault.trash).toHaveBeenCalledWith(expect.any(TFile), true);
         });
 
-        it('28. Offline Create + Back Online Pull Conflict applies safely', async () => {
-            remoteStoreMock.pushUpdate.mockRejectedValue(new Error('Offline'));
-            await createLocalFile('Conflict.md'); // Exists locally
-                
-            remoteStoreMock.pushUpdate.mockResolvedValue(undefined);
-            const remoteDoc = new LoroDoc();
-            const tree = remoteDoc.getTree('vault-tree');
-            const file = tree.createNode();
-            file.data.set('uuid', 'remote-conflict-uuid');
-            file.data.set('filename', 'Conflict.md');
-            file.data.set('type', 'file');
-            remoteDoc.commit();
-                
-            remoteStoreMock.fetchUpdatesSince.mockResolvedValueOnce([{
-                id: 1, documentId: 'shard-index', encryptedUpdate: { ciphertext: Buffer.from(remoteDoc.export({ mode: 'update' })).toString('base64') }
-            }]);
-            
-            await orchestrator.pullDocument('shard-index');
-            (vfsController as any).rebuildCacheAndEmitRemoteDiffs();
-            await waitForDisk();
-        
-            // The reconciler creates a conflict copy to preserve both distinct offline creations
-            expect(appMock.vault.create).toHaveBeenCalledWith('Conflict (Conflict 1).md', '');
-        });
+        it('28. Offline Create + Back Online Pull Conflict applies safely when contents differ', async () => {
+	remoteStoreMock.pushUpdate.mockRejectedValue(new Error('Offline'));
+
+	// 1. Setup local file with distinct local content
+	const f = new TFile(); f.path = 'Conflict.md';
+	mockVaultFiles.set('Conflict.md', f);
+	appMock.vault.read.mockImplementation(async (fileObj: any) => {
+		if (fileObj.path === 'Conflict.md') return 'Local Offline Version';
+		return '';
+	});
+
+	eventBus.emit('LocalFileCreated', { path: 'Conflict.md', isFolder: false, content: 'Local Offline Version' });
+	await waitMemory();
+
+	remoteStoreMock.pushUpdate.mockResolvedValue(undefined);
+
+	// 2. Setup remote index containing remote node with different content
+	const remoteDoc = new LoroDoc();
+	const tree = remoteDoc.getTree('vault-tree');
+	const file = tree.createNode();
+	file.data.set('uuid', 'remote-conflict-uuid');
+	file.data.set('filename', 'Conflict.md');
+	file.data.set('type', 'file');
+	remoteDoc.commit();
+
+	remoteStoreMock.fetchUpdatesSince.mockResolvedValueOnce([{
+		id: 1,
+		documentId: 'shard-index',
+		encryptedUpdate: { ciphertext: Buffer.from(remoteDoc.export({ mode: 'update' })).toString('base64') }
+	}]);
+
+	await orchestrator.pullDocument('shard-index');
+	(vfsController as any).rebuildCacheAndEmitRemoteDiffs();
+	await waitForDisk();
+
+	expect(appMock.vault.create).toHaveBeenCalledWith('Conflict (Conflict 1).md', expect.anything());
+});
+
+it('28b. Path collision with identical contents suppresses conflict file and rebalances UUID', async () => {
+	remoteStoreMock.pushUpdate.mockRejectedValue(new Error('Offline'));
+
+	// 1. Setup local file with identical content (empty string to match un-pulled remote node)
+	const f = new TFile(); f.path = 'SameContent.md';
+	mockVaultFiles.set('SameContent.md', f);
+	appMock.vault.read.mockImplementation(async (fileObj: any) => {
+		if (fileObj.path === 'SameContent.md') return '';
+		return '';
+	});
+
+	eventBus.emit('LocalFileCreated', { path: 'SameContent.md', isFolder: false, content: '' });
+	await waitMemory();
+
+	const localUuid = vfsController.getUuidForPath('SameContent.md');
+	expect(localUuid).not.toBeNull();
+
+	remoteStoreMock.pushUpdate.mockResolvedValue(undefined);
+
+	// 2. Setup remote index containing remote node with identical content (empty)
+	const remoteDoc = new LoroDoc();
+	const tree = remoteDoc.getTree('vault-tree');
+	const file = tree.createNode();
+	file.data.set('uuid', 'remote-identical-uuid');
+	file.data.set('filename', 'SameContent.md');
+	file.data.set('type', 'file');
+	remoteDoc.commit();
+
+	remoteStoreMock.fetchUpdatesSince.mockResolvedValueOnce([{
+		id: 2,
+		documentId: 'shard-index',
+		encryptedUpdate: { ciphertext: Buffer.from(remoteDoc.export({ mode: 'update' })).toString('base64') }
+	}]);
+
+	await orchestrator.pullDocument('shard-index');
+	(vfsController as any).rebuildCacheAndEmitRemoteDiffs();
+	await waitForDisk();
+
+	// Conflict copy is suppressed
+	expect(appMock.vault.create).not.toHaveBeenCalledWith('SameContent (Conflict 1).md', expect.anything());
+
+	// Remote UUID is adopted
+	expect(vfsController.getUuidForPath('SameContent.md')).toBe('remote-identical-uuid');
+});
         it('29. Remote Rename & Edit on same file avoids race conditions', async () => {
             await createLocalFile('Race.md');
             const uuid = vfsController.getUuidForPath('Race.md')!;
