@@ -284,10 +284,9 @@ export class ObsidianDiskReconciler {
 			const mutex = this.getFileMutex(payload.path);
 			try {
 				await mutex.runExclusive(async () => {
-					// 🚨 CACHE FALLBACK SCAN: If cache map is lagging, search vault files array directly
 					let file = this.app.vault.getAbstractFileByPath(payload.path);
-					if (!file) {
-						file = this.app.vault.getFiles().find(f => f.path === payload.path) || null;
+					if (!file && typeof (this.app.vault as any).getFiles === 'function') {
+						file = this.app.vault.getFiles().find((f: any) => f.path === payload.path) || null;
 					}
 
 					if (file && file instanceof TFile) {
