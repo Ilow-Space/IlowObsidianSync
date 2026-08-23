@@ -2,6 +2,7 @@ import { INoteRepository } from '@domain/Interfaces/INoteRepository';
 import { App, TFile } from 'obsidian';
 import { PluginSettings } from '@presentation/Plugin';
 import { isAllowedConfigPath } from '@domain/Utils/ConfigPathFilter';
+import { isBinaryPath, uint8ArrayToBase64, base64ToUint8Array } from '@domain/Utils/BinaryUtils';
 
 export class ObsidianNoteRepository implements INoteRepository {
 	public changeCallbacks: Array<(path: string, content: string) => void> = [];
@@ -26,6 +27,15 @@ export class ObsidianNoteRepository implements INoteRepository {
 
 		const file = this.app.vault.getAbstractFileByPath(path);
 		if (file instanceof TFile) {
+			if (isBinaryPath(path)) {
+				try {
+					const arrayBuffer = await this.app.vault.readBinary(file);
+					const bytes = new Uint8Array(arrayBuffer);
+					return uint8ArrayToBase64(bytes);
+				} catch (e) {
+					return null;
+				}
+			}
 			return await this.app.vault.read(file);
 		}
 		return null;
@@ -45,9 +55,16 @@ export class ObsidianNoteRepository implements INoteRepository {
 			return;
 		}
 
+		const isBinary = isBinaryPath(path);
+		const binaryBuffer = isBinary ? (base64ToUint8Array(content).buffer as ArrayBuffer) : null;
+
 		const file = this.app.vault.getAbstractFileByPath(path);
 		if (file instanceof TFile) {
-			await this.app.vault.modify(file, content);
+			if (isBinary && binaryBuffer) {
+				await this.app.vault.modifyBinary(file, binaryBuffer);
+			} else {
+				await this.app.vault.modify(file, content);
+			}
 		} else {
 			const parts = path.split('/');
 			if (parts.length > 1) {
@@ -61,12 +78,18 @@ export class ObsidianNoteRepository implements INoteRepository {
 					}
 				}
 			}
-			await this.app.vault.create(path, content);
+			if (isBinary && binaryBuffer) {
+				await this.app.vault.createBinary(path, binaryBuffer);
+			} else {
+				await this.app.vault.create(path, content);
+			}
 		}
 	}
 
 	public async listAllNotes(): Promise<string[]> {
-		const markdownFiles = this.app.vault.getMarkdownFiles().map(file => file.path);
+		const vaultFiles = typeof this.app.vault.getFiles === 'function'
+			? this.app.vault.getFiles().map(file => file.path)
+			: this.app.vault.getMarkdownFiles().map(file => file.path);
 		const configDir = this.app.vault.configDir || '.obsidian';
 
 		const configFiles: string[] = [];
@@ -91,7 +114,7 @@ export class ObsidianNoteRepository implements INoteRepository {
 			console.error('Failed walking adapter config directory:', e);
 		}
 
-		return [...markdownFiles, ...configFiles];
+		return [...vaultFiles, ...configFiles];
 	}
 
 	public onNoteChange(callback: (path: string, content: string) => void): void {

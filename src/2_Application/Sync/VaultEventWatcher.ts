@@ -4,6 +4,7 @@ import { ObsidianDiskReconciler } from './ObsidianDiskReconciler';
 import { NetworkOrchestrator } from './NetworkOrchestrator';
 import { PluginSettings } from '@presentation/Plugin';
 import { isAllowedConfigPath } from '@domain/Utils/ConfigPathFilter';
+import { isBinaryPath, uint8ArrayToBase64 } from '@domain/Utils/BinaryUtils';
 
 export class VaultEventWatcher {
 	private activeListeners: Array<{ eventName: string; ref: any }> = [];
@@ -29,14 +30,22 @@ export class VaultEventWatcher {
 		return false;
 	}
 
+	private async readTFileContent(file: TFile): Promise<string> {
+		if (isBinaryPath(file.path)) {
+			const arrayBuffer = await this.app.vault.readBinary(file);
+			const bytes = new Uint8Array(arrayBuffer);
+			return uint8ArrayToBase64(bytes);
+		}
+		return await this.app.vault.read(file);
+	}
+
 	public initialize(): void {
 		const onCreate = this.app.vault.on('create', (file: TAbstractFile) => {
 			if (this.shouldIgnore(file.path)) return;
 
 			const isFolder = file instanceof TFolder || (file as any).children !== undefined;
 			if (file instanceof TFile) {
-				this.app.vault.read(file).then((content) => {
-					// Re-verify after async read completes
+				this.readTFileContent(file).then((content) => {
 					if (this.shouldIgnore(file.path)) return;
 
 					this.eventBus.emit('LocalFileCreated', {
@@ -76,7 +85,8 @@ export class VaultEventWatcher {
 			if (this.shouldIgnore(file.path)) return;
 
 			this.eventBus.emit('LocalFileDeleted', {
-				path: file.path
+				path: file.path,
+				uuid: (file as any).uuid
 			});
 		});
 
@@ -84,8 +94,7 @@ export class VaultEventWatcher {
 			if (this.shouldIgnore(file.path)) return;
 
 			if (file instanceof TFile) {
-				this.app.vault.read(file).then((content) => {
-					// Re-verify after async read completes
+				this.readTFileContent(file).then((content) => {
 					if (this.shouldIgnore(file.path)) return;
 
 					this.eventBus.emit('LocalFileModified', {
