@@ -1,5 +1,3 @@
-import { PluginSettings } from '@presentation/Plugin';
-
 export function isBinaryPath(path: string): boolean {
 	const extIdx = path.lastIndexOf('.');
 	if (extIdx === -1) return false;
@@ -14,15 +12,24 @@ export function isBinaryPath(path: string): boolean {
 }
 
 export function uint8ArrayToBase64(bytes: Uint8Array): string {
+	if (typeof Buffer !== 'undefined') {
+		return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64');
+	}
+
 	let binary = '';
-	const len = bytes.byteLength;
-	for (let i = 0; i < len; i++) {
-		binary += String.fromCharCode(bytes[i]);
+	const chunkSize = 0x8000; // 32KB chunks to prevent call stack / string overflow
+	for (let i = 0; i < bytes.length; i += chunkSize) {
+		const chunk = bytes.subarray(i, i + chunkSize);
+		binary += String.fromCharCode.apply(null, chunk as unknown as number[]);
 	}
 	return btoa(binary);
 }
 
 export function base64ToUint8Array(base64: string): Uint8Array {
+	if (typeof Buffer !== 'undefined') {
+		return new Uint8Array(Buffer.from(base64, 'base64'));
+	}
+
 	try {
 		const binaryString = atob(base64);
 		const len = binaryString.length;

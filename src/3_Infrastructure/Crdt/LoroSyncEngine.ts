@@ -93,7 +93,7 @@ export class LoroSyncEngine {
 		}
 	}
 
-	public async handleLocalChange(documentId: string, newContent: string): Promise<Uint8Array | null> {
+	public async handleLocalChange(documentId: string, newContent: string, isBinary = false): Promise<Uint8Array | null> {
 		const doc = await this.getOrCreateDoc(documentId);
 
 		try {
@@ -108,19 +108,27 @@ export class LoroSyncEngine {
 			const oldVersion = doc.version();
 
 			let update: Uint8Array | null = null;
-			const diffs = diff(currentText, newContent);
-			let index = 0;
-
 			doc.setPeerId(doc.peerId);
 
-			for (const [op, value] of diffs) {
-				if (op === 0) {
-					index += value.length;
-				} else if (op === 1) {
-					text.insert(index, value);
-					index += value.length;
-				} else if (op === -1) {
-					text.delete(index, value.length);
+			// Bypasses character-by-character diffing on binary Base64 payloads
+			if (isBinary) {
+				if (currentText.length > 0) {
+					text.delete(0, currentText.length);
+				}
+				text.insert(0, newContent);
+			} else {
+				const diffs = diff(currentText, newContent);
+				let index = 0;
+
+				for (const [op, value] of diffs) {
+					if (op === 0) {
+						index += value.length;
+					} else if (op === 1) {
+						text.insert(index, value);
+						index += value.length;
+					} else if (op === -1) {
+						text.delete(index, value.length);
+					}
 				}
 			}
 

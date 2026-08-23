@@ -8,6 +8,7 @@ import { ObsidianDiskReconciler } from './ObsidianDiskReconciler';
 import { Mutex } from 'async-mutex';
 import { backOff } from 'exponential-backoff';
 import pLimit from 'p-limit';
+import { isBinaryPath } from '@domain/Utils/BinaryUtils';
 
 export type SyncStatus = 'synced' | 'syncing' | 'error' | 'offline';
 
@@ -127,7 +128,6 @@ export class NetworkOrchestrator {
 	}
 
 	private async handleLocalDeltaReadyForPush(payload: LocalDeltaReadyForPush): Promise<void> {
-	    // CRITICAL FIX: Queue offline/locked edits instead of dropping them!
 	    if (!this.activeKey) {
 	        this.pendingRetries.push(payload);
 	        return;
@@ -187,7 +187,7 @@ export class NetworkOrchestrator {
 		
 		if (!documentId) return;
 
-		const updateBinary = await this.crdtEngine.handleLocalChange(documentId, payload.content);
+		const updateBinary = await this.crdtEngine.handleLocalChange(documentId, payload.content, isBinaryPath(payload.path));
 		if (updateBinary) {
 			await this.handleLocalDeltaReadyForPush({
 				documentId,
@@ -236,11 +236,9 @@ export class NetworkOrchestrator {
 
 			this.reconcileVfsDiskPaths();
 
-	        // 🚨 AWAIT PHYSICAL DISK MOVES BEFORE PULLING FILE TEXT
 	        if (this.diskReconciler) {
 	            await this.diskReconciler.onIdle();
 	        }
-
 
 	        const indexRemoteLatest = bulkUpdates['shard-index'] || 0;
 	        const indexLastSync = this.fileLastSyncIds.get('shard-index') || 0;
@@ -255,7 +253,6 @@ export class NetworkOrchestrator {
 	        // --- 2. PULL DOCUMENT TEXT ---
 	       const activeFiles = this.vfsController.getActiveFiles().filter(file => file.type !== 'folder');
 	        
-	        // 🚨 CAPTURE PRE-PULL BASELINE CONTENT
 	        this.prePullBaselineContents.clear();
 	        for (const file of activeFiles) {
 	            const doc = await this.crdtEngine.getOrCreateDoc(file.uuid);
@@ -318,7 +315,6 @@ export class NetworkOrchestrator {
 				const localMatch = allVaultFiles.find((f: any) => f.name === filename);
 				
 				if (localMatch && localMatch.path !== file.path) {
-					// 🚨 PRE-SETTLEMENT MOVE EMISSION: Fire CrdtNodeMoved BEFORE remote changes settle
 					this.eventBus.emit('CrdtNodeMoved', {
 						uuid: file.uuid,
 						oldPath: localMatch.path,
@@ -368,7 +364,7 @@ export class NetworkOrchestrator {
 		const documentId = this.vfsController.getUuidForPath(path);
 		if (!documentId) return;
 
-		let updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent);
+		let updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent, isBinaryPath(path));
 		if (!updateBinary && localContent.length > 0) {
 			const remoteLatestId = bulkUpdates[documentId] || 0;
 			const lastSyncId = this.fileLastSyncIds.get(documentId) || 0;
@@ -402,7 +398,7 @@ export class NetworkOrchestrator {
 		if (crdtContent.length > 0 && !localContent.includes(crdtContent.trim())) {
 			contentToApply = `${localContent.trim()}\n${crdtContent.trim()}\n`;
 		}
-		const updateBinary = await this.crdtEngine.handleLocalChange(documentId, contentToApply);
+		const updateBinary = await this.crdtEngine.handleLocalChange(documentId, contentToApply, isBinaryPath(path));
 		if (updateBinary) {
 			await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
 		}
@@ -412,12 +408,10 @@ export class NetworkOrchestrator {
 		const localContent = await this.noteRepo.readNote(path);
 		if (localContent === null) return;
 
-		// 🚨 TIMESTAMP GUARD: If file was touched by our Reconciler during this sync session,
-		// do not treat it as an offline user edit.
 		const abstractFile = (this.diskReconciler as any)?.app?.vault?.getAbstractFileByPath(path);
 		const fileMtime = (abstractFile as any)?.stat?.mtime || 0;
 		if (fileMtime >= this.syncStartTime - 1000) {
-			return; // Skip ingesting reconciler-written files
+			return;
 		}
 
 		const { documentId, isRemotelyDeleted } = await this.resolveDocumentIdForLocalPath(path);
@@ -458,7 +452,6 @@ export class NetworkOrchestrator {
 			let updates: any[] = [];
 			const decryptedUpdates: Uint8Array[] = [];
 
-			// 1. NETWORK FETCH OUTSIDE MUTEX (Restores Concurrency!)
 			try {
 				const currentLastId = this.fileLastSyncIds.get(documentId) || 0;
 				[details, updates] = await Promise.all([
@@ -477,7 +470,6 @@ export class NetworkOrchestrator {
 				return;
 			}
 
-			// 2. DISK WRITES INSIDE MUTEX (Maintains Thread Safety!)
 			await this.orchestratorMutex.runExclusive(async () => {
 				const currentLastId = this.fileLastSyncIds.get(documentId) || 0;
 
@@ -497,7 +489,7 @@ export class NetworkOrchestrator {
 					this.fileLastSyncIds.set(documentId, details.maxCompactedId);
 
 					if (path && offlineContent !== null) {
-						await this.crdtEngine.handleLocalChange(documentId, offlineContent);
+						await this.crdtEngine.handleLocalChange(documentId, offlineContent, isBinaryPath(path));
 					}
 				}
 
@@ -586,6 +578,7 @@ export class NetworkOrchestrator {
 	        this.crdtEngine.removeDoc(documentId);
 	    }
 	}
+
 	public async deleteRemoteSnapshot(documentId: string): Promise<void> {
 		this.fileLastSyncIds.delete(documentId);
 		this.fileUpdateCounters.delete(documentId);
