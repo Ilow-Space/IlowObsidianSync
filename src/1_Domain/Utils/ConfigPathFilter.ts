@@ -1,5 +1,45 @@
 import { PluginSettings } from '@presentation/Plugin';
 
+function isSelfPluginPath(relPath: string): boolean {
+	return (
+		relPath.startsWith('plugins/ilow-sync/') ||
+		relPath === 'plugins/ilow-sync' ||
+		relPath.startsWith('plugins/obsidian-ilow-')
+	);
+}
+
+function isWorkspacePath(relPath: string): boolean {
+	return (
+		relPath === 'workspace.json' ||
+		relPath === 'workspace-mobile.json' ||
+		relPath.endsWith('/workspace.json') ||
+		relPath.endsWith('/workspace-mobile.json')
+	);
+}
+
+function isCoreSettingsPath(relPath: string): boolean {
+	return (
+		relPath === 'appearance.json' ||
+		relPath === 'community-plugins.json' ||
+		relPath === 'hotkeys.json'
+	);
+}
+
+function checkPluginPath(relPath: string, settings?: Partial<PluginSettings>): boolean {
+	const parts = relPath.split('/');
+	if (parts.length === 2) {
+		return true;
+	}
+	const fileName = parts.slice(2).join('/');
+	if (fileName === 'data.json') {
+		return settings?.syncPluginSettings !== false;
+	}
+	if (fileName === 'main.js' || fileName === 'manifest.json' || fileName === 'styles.css') {
+		return settings?.syncPluginBinaries === true;
+	}
+	return false;
+}
+
 export function isAllowedConfigPath(
 	path: string,
 	configDir: string = '.obsidian',
@@ -7,62 +47,30 @@ export function isAllowedConfigPath(
 ): boolean {
 	const normalizedConfigDir = configDir.replace(/^\/+|\/+$/g, '') || '.obsidian';
 
-	// If path doesn't start with configDir
 	if (!path.startsWith(normalizedConfigDir + '/') && path !== normalizedConfigDir) {
-		// Non-hidden files are allowed
-		if (!path.startsWith('.') && !path.includes('/.')) {
-			return true;
-		}
-		return false;
+		return !path.startsWith('.') && !path.includes('/.');
 	}
 
 	const relPath = path === normalizedConfigDir ? '' : path.substring(normalizedConfigDir.length + 1);
 
-	// Exclude device-specific state
-	if (
-		relPath === 'workspace.json' ||
-		relPath === 'workspace-mobile.json' ||
-		relPath.endsWith('/workspace.json') ||
-		relPath.endsWith('/workspace-mobile.json')
-	) {
+	if (isSelfPluginPath(relPath) || isWorkspacePath(relPath)) {
 		return false;
 	}
 
-	// Folder chain under configDir itself
 	if (relPath === '' || relPath === 'plugins' || relPath === 'themes') {
 		return true;
 	}
 
-	// Core Settings
-	if (
-		relPath === 'appearance.json' ||
-		relPath === 'community-plugins.json' ||
-		relPath === 'hotkeys.json'
-	) {
+	if (isCoreSettingsPath(relPath)) {
 		return settings?.syncAppearance !== false;
 	}
 
-	// Themes: themes/<theme-name>/**
 	if (relPath.startsWith('themes/')) {
 		return settings?.syncThemes !== false;
 	}
 
-	// Plugins: plugins/<plugin-id>/...
 	if (relPath.startsWith('plugins/')) {
-		const parts = relPath.split('/');
-		// parts[0] = 'plugins', parts[1] = plugin-id, parts[2] = file
-		if (parts.length === 2) {
-			// Folder node for plugin: plugins/<plugin-id>
-			return true;
-		}
-
-		const fileName = parts.slice(2).join('/');
-		if (fileName === 'data.json') {
-			return settings?.syncPluginSettings !== false;
-		}
-		if (fileName === 'main.js' || fileName === 'manifest.json' || fileName === 'styles.css') {
-			return settings?.syncPluginBinaries === true;
-		}
+		return checkPluginPath(relPath, settings);
 	}
 
 	return false;

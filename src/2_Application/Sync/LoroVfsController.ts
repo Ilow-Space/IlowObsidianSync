@@ -1,3 +1,4 @@
+﻿
 import { LoroDoc, LoroTree, LoroTreeNode } from 'loro-crdt';
 import { SyncEventBus } from './SyncEventBus';
 import { LoroSyncEngine } from '@infrastructure/Crdt/LoroSyncEngine';
@@ -51,6 +52,7 @@ export class LoroVfsController {
 	}
 
 	public async initialize(): Promise<void> {
+		if (this.unsubscribeDoc) return;
 		this.treeDoc = await this.syncEngine.getOrCreateDoc('shard-index');
 		this.loroTree = this.treeDoc.getTree('vault-tree');
 
@@ -105,7 +107,31 @@ export class LoroVfsController {
 	}
 
 	public getUuidForPath(path: string): string | null {
-		return this.pathToUuid.get(path) || null;
+		const cached = this.pathToUuid.get(path);
+		if (cached) return cached;
+
+		if (this.loroTree) {
+			const nodes = this.loroTree.getNodes();
+			const nodeMap = new Map<string, LoroTreeNode>();
+			for (const n of nodes) nodeMap.set(this.getNodeIdStr(n.id), n);
+
+			for (const node of nodes) {
+				try {
+					if (node.isDeleted() || node.data.get('isDeleted') === true) continue;
+					const nodePath = this.resolvePathForNode(node, nodeMap);
+					if (nodePath === path) {
+						const uuid = node.data.get('uuid') as string;
+						if (uuid) {
+							this.pathToUuid.set(path, uuid);
+							this.uuidToLastKnownPath.set(uuid, path);
+							return uuid;
+						}
+					}
+				} catch (e) {}
+			}
+		}
+
+		return null;
 	}
 
 	public getPathForUuid(uuid: string): string | null {
@@ -262,7 +288,6 @@ export class LoroVfsController {
 			const freshNode = this.loroTree.getNodes().find(n => this.getNodeIdStr(n.id) === targetIdStr);
 			if (freshNode) freshNode.data.set('isDeleted', true);
 
-			this.loroTree.delete(targetNodeId);
 			this.treeDoc.commit();
 		} catch (e) {}
 
@@ -270,6 +295,11 @@ export class LoroVfsController {
 		this.uuidToLastKnownPath.delete(nodeUuid);
 		this.uuidToNodeId.delete(nodeUuid);
 		this.nodeIdToUuid.delete(this.getNodeIdStr(targetNodeId));
+
+		try {
+			this.loroTree.delete(targetNodeId);
+			this.treeDoc.commit();
+		} catch (e) {}
 
 		this.scheduleLocalPush();
 	}
@@ -314,7 +344,7 @@ export class LoroVfsController {
 		}
 	}
 
-	private resolvePathForNode(node: LoroTreeNode, nodeMap: Map<string, LoroTreeNode>): string | null {
+	private resolvePathForNode(node: LoroTreeNode, nodeMap: Map<string, LoroTreeNode>, ignoreDeleted: boolean = false): string | null {
 		const parts: string[] = [];
 		let curr: LoroTreeNode | null = node;
 		const visited = new Set<string>();
@@ -325,7 +355,7 @@ export class LoroVfsController {
 			visited.add(idStr);
 
 			try {
-				if (curr.isDeleted() || curr.data.get('isDeleted') === true) break;
+				if (!ignoreDeleted && (curr.isDeleted() || curr.data.get('isDeleted') === true)) break;
 
 				const filename = curr.data.get('filename') as string;
 				if (filename) parts.unshift(filename);
@@ -433,11 +463,18 @@ export class LoroVfsController {
 	}
 
 	public isFilenameDeletedRemotely(filename: string, path: string): boolean {
+		if (!this.loroTree) return false;
 		const nodes = this.loroTree.getNodes();
+		const nodeMap = new Map<string, LoroTreeNode>();
+		for (const n of nodes) nodeMap.set(this.getNodeIdStr(n.id), n);
+
 		for (const node of nodes) {
 			try {
 				if (node.data.get('filename') === filename && (node.isDeleted() || node.data.get('isDeleted') === true)) {
-					return true;
+					const nodePath = this.resolvePathForNode(node, nodeMap, true);
+					if (nodePath === path || nodePath === filename) {
+						return true;
+					}
 				}
 			} catch (e) {}
 		}
@@ -455,6 +492,27 @@ export class LoroVfsController {
 			}
 		}
 		return null;
+	}
+
+	public getBlobHashForUuid(uuid: string): string | null {
+		const nodeId = this.uuidToNodeId.get(uuid);
+		if (!nodeId) return null;
+		const nodes = this.loroTree.getNodes();
+		const node = nodes.find(n => this.getNodeIdStr(n.id) === this.getNodeIdStr(nodeId));
+		return node ? (node.data.get('blob_hash') as string || null) : null;
+	}
+
+	public setBlobHashForUuid(uuid: string, hash: string): void {
+		const nodeId = this.uuidToNodeId.get(uuid);
+		if (!nodeId) return;
+		const nodes = this.loroTree.getNodes();
+		const node = nodes.find(n => this.getNodeIdStr(n.id) === this.getNodeIdStr(nodeId));
+		if (node) {
+			this.captureFrontierIfNeeded();
+			node.data.set('blob_hash', hash);
+			this.treeDoc.commit();
+			this.scheduleLocalPush();
+		}
 	}
 
 	public destroy(): void {
@@ -478,3 +536,4 @@ export class LoroVfsController {
 		}
 	}
 }
+

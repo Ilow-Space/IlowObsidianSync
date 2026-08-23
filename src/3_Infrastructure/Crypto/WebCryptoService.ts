@@ -23,6 +23,11 @@ export class WebCryptoService implements ICryptography {
 		return aliasId;
 	}
 
+	public async hashData(data: Uint8Array): Promise<string> {
+		const hashBuffer = await window.crypto.subtle.digest('SHA-256', data as any);
+		return CryptoUtils.bufToHex(new Uint8Array(hashBuffer));
+	}
+
 	public async deriveKey(password: string, salt: string): Promise<CryptoKey> {
 		const cacheKey = `${password}:${salt}`;
 		if (WebCryptoService.derivedKeyCache.has(cacheKey)) {

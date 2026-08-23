@@ -8,7 +8,7 @@ if (Test-Path $outputFile) {
 }
 
 # Define exclusion and inclusion lists without regex
-$allowedExtensions = @('.ts', '.tsx', '.js', '.jsx', '.json', '.go')
+$allowedExtensions = @('.ts', '.tsx', '.js', '.jsx', '.json', '.go', '.sh')
 $ignoredFolders    = @('node_modules', 'dist', 'build', '.git', '.next', 'out', 'coverage', '.obsidian-cache')
 $ignoredFiles      = @('package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb')
 

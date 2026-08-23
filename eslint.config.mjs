@@ -30,15 +30,15 @@ export default [
             // ==========================================
             // 1. DDD ARCHITECTURAL BOUNDARIES
             // ==========================================
-            'boundaries/element-types': [
+            'boundaries/dependencies': [
                 'error',
                 {
                     default: 'disallow',
-                    rules: [
-                        { from: 'domain', allow: ['domain'] },
-                        { from: 'application', allow: ['domain', 'application'] },
-                        { from: 'infrastructure', allow: ['domain', 'infrastructure'] },
-                        { from: 'presentation', allow: ['domain', 'application', 'infrastructure', 'presentation'] },
+                    policies: [
+                        { from: { element: { type: 'domain' } }, allow: [{ to: { element: { type: 'domain' } } }] },
+                        { from: { element: { type: 'application' } }, allow: [{ to: { element: { type: 'domain' } } }, { to: { element: { type: 'application' } } }] },
+                        { from: { element: { type: 'infrastructure' } }, allow: [{ to: { element: { type: 'domain' } } }, { to: { element: { type: 'infrastructure' } } }] },
+                        { from: { element: { type: 'presentation' } }, allow: [{ to: { element: { type: 'domain' } } }, { to: { element: { type: 'application' } } }, { to: { element: { type: 'infrastructure' } } }, { to: { element: { type: 'presentation' } } }] },
                     ],
                 },
             ],
@@ -46,14 +46,14 @@ export default [
             // ==========================================
             // 2. LINUS TORVALDS "3 TAB RULE" & SIMPLICITY
             // ==========================================
-            'max-depth': ['error', 8],
+            'max-depth': ['error', 6],
             'indent': ['error', 'tab', { SwitchCase: 1 }],
             'complexity': ['error', 30],
 
             // ==========================================
             // 3. SOLID & CODE QUALITY
             // ==========================================
-            'sonarjs/cognitive-complexity': ['error', 45],
+            'sonarjs/cognitive-complexity': ['error', 30],
             'sonarjs/no-identical-functions': 'off',
             'sonarjs/no-duplicated-branches': 'off',
         },

@@ -18,7 +18,8 @@ export const LocalFileModifiedSchema = z.object({
 });
 
 export const LocalFileDeletedSchema = z.object({
-	path: z.string()
+	path: z.string(),
+	uuid: z.string().optional()
 });
 
 export const CrdtNodeCreatedSchema = z.object({

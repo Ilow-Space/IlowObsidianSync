@@ -65,6 +65,11 @@ export class PostgresRemoteStore implements IRemoteStore {
 	}
 
 	public connectWebSocket(wssUrl: string) {
+
+		if (!this.vaultAliasId) {
+			return; 
+		}
+
 		try {
 			const socketUrl = new URL(wssUrl);
 
@@ -391,7 +396,7 @@ export class PostgresRemoteStore implements IRemoteStore {
 			throw new Error(`Failed to upload blob manifest: ${res.status}. Details: ${res.text}`);
 		}
 	}
-
+	
 	public async fetchManifest(): Promise<RemoteManifestItem[]> {
 		const url = `${this.serverUrl}/api/vault/manifest`;
 		const res = await requestUrl({
@@ -436,5 +441,39 @@ export class PostgresRemoteStore implements IRemoteStore {
 		if (res.status < 200 || res.status >= 300) {
 			throw new Error(`Truncate server failed: ${res.status}. Details: ${res.text}`);
 		}
+	}
+	
+	public async uploadBlob(hash: string, encryptedData: Uint8Array): Promise<void> {
+		const res = await requestUrl({
+			url: `${this.serverUrl}/api/blobs/${hash}`,
+			method: 'PUT',
+			headers: {
+				...this.headers,
+				'Content-Type': 'application/octet-stream'
+			},
+			// FIX: Cast to ArrayBuffer
+			body: encryptedData.buffer as ArrayBuffer,
+			throw: false
+		});
+
+		if (res.status < 200 || res.status >= 300) {
+			throw new Error(`Failed to upload blob: ${res.status}`);
+		}
+	}
+
+	public async downloadBlob(hash: string): Promise<Uint8Array | null> {
+		const res = await requestUrl({
+			url: `${this.serverUrl}/api/blobs/${hash}`,
+			method: 'GET',
+			headers: this.headers,
+			throw: false
+		});
+
+		if (res.status === 404) return null;
+		if (res.status < 200 || res.status >= 300) {
+			throw new Error(`Failed to download blob: ${res.status}`);
+		}
+
+		return new Uint8Array(res.arrayBuffer);
 	}
 }

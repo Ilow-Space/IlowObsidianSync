@@ -1,9 +1,11 @@
+﻿
 import { App, TAbstractFile, TFile, TFolder } from 'obsidian';
 import { SyncEventBus } from './SyncEventBus';
 import { ObsidianDiskReconciler } from './ObsidianDiskReconciler';
 import { NetworkOrchestrator } from './NetworkOrchestrator';
 import { PluginSettings } from '@presentation/Plugin';
 import { isAllowedConfigPath } from '@domain/Utils/ConfigPathFilter';
+import { isBinaryPath, uint8ArrayToBase64 } from '@domain/Utils/BinaryUtils';
 
 export class VaultEventWatcher {
 	private activeListeners: Array<{ eventName: string; ref: any }> = [];
@@ -29,14 +31,35 @@ export class VaultEventWatcher {
 		return false;
 	}
 
+	private async readTFileContent(file: TFile): Promise<string> {
+		if (isBinaryPath(file.path)) {
+			for (let i = 0; i < 3; i++) {
+				try {
+					if (this.app.vault.adapter && await this.app.vault.adapter.exists(file.path)) {
+						let arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
+						if (arrayBuffer.byteLength === 0) {
+							await new Promise(r => setTimeout(r, 100));
+							arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
+						}
+						const bytes = new Uint8Array(arrayBuffer);
+						return uint8ArrayToBase64(bytes);
+					}
+				} catch (e) {
+					await new Promise(r => setTimeout(r, 150));
+				}
+			}
+			return '';
+		}
+		return await this.app.vault.read(file);
+	}
+
 	public initialize(): void {
 		const onCreate = this.app.vault.on('create', (file: TAbstractFile) => {
 			if (this.shouldIgnore(file.path)) return;
 
 			const isFolder = file instanceof TFolder || (file as any).children !== undefined;
 			if (file instanceof TFile) {
-				this.app.vault.read(file).then((content) => {
-					// Re-verify after async read completes
+				this.readTFileContent(file).then((content) => {
 					if (this.shouldIgnore(file.path)) return;
 
 					this.eventBus.emit('LocalFileCreated', {
@@ -76,7 +99,8 @@ export class VaultEventWatcher {
 			if (this.shouldIgnore(file.path)) return;
 
 			this.eventBus.emit('LocalFileDeleted', {
-				path: file.path
+				path: file.path,
+				uuid: (file as any).uuid
 			});
 		});
 
@@ -84,8 +108,7 @@ export class VaultEventWatcher {
 			if (this.shouldIgnore(file.path)) return;
 
 			if (file instanceof TFile) {
-				this.app.vault.read(file).then((content) => {
-					// Re-verify after async read completes
+				this.readTFileContent(file).then((content) => {
 					if (this.shouldIgnore(file.path)) return;
 
 					this.eventBus.emit('LocalFileModified', {
@@ -158,3 +181,4 @@ export class VaultEventWatcher {
 		this.knownConfigContents.clear();
 	}
 }
+
