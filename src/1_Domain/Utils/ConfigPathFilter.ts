@@ -18,6 +18,15 @@ export function isAllowedConfigPath(
 
 	const relPath = path === normalizedConfigDir ? '' : path.substring(normalizedConfigDir.length + 1);
 
+	// 🚨 NEVER SYNC THIS PLUGIN'S OWN CONFIGURATION OR BINARIES
+	if (
+		relPath.startsWith('plugins/ilow-sync/') ||
+		relPath === 'plugins/ilow-sync' ||
+		relPath.startsWith('plugins/obsidian-ilow-')
+	) {
+		return false;
+	}
+
 	// Exclude device-specific state
 	if (
 		relPath === 'workspace.json' ||

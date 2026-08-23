@@ -198,6 +198,9 @@ export class ObsidianDiskReconciler {
 								if (parentFolder && !(await this.app.vault.adapter.exists(parentFolder))) {
 									await this.app.vault.adapter.mkdir(parentFolder);
 								}
+								if (await this.app.vault.adapter.exists(payload.newPath)) {
+        						    await this.app.vault.adapter.remove(payload.newPath);
+        						}
 								if (await this.app.vault.adapter.exists(payload.oldPath)) {
 									await this.app.vault.adapter.rename(payload.oldPath, payload.newPath);
 								} else {

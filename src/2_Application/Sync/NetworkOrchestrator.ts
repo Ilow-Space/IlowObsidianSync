@@ -146,6 +146,7 @@ export class NetworkOrchestrator {
 	        await this.remoteStore.pushUpdate(payload.documentId, encryptedUpdate, encryptedPath);
 	        this.hasConnectionError = false;
 	    } catch (err) {
+			console.error('[NetworkOrchestrator] Failed to push local delta:', err);
 	        this.hasConnectionError = true;
 	        this.lastErrorMessage = 'Connection failed';
 	        this.pendingRetries.push(payload);
