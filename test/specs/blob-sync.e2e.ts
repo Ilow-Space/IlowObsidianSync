@@ -47,11 +47,38 @@ function wipeVaultDiskFiles(vPath: string) {
     }
 }
 
+async function dumpObsidianLogs(tag: string) {
+    try {
+        const logs = await browser.execute(() => {
+            const l = (window as any).__obsidianLogs || [];
+            (window as any).__obsidianLogs = [];
+            return l;
+        });
+
+        if (logs && logs.length > 0) {
+            process.stdout.write(`\n--- [OBSIDIAN LOGS: ${tag}] ---\n`);
+            logs.forEach((log: string) => process.stdout.write(`${log}\n`));
+            process.stdout.write(`-------------------------------\n\n`);
+        }
+    } catch (e) {}
+}
+
 async function ensurePluginUnlocked(pwd = MASTER_PASSWORD) {
     await browser.waitUntil(async () => {
         return await browser.execute(async (pass, backendUrl, apiKey) => {
             const app = (window as any).app;
             if (!app || !app.plugins || Object.keys(app.plugins.plugins).length === 0) return false;
+
+            if (!(window as any).__logsAttached) {
+                (window as any).__logsAttached = true;
+                (window as any).__obsidianLogs = [];
+                const formatArg = (a: any) => typeof a === 'object' ? JSON.stringify(a) : String(a);
+                const origLog = console.log;
+                console.log = (...args: any[]) => {
+                    (window as any).__obsidianLogs.push(`[LOG] ${args.map(formatArg).join(' ')}`);
+                    origLog.apply(console, args);
+                };
+            }
 
             if (app.internalPlugins?.plugins?.sync?.enabled) {
                 await app.internalPlugins.plugins.sync.disable();
@@ -114,7 +141,10 @@ describe('Binary Blob Sync Operations', () => {
         await browser.execute(resetVaultState);
     });
 
-    afterEach(async () => {
+    afterEach(async function () {
+        if (this.currentTest && this.currentTest.state === 'failed') {
+            await dumpObsidianLogs(`FAIL: ${this.currentTest.title}`);
+        }
         await browser.pause(1000);
     });
 
@@ -124,6 +154,9 @@ describe('Binary Blob Sync Operations', () => {
 
         await browser.execute(async () => {
             const app = (window as any).app;
+            const existing = app.vault.getAbstractFileByPath('test-image.png');
+            if (existing) await app.vault.trash(existing, true);
+
             const fakeImageBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
             await app.vault.createBinary('test-image.png', fakeImageBytes.buffer);
         });
@@ -162,6 +195,9 @@ describe('Binary Blob Sync Operations', () => {
 
         await browser.execute(async () => {
             const app = (window as any).app;
+            const existing = app.vault.getAbstractFileByPath('photo.jpg');
+            if (existing) await app.vault.trash(existing, true);
+
             const bytes = new Uint8Array([255, 216, 255, 224]);
             await app.vault.createBinary('photo.jpg', bytes.buffer);
         });
