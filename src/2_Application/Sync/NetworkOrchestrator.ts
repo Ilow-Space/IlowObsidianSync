@@ -383,6 +383,24 @@ export class NetworkOrchestrator {
 		const crdtContent = doc.getText('markdown').toString();
 		if (localContent === crdtContent) return;
 
+		const isBinary = isBinaryPath(path);
+
+		if (isBinary) {
+			// Binary Base64 content must strictly avoid trimming, CRLF conversions, or newline concatenation
+			const baselineContent = this.prePullBaselineContents.get(documentId);
+			if (baselineContent !== undefined && localContent === baselineContent) {
+				await this.safeWriteNote(path, crdtContent);
+				return;
+			}
+
+			// Apply the local offline binary content directly as an atomic overwrite
+			const updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent, true);
+			if (updateBinary) {
+				await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
+			}
+			return;
+		}
+
 		const baselineContent = this.prePullBaselineContents.get(documentId);
 		if (baselineContent !== undefined && localContent.trim() === baselineContent.trim()) {
 			await this.safeWriteNote(path, crdtContent);
@@ -398,7 +416,7 @@ export class NetworkOrchestrator {
 		if (crdtContent.length > 0 && !localContent.includes(crdtContent.trim())) {
 			contentToApply = `${localContent.trim()}\n${crdtContent.trim()}\n`;
 		}
-		const updateBinary = await this.crdtEngine.handleLocalChange(documentId, contentToApply, isBinaryPath(path));
+		const updateBinary = await this.crdtEngine.handleLocalChange(documentId, contentToApply, false);
 		if (updateBinary) {
 			await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
 		}

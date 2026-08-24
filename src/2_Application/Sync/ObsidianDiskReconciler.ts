@@ -120,7 +120,8 @@ export class ObsidianDiskReconciler {
 		}
 		const existing = this.app.vault.getAbstractFileByPath(targetPath);
 		if (isBinaryPath(targetPath)) {
-			const binaryBuffer = base64ToUint8Array(content || '').buffer as ArrayBuffer;
+			const bytes = base64ToUint8Array(content || '');
+			const binaryBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 			if (existing instanceof TFile) {
 				await this.app.vault.modifyBinary(existing, binaryBuffer);
 			} else {
@@ -137,7 +138,8 @@ export class ObsidianDiskReconciler {
 
 	private async modifyPhysicalFile(file: TFile, content: string): Promise<void> {
 		if (isBinaryPath(file.path)) {
-			const binaryBuffer = base64ToUint8Array(content || '').buffer as ArrayBuffer;
+			const bytes = base64ToUint8Array(content || '');
+			const binaryBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 			await this.app.vault.modifyBinary(file, binaryBuffer);
 		} else {
 			await this.app.vault.modify(file, content);

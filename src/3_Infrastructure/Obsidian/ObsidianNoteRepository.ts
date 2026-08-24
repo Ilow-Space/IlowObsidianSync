@@ -56,7 +56,11 @@ export class ObsidianNoteRepository implements INoteRepository {
 		}
 
 		const isBinary = isBinaryPath(path);
-		const binaryBuffer = isBinary ? (base64ToUint8Array(content).buffer as ArrayBuffer) : null;
+		let binaryBuffer: ArrayBuffer | null = null;
+		if (isBinary) {
+			const bytes = base64ToUint8Array(content || '');
+			binaryBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+		}
 
 		const file = this.app.vault.getAbstractFileByPath(path);
 		if (file instanceof TFile) {

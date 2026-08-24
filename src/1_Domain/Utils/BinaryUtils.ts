@@ -4,8 +4,8 @@ export function isBinaryPath(path: string): boolean {
 	const ext = path.substring(extIdx + 1).toLowerCase();
 	return [
 		'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'svg', 'ico',
-		'pdf', 'zip', 'tar', 'gz', '7z', 'rar',
-		'mp3', 'wav', 'ogg', 'm4a', 'flac',
+		'pdf', 'zip', 'tar', 'gz', '7z', 'rar', 'canvas', 'excalidraw',
+		'mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac', 'opus',
 		'mp4', 'webm', 'ogv', 'mov', 'avi', 'mkv',
 		'woff', 'woff2', 'ttf', 'otf', 'eot'
 	].includes(ext);
