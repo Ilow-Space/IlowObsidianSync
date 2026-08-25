@@ -1,6 +1,7 @@
 import { LoroDoc } from 'loro-crdt';
 import diff from 'fast-diff';
 import { LoroSnapshotStore } from './LoroSnapshotStore';
+import { isBinaryPath } from '../Utils/BinaryUtils';
 
 export class LoroSyncEngine {
 	public localStore = new LoroSnapshotStore();
@@ -133,7 +134,7 @@ export class LoroSyncEngine {
 			}
 
 			doc.commit();
-			
+
 			// FIX: Export ONLY the tiny incremental delta generated since the oldVersion
 			update = new Uint8Array(doc.export({ mode: 'update', from: oldVersion }));
 

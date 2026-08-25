@@ -63,6 +63,8 @@ export class ObsidianNoteRepository implements INoteRepository {
 		}
 
 		const file = this.app.vault.getAbstractFileByPath(path);
+		const isBinary = isBinaryPath(path);
+
 		if (file instanceof TFile) {
 			if (isBinary && binaryBuffer) {
 				await this.app.vault.modifyBinary(file, binaryBuffer);
