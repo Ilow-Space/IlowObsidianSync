@@ -1,4 +1,5 @@
-﻿export class CryptoUtils {
+﻿
+export class CryptoUtils {
 	private static HEX_OCTETS: string[] = (() => {
 		const octets: string[] = new Array(256);
 		for (let i = 0; i < 256; i++) {
