@@ -1,3 +1,4 @@
+﻿
 import { App, TAbstractFile, TFile, TFolder } from 'obsidian';
 import { SyncEventBus } from './SyncEventBus';
 import { ObsidianDiskReconciler } from './ObsidianDiskReconciler';
@@ -32,17 +33,22 @@ export class VaultEventWatcher {
 
 	private async readTFileContent(file: TFile): Promise<string> {
 		if (isBinaryPath(file.path)) {
-			try {
-				if (this.app.vault.adapter && await this.app.vault.adapter.exists(file.path)) {
-					let arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
-					if (arrayBuffer.byteLength === 0) {
-						await new Promise(r => setTimeout(r, 50));
-						arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
+			for (let i = 0; i < 3; i++) {
+				try {
+					if (this.app.vault.adapter && await this.app.vault.adapter.exists(file.path)) {
+						let arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
+						if (arrayBuffer.byteLength === 0) {
+							await new Promise(r => setTimeout(r, 100));
+							arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
+						}
+						const bytes = new Uint8Array(arrayBuffer);
+						return uint8ArrayToBase64(bytes);
 					}
-					const bytes = new Uint8Array(arrayBuffer);
-					return uint8ArrayToBase64(bytes);
+				} catch (e) {
+					await new Promise(r => setTimeout(r, 150));
 				}
-			} catch (e) {}
+			}
+			return '';
 		}
 		return await this.app.vault.read(file);
 	}
@@ -175,3 +181,4 @@ export class VaultEventWatcher {
 		this.knownConfigContents.clear();
 	}
 }
+

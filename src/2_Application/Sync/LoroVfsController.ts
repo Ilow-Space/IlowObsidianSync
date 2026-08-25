@@ -193,6 +193,7 @@ export class LoroVfsController {
 				const resolvedPath = this.resolvePathForNode(node, nodeMap);
 				if (resolvedPath === payload.path) {
 					node.data.set('isDeleted', true);
+					try { this.loroTree.delete(node.id); } catch (e) {}
 					mutated = true;
 				}
 			} catch (e) {}

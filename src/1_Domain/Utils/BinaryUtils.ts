@@ -23,10 +23,12 @@ export function uint8ArrayToBase64(bytes: Uint8Array): string {
 	}
 
 	let binary = '';
-	const chunkSize = 0x8000; // 32KB chunks to prevent call stack / string overflow
+	// Reduced chunk size to 4096 to prevent Maximum Call Stack Size Exceeded errors
+	const chunkSize = 4096; 
 	for (let i = 0; i < bytes.length; i += chunkSize) {
 		const chunk = bytes.subarray(i, i + chunkSize);
-		binary += String.fromCharCode.apply(null, chunk as unknown as number[]);
+		// Explicitly convert TypedArray to number[] for safe apply execution
+		binary += String.fromCharCode.apply(null, Array.from(chunk));
 	}
 	return btoa(binary);
 }

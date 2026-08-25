@@ -34,7 +34,11 @@ export class SettingsTab extends PluginSettingTab {
 					.setPlaceholder('https://...')
 					.setValue(this.plugin.settings.serverUrl)
 					.onChange(async (value) => {
-						this.plugin.settings.serverUrl = value.trim();
+						let cleanUrl = value.trim().replace(/\/$/, '');
+						if (cleanUrl.startsWith('http://')) {
+							cleanUrl = cleanUrl.replace('http://', 'https://');
+						}
+						this.plugin.settings.serverUrl = cleanUrl;
 						await this.plugin.saveSettings();
 					})
 			);
