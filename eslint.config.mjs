@@ -46,14 +46,14 @@ export default [
             // ==========================================
             // 2. LINUS TORVALDS "3 TAB RULE" & SIMPLICITY
             // ==========================================
-            'max-depth': ['error', 8],
+            'max-depth': ['error', 6],
             'indent': ['error', 'tab', { SwitchCase: 1 }],
             'complexity': ['error', 30],
 
             // ==========================================
             // 3. SOLID & CODE QUALITY
             // ==========================================
-            'sonarjs/cognitive-complexity': ['error', 45],
+            'sonarjs/cognitive-complexity': ['error', 30],
             'sonarjs/no-identical-functions': 'off',
             'sonarjs/no-duplicated-branches': 'off',
         },
