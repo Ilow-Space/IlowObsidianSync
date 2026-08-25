@@ -48,16 +48,11 @@ function wipeVaultDiskFiles(vPath: string) {
 
 async function dumpObsidianLogs(tag: string) {
 	try {
-		const logs = await browser.execute(() => {
-			const l = (window as any).__obsidianLogs || [];
-			(window as any).__obsidianLogs = [];
-			return l;
-		});
-
+		const logs = await browser.getLogs('browser');
 		if (logs && logs.length > 0) {
-			process.stdout.write(`\n--- [OBSIDIAN LOGS: ${tag}] ---\n`);
-			logs.forEach((log: string) => process.stdout.write(`${log}\n`));
-			process.stdout.write(`-------------------------------\n\n`);
+			process.stdout.write(`\n--- [OBSIDIAN BROWSER LOGS: ${tag}] ---\n`);
+			logs.forEach((log: any) => process.stdout.write(`[${log.level}] ${log.message}\n`));
+			process.stdout.write(`--------------------------------------\n\n`);
 		}
 	} catch (e) {}
 }
@@ -66,7 +61,7 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD) {
 	await browser.waitUntil(async () => {
 		return await browser.execute(async (pass, backendUrl, apiKey) => {
 			const app = (window as any).app;
-			if (!app || !app.plugins || Object.keys(app.plugins.plugins).length === 0) return false;
+			if (!app || !app.plugins) return false;
 
 			if (!(window as any).__logsAttached) {
 				(window as any).__logsAttached = true;
@@ -82,7 +77,10 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD) {
 			if (app.internalPlugins?.plugins?.sync?.enabled) {
 				await app.internalPlugins.plugins.sync.disable();
 			}
-			const pluginId = Object.keys(app.plugins.plugins)[0];
+			const pluginId = 'ilow-sync';
+			if (!app.plugins.enabledPlugins?.has(pluginId)) {
+				await app.plugins.enablePlugin(pluginId);
+			}
 			const plugin = app.plugins.plugins[pluginId];
 			if (!plugin) return false;
 
@@ -104,12 +102,17 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD) {
 		}, pwd, BACKEND_URL, API_KEY);
 	}, { timeout: 30000, interval: 50 });
 
-	await browser.waitUntil(async () => {
-		return await browser.execute(() => {
-			const plugin = (window as any).app.plugins.plugins['ilow-sync'];
-			return plugin && plugin.getSyncOrchestrator() && plugin.getSyncOrchestrator().isSyncInitialized();
-		});
-	}, { timeout: 15000, interval: 50 });
+	try {
+		await browser.waitUntil(async () => {
+			return await browser.execute(() => {
+				const plugin = (window as any).app.plugins.plugins['ilow-sync'];
+				return plugin && plugin.getSyncOrchestrator() && plugin.getSyncOrchestrator().isSyncInitialized();
+			});
+		}, { timeout: 15000, interval: 50 });
+	} catch (e) {
+		await dumpObsidianLogs('TIMEOUT IN ensurePluginUnlocked');
+		throw e;
+	}
 }
 
 describe('Binary Synchronization Resilience & Edge Cases Suite', () => {
@@ -305,22 +308,23 @@ describe('Binary Synchronization Resilience & Edge Cases Suite', () => {
 		}, { timeout: 25000 });
 
 		// 2. Modify binary file locally in Vault A offline while sync is disabled
-		await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultAPath });
+		await browser.reloadObsidian({ vault: vaultAPath });
+
 		await browser.execute(async (p) => {
 			const app = (window as any).app;
-			// Disable plugin to simulate offline edit
-			if (app.plugins.plugins['ilow-sync']) {
-				await app.plugins.disablePlugin('ilow-sync');
+			const plugin = app.plugins.plugins['ilow-sync'];
+			if (plugin) {
+				await plugin.unloadKey();
 			}
-			const file = app.vault.getAbstractFileByPath(p);
 			const newBytes = new Uint8Array([200, 201, 202, 203]);
-			await app.vault.modifyBinary(file, newBytes.buffer);
+			await app.vault.adapter.writeBinary(p, newBytes.buffer);
 		}, binaryPath);
 
 		await browser.pause(1000);
 
 		// 3. Re-enable plugin in Vault A and ensure offline change is ingested and synced
 		await ensurePluginUnlocked(MASTER_PASSWORD);
+		await dumpObsidianLogs('AFTER VAULT A STEP 3');
 		await browser.pause(3000);
 
 		// 4. Check Vault B receives the updated offline binary content
@@ -334,6 +338,7 @@ describe('Binary Synchronization Resilience & Edge Cases Suite', () => {
 			const file = app.vault.getAbstractFileByPath(p);
 			const buf = await app.vault.readBinary(file);
 			const bytes = new Uint8Array(buf);
+			console.log('VAULT B BYTES:', Array.from(bytes));
 			return bytes.length === 4 && bytes[0] === 200 && bytes[3] === 203;
 		}, binaryPath);
 

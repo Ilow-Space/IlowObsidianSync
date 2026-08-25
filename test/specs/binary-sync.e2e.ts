@@ -73,9 +73,9 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD, wipeDb = false) {
     }, { timeout: 30000, timeoutMsg: 'Plugin failed to initialize in memory.' });
 
     await browser.execute(() => {
+        (window as any).__obsidianLogs = [];
         if ((window as any).__logsAttached) return;
         (window as any).__logsAttached = true;
-        (window as any).__obsidianLogs = [];
 
         const formatArg = (a: any) => typeof a === 'object' ? JSON.stringify(a) : String(a);
         const origLog = console.log;
@@ -187,7 +187,7 @@ describe('Binary File Synchronization E2E Suite', () => {
             await app.vault.createBinary('sample_image.png', buffer);
         }, pngHex);
 
-        await browser.pause(1000);
+        await browser.pause(3000);
 
         await disableActivePlugin(); await browser.reloadObsidian({ vault: vaultBPath });
         await ensurePluginUnlocked(MASTER_PASSWORD, true);
@@ -244,7 +244,13 @@ describe('Binary File Synchronization E2E Suite', () => {
         await ensurePluginUnlocked(MASTER_PASSWORD, true);
 
         await browser.waitUntil(async () => {
-            return await browser.execute(() => (window as any).app.vault.getAbstractFileByPath('offline_animation.gif') !== null);
+            return await browser.execute(async () => {
+                const app = (window as any).app;
+                const file = app.vault.getAbstractFileByPath('offline_animation.gif');
+                if (!file) return false;
+                const buf = await app.vault.readBinary(file);
+                return buf && buf.byteLength > 0;
+            });
         }, { timeout: 25000, timeoutMsg: 'Vault B failed to pull binary file created offline by Vault A' });
 
         const receivedHex = await browser.execute(async () => {

@@ -51,6 +51,7 @@ export class LoroVfsController {
 	}
 
 	public async initialize(): Promise<void> {
+		if (this.unsubscribeDoc) return;
 		this.treeDoc = await this.syncEngine.getOrCreateDoc('shard-index');
 		this.loroTree = this.treeDoc.getTree('vault-tree');
 
@@ -105,7 +106,31 @@ export class LoroVfsController {
 	}
 
 	public getUuidForPath(path: string): string | null {
-		return this.pathToUuid.get(path) || null;
+		const cached = this.pathToUuid.get(path);
+		if (cached) return cached;
+
+		if (this.loroTree) {
+			const nodes = this.loroTree.getNodes();
+			const nodeMap = new Map<string, LoroTreeNode>();
+			for (const n of nodes) nodeMap.set(this.getNodeIdStr(n.id), n);
+
+			for (const node of nodes) {
+				try {
+					if (node.isDeleted() || node.data.get('isDeleted') === true) continue;
+					const nodePath = this.resolvePathForNode(node, nodeMap);
+					if (nodePath === path) {
+						const uuid = node.data.get('uuid') as string;
+						if (uuid) {
+							this.pathToUuid.set(path, uuid);
+							this.uuidToLastKnownPath.set(uuid, path);
+							return uuid;
+						}
+					}
+				} catch (e) {}
+			}
+		}
+
+		return null;
 	}
 
 	public getPathForUuid(uuid: string): string | null {
@@ -434,10 +459,16 @@ export class LoroVfsController {
 
 	public isFilenameDeletedRemotely(filename: string, path: string): boolean {
 		const nodes = this.loroTree.getNodes();
+		const nodeMap = new Map<string, LoroTreeNode>();
+		for (const n of nodes) nodeMap.set(this.getNodeIdStr(n.id), n);
+
 		for (const node of nodes) {
 			try {
 				if (node.data.get('filename') === filename && (node.isDeleted() || node.data.get('isDeleted') === true)) {
-					return true;
+					const nodePath = this.resolvePathForNode(node, nodeMap);
+					if (nodePath === path) {
+						return true;
+					}
 				}
 			} catch (e) {}
 		}

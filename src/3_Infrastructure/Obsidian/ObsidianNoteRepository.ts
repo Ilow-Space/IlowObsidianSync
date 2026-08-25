@@ -32,12 +32,24 @@ export class ObsidianNoteRepository implements INoteRepository {
 					const arrayBuffer = await this.app.vault.readBinary(file);
 					const bytes = new Uint8Array(arrayBuffer);
 					return uint8ArrayToBase64(bytes);
-				} catch (e) {
-					return null;
-				}
+				} catch (e) {}
+			} else {
+				return await this.app.vault.read(file);
 			}
-			return await this.app.vault.read(file);
 		}
+
+		if (isBinaryPath(path)) {
+			try {
+				if (this.app.vault.adapter && await this.app.vault.adapter.exists(path)) {
+					const arrayBuffer = await this.app.vault.adapter.readBinary(path);
+					const bytes = new Uint8Array(arrayBuffer);
+					return uint8ArrayToBase64(bytes);
+				}
+			} catch (e) {
+				return null;
+			}
+		}
+
 		return null;
 	}
 
@@ -93,34 +105,43 @@ export class ObsidianNoteRepository implements INoteRepository {
 	}
 
 	public async listAllNotes(): Promise<string[]> {
-		const vaultFiles = typeof this.app.vault.getFiles === 'function'
-			? this.app.vault.getFiles().map(file => file.path)
-			: this.app.vault.getMarkdownFiles().map(file => file.path);
+		const allDiskFiles = new Set<string>();
 		const configDir = this.app.vault.configDir || '.obsidian';
 
-		const configFiles: string[] = [];
 		try {
 			const walkAdapter = async (dir: string) => {
 				const res = await this.app.vault.adapter.list(dir);
 				for (const filePath of res.files) {
-					if (isAllowedConfigPath(filePath, configDir, this.settings)) {
-						configFiles.push(filePath);
+					if (dir === configDir || dir.startsWith(configDir + '/')) {
+						if (isAllowedConfigPath(filePath, configDir, this.settings)) {
+							allDiskFiles.add(filePath);
+						}
+					} else {
+						allDiskFiles.add(filePath);
 					}
 				}
 				for (const subDir of res.folders) {
-					if (isAllowedConfigPath(subDir, configDir, this.settings)) {
+					if (subDir === configDir || subDir.startsWith(configDir + '/')) {
+						if (isAllowedConfigPath(subDir, configDir, this.settings)) {
+							await walkAdapter(subDir);
+						}
+					} else if (subDir !== '.git' && !subDir.startsWith('.git/')) {
 						await walkAdapter(subDir);
 					}
 				}
 			};
-			if (await this.app.vault.adapter.exists(configDir)) {
-				await walkAdapter(configDir);
-			}
+			await walkAdapter('');
 		} catch (e) {
-			console.error('Failed walking adapter config directory:', e);
+			console.error('Failed walking adapter directory:', e);
 		}
 
-		return [...vaultFiles, ...configFiles];
+		const vaultFiles = typeof this.app.vault.getFiles === 'function'
+			? this.app.vault.getFiles().map(file => file.path)
+			: this.app.vault.getMarkdownFiles().map(file => file.path);
+
+		for (const f of vaultFiles) allDiskFiles.add(f);
+
+		return Array.from(allDiskFiles);
 	}
 
 	public onNoteChange(callback: (path: string, content: string) => void): void {

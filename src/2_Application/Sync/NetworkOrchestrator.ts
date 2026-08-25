@@ -273,10 +273,19 @@ export class NetworkOrchestrator {
 	            await this.diskReconciler.onIdle();
 	        }
 
+	        for (const file of activeFiles) {
+	            const doc = await this.crdtEngine.getOrCreateDoc(file.uuid);
+	            this.prePullBaselineContents.set(file.uuid, doc.getText('markdown').toString());
+	        }
+
 	        console.log('[NetworkOrchestrator] 🟢 REMOTE CHANGES PULLED AND SETTLED. Now ingesting and pushing local offline state...');
 
 	        // --- 3. INGEST LOCAL OFFLINE MODIFICATIONS AND CREATIONS ---
 	        await this.ingestLocalOfflineNotes(bulkUpdates);
+
+	        if (this.diskReconciler) {
+	            await this.diskReconciler.onIdle();
+	        }
 
 	        // --- 4. REPORT ACTIVE BLOB MANIFEST FOR SERVER-SIDE GC ---
 	        try {
@@ -327,6 +336,7 @@ export class NetworkOrchestrator {
 
 	private async ingestLocalOfflineNotes(bulkUpdates: Record<string, number>): Promise<void> {
 	    const localPaths = typeof this.noteRepo.listAllNotes === 'function' ? await this.noteRepo.listAllNotes() : [];
+	    console.log('[ALL NOTES LISTED]', localPaths);
 	    const limit = pLimit(10);
 	    await Promise.all(localPaths.map(path => limit(() => this.processSingleLocalPath(path, bulkUpdates))));
 	}
@@ -378,10 +388,21 @@ export class NetworkOrchestrator {
 		}
 	}
 
-	private async reconcileExistingLocalFile(documentId: string, path: string, localContent: string): Promise<void> {
+	private async reconcileExistingLocalFile(documentId: string, path: string, localContent: string, bulkUpdates: Record<string, number> = {}): Promise<void> {
 		const doc = await this.crdtEngine.getOrCreateDoc(documentId);
 		const crdtContent = doc.getText('markdown').toString();
-		if (localContent === crdtContent) return;
+		console.log(`[VAULT A INGEST] ${path} | local: ${localContent} | crdt: ${crdtContent}`);
+		if (localContent === crdtContent) {
+			const lastSyncId = this.fileLastSyncIds.get(documentId) || 0;
+			const remoteLatestId = bulkUpdates[documentId] || 0;
+			if (lastSyncId === 0 && remoteLatestId === 0) {
+				const snapshotBytes = doc.export({ mode: 'snapshot' });
+				if (snapshotBytes && snapshotBytes.length > 0) {
+					await this.handleLocalDeltaReadyForPush({ documentId, updateBinary: snapshotBytes, path });
+				}
+			}
+			return;
+		}
 
 		const isBinary = isBinaryPath(path);
 
@@ -426,19 +447,13 @@ export class NetworkOrchestrator {
 		const localContent = await this.noteRepo.readNote(path);
 		if (localContent === null) return;
 
-		const abstractFile = (this.diskReconciler as any)?.app?.vault?.getAbstractFileByPath(path);
-		const fileMtime = (abstractFile as any)?.stat?.mtime || 0;
-		if (fileMtime >= this.syncStartTime - 1000) {
-			return;
-		}
-
 		const { documentId, isRemotelyDeleted } = await this.resolveDocumentIdForLocalPath(path);
 		if (isRemotelyDeleted) return;
 
 		if (!documentId) {
 			await this.handleUntrackedLocalFile(path, localContent, bulkUpdates);
 		} else {
-			await this.reconcileExistingLocalFile(documentId, path, localContent);
+			await this.reconcileExistingLocalFile(documentId, path, localContent, bulkUpdates);
 		}
 	}
 
@@ -482,7 +497,7 @@ export class NetworkOrchestrator {
 					decryptedUpdates.push(decBytes);
 				}
 			} catch (err) {
-				console.error('[NetworkOrchestrator] pullDocument network fetch failed for ' + documentId + ':', err);
+				console.log('[NetworkOrchestrator] pullDocument network fetch failed for ' + documentId + ':', String(err));
 				this.hasConnectionError = true;
 				this.lastErrorMessage = 'Connection failed';
 				return;

@@ -32,9 +32,17 @@ export class VaultEventWatcher {
 
 	private async readTFileContent(file: TFile): Promise<string> {
 		if (isBinaryPath(file.path)) {
-			const arrayBuffer = await this.app.vault.readBinary(file);
-			const bytes = new Uint8Array(arrayBuffer);
-			return uint8ArrayToBase64(bytes);
+			try {
+				if (this.app.vault.adapter && await this.app.vault.adapter.exists(file.path)) {
+					let arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
+					if (arrayBuffer.byteLength === 0) {
+						await new Promise(r => setTimeout(r, 50));
+						arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
+					}
+					const bytes = new Uint8Array(arrayBuffer);
+					return uint8ArrayToBase64(bytes);
+				}
+			} catch (e) {}
 		}
 		return await this.app.vault.read(file);
 	}

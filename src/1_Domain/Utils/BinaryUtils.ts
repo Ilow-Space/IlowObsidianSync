@@ -13,14 +13,14 @@ export function isBinaryPath(path: string): boolean {
 
 export function uint8ArrayToBase64(bytes: Uint8Array): string {
 	if (typeof Buffer !== 'undefined') {
-		return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64');
+		return Buffer.from(bytes).toString('base64');
 	}
 
 	let binary = '';
 	const chunkSize = 0x8000; // 32KB chunks to prevent call stack / string overflow
 	for (let i = 0; i < bytes.length; i += chunkSize) {
 		const chunk = bytes.subarray(i, i + chunkSize);
-		binary += String.fromCharCode.apply(null, chunk as unknown as number[]);
+		binary += String.fromCharCode(...Array.from(chunk));
 	}
 	return btoa(binary);
 }
