@@ -1,7 +1,6 @@
-import { LoroDoc } from 'loro-crdt';
+﻿import { LoroDoc } from 'loro-crdt';
 import diff from 'fast-diff';
 import { LoroSnapshotStore } from './LoroSnapshotStore';
-import { isBinaryPath } from '../Utils/BinaryUtils';
 
 export class LoroSyncEngine {
 	public localStore = new LoroSnapshotStore();
@@ -176,3 +175,4 @@ export class LoroSyncEngine {
 		this.localStore.close();
 	}
 }
+

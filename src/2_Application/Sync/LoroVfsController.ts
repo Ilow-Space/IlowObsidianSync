@@ -1,3 +1,4 @@
+﻿
 import { LoroDoc, LoroTree, LoroTreeNode } from 'loro-crdt';
 import { SyncEventBus } from './SyncEventBus';
 import { LoroSyncEngine } from '@infrastructure/Crdt/LoroSyncEngine';
@@ -192,7 +193,6 @@ export class LoroVfsController {
 				const resolvedPath = this.resolvePathForNode(node, nodeMap);
 				if (resolvedPath === payload.path) {
 					node.data.set('isDeleted', true);
-					try { this.loroTree.delete(node.id); } catch (e) {}
 					mutated = true;
 				}
 			} catch (e) {}
@@ -287,7 +287,6 @@ export class LoroVfsController {
 			const freshNode = this.loroTree.getNodes().find(n => this.getNodeIdStr(n.id) === targetIdStr);
 			if (freshNode) freshNode.data.set('isDeleted', true);
 
-			this.loroTree.delete(targetNodeId);
 			this.treeDoc.commit();
 		} catch (e) {}
 
@@ -339,7 +338,7 @@ export class LoroVfsController {
 		}
 	}
 
-	private resolvePathForNode(node: LoroTreeNode, nodeMap: Map<string, LoroTreeNode>): string | null {
+	private resolvePathForNode(node: LoroTreeNode, nodeMap: Map<string, LoroTreeNode>, ignoreDeleted: boolean = false): string | null {
 		const parts: string[] = [];
 		let curr: LoroTreeNode | null = node;
 		const visited = new Set<string>();
@@ -350,7 +349,7 @@ export class LoroVfsController {
 			visited.add(idStr);
 
 			try {
-				if (curr.isDeleted() || curr.data.get('isDeleted') === true) break;
+				if (!ignoreDeleted && (curr.isDeleted() || curr.data.get('isDeleted') === true)) break;
 
 				const filename = curr.data.get('filename') as string;
 				if (filename) parts.unshift(filename);
@@ -458,6 +457,7 @@ export class LoroVfsController {
 	}
 
 	public isFilenameDeletedRemotely(filename: string, path: string): boolean {
+		if (!this.loroTree) return false;
 		const nodes = this.loroTree.getNodes();
 		const nodeMap = new Map<string, LoroTreeNode>();
 		for (const n of nodes) nodeMap.set(this.getNodeIdStr(n.id), n);
@@ -465,8 +465,8 @@ export class LoroVfsController {
 		for (const node of nodes) {
 			try {
 				if (node.data.get('filename') === filename && (node.isDeleted() || node.data.get('isDeleted') === true)) {
-					const nodePath = this.resolvePathForNode(node, nodeMap);
-					if (nodePath === path) {
+					const nodePath = this.resolvePathForNode(node, nodeMap, true);
+					if (nodePath === path || nodePath === filename) {
 						return true;
 					}
 				}
@@ -509,3 +509,4 @@ export class LoroVfsController {
 		}
 	}
 }
+

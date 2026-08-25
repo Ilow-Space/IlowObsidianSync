@@ -1,4 +1,4 @@
-export class CryptoUtils {
+﻿export class CryptoUtils {
 	private static HEX_OCTETS: string[] = (() => {
 		const octets: string[] = new Array(256);
 		for (let i = 0; i < 256; i++) {
@@ -18,11 +18,11 @@ export class CryptoUtils {
 	})();
 
 	public static bufToHex(buffer: Uint8Array): string {
-		let hex = '';
+		const hexParts = new Array(buffer.length);
 		for (let i = 0; i < buffer.length; i++) {
-			hex += CryptoUtils.HEX_OCTETS[buffer[i]];
+			hexParts[i] = CryptoUtils.HEX_OCTETS[buffer[i]];
 		}
-		return hex;
+		return hexParts.join('');
 	}
 
 	public static hexToBuf(hex: string): Uint8Array {
@@ -42,11 +42,11 @@ export class CryptoUtils {
 	public static stringToHex(str: string): string {
 		const encoder = new TextEncoder();
 		const bytes = encoder.encode(str);
-		let hex = '\\x';
+		const hexParts = new Array(bytes.length);
 		for (let i = 0; i < bytes.length; i++) {
-			hex += CryptoUtils.HEX_OCTETS[bytes[i]];
+			hexParts[i] = CryptoUtils.HEX_OCTETS[bytes[i]];
 		}
-		return hex;
+		return '\\x' + hexParts.join('');
 	}
 
 	public static hexToString(hex: string): string {

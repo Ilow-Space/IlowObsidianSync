@@ -1,5 +1,6 @@
+﻿
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { isBinaryPath, uint8ArrayToBase64, base64ToUint8Array, getArrayBufferFromBytes } from '../src/3_Infrastructure/Utils/BinaryUtils';
+import { isBinaryPath, uint8ArrayToBase64, base64ToUint8Array, getArrayBufferFromBytes } from '../src/1_Domain/Utils/BinaryUtils';
 import { LoroSyncEngine } from '../src/3_Infrastructure/Crdt/LoroSyncEngine';
 import { NetworkOrchestrator } from '../src/2_Application/Sync/NetworkOrchestrator';
 import { SyncEventBus } from '../src/2_Application/Sync/SyncEventBus';
