@@ -494,6 +494,27 @@ export class LoroVfsController {
 		return null;
 	}
 
+	public getBlobHashForUuid(uuid: string): string | null {
+		const nodeId = this.uuidToNodeId.get(uuid);
+		if (!nodeId) return null;
+		const nodes = this.loroTree.getNodes();
+		const node = nodes.find(n => this.getNodeIdStr(n.id) === this.getNodeIdStr(nodeId));
+		return node ? (node.data.get('blob_hash') as string || null) : null;
+	}
+
+	public setBlobHashForUuid(uuid: string, hash: string): void {
+		const nodeId = this.uuidToNodeId.get(uuid);
+		if (!nodeId) return;
+		const nodes = this.loroTree.getNodes();
+		const node = nodes.find(n => this.getNodeIdStr(n.id) === this.getNodeIdStr(nodeId));
+		if (node) {
+			this.captureFrontierIfNeeded();
+			node.data.set('blob_hash', hash);
+			this.treeDoc.commit();
+			this.scheduleLocalPush();
+		}
+	}
+
 	public destroy(): void {
 		this.flushPendingPush();
 		this.eventBus.off('LocalFileCreated', this.boundCreated);

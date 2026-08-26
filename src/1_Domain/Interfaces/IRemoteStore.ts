@@ -40,6 +40,8 @@ export interface IRemoteStore {
     truncateServer(adminToken: string): Promise<void>;
     testConnection(): Promise<boolean>;
     fetchTelemetry(): Promise<ServerTelemetry | null>;
+    uploadBlob(hash: string, encryptedData: Uint8Array): Promise<void>;
+    downloadBlob(hash: string): Promise<Uint8Array | null>;
     
     connectWebSocket(wssUrl: string): void;
     subscribeToUpdates(documentId: string, onUpdateDetected: (docId?: string, action?: string) => void): () => void;

@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"runtime/debug"
@@ -111,27 +112,25 @@ type CompactPayload struct {
 func startTelemetryTracker() {
 	secTicker := time.NewTicker(1 * time.Second)
 	hourTicker := time.NewTicker(1 * time.Hour)
-	
-	idleSeconds := 0         // NEW: Tracks consecutive seconds with zero traffic
-	isOptimizing := false    // NEW: Mutex flag to prevent overlapping maintenance runs
+
+	idleSeconds := 0
+	isOptimizing := false
 
 	for {
 		select {
 		case <-secTicker.C:
 			rps := atomic.SwapUint64(&reqsLastSecond, 0)
-			
+
 			telemetryMux.Lock()
 			currentRPS = float64(rps)
 			telemetryMux.Unlock()
 
-			// --- IDLE DETECTION LOGIC ---
 			if rps == 0 {
 				idleSeconds++
 			} else {
-				idleSeconds = 0 // Reset the counter the millisecond a user syncs
+				idleSeconds = 0
 			}
 
-			// Trigger maintenance exactly once after 5 minutes (300 seconds) of total API silence
 			if idleSeconds == 300 && !isOptimizing {
 				isOptimizing = true
 				go func() {
@@ -152,23 +151,19 @@ func startTelemetryTracker() {
 func runIdleOptimizations() {
 	log.Println("[Self-Optimization] Server has been completely idle for 5 minutes. Initiating maintenance tasks...")
 
-	// 1. Force Go Runtime to surrender unused RAM back to the Operating System
 	var memBefore runtime.MemStats
 	runtime.ReadMemStats(&memBefore)
-	
-	debug.FreeOSMemory() // Aggressively invokes GC and releases memory pages to the OS
-	
+
+	debug.FreeOSMemory()
+
 	var memAfter runtime.MemStats
 	runtime.ReadMemStats(&memAfter)
-	
-	reclaimedMB := float64(memBefore.Alloc - memAfter.Alloc) / 1024.0 / 1024.0
+
+	reclaimedMB := float64(memBefore.Alloc-memAfter.Alloc) / 1024.0 / 1024.0
 	if reclaimedMB > 0 {
 		log.Printf("[Self-Optimization] Go Garbage Collector reclaimed %.2f MB of RAM.\n", reclaimedMB)
 	}
 
-	// 2. Postgres Physical Defragmentation
-	// This reclaims disk space from dead tuples left behind by CRDT compactions and updates query planner stats.
-	// Note: VACUUM ANALYZE is non-blocking, so if a user suddenly connects, the database won't lock up.
 	if db != nil {
 		start := time.Now()
 		_, err := db.Exec("VACUUM ANALYZE vault_snapshots, vault_updates;")
@@ -179,7 +174,6 @@ func runIdleOptimizations() {
 		}
 	}
 
-	// 3. Blob Garbage Collection
 	go runBlobGarbageCollection()
 
 	log.Println("[Self-Optimization] Maintenance complete. Server is operating at peak efficiency.")
@@ -189,39 +183,88 @@ func runBlobGarbageCollection() {
 	if db == nil {
 		return
 	}
-	log.Println("[Blob-GC] Starting background blob garbage collection cycle...")
+	log.Println("[Blob-GC] Starting background disk blob garbage collection cycle...")
 	start := time.Now()
 
-	query := `
-		DELETE FROM vault_blobs
-		WHERE created_at < NOW() - INTERVAL '7 days'
-		  AND vault_alias_id IN (SELECT vault_alias_id FROM vault_blob_manifests)
-		  AND NOT EXISTS (
-			  SELECT 1 FROM vault_blob_manifests m
-			  WHERE m.vault_alias_id = vault_blobs.vault_alias_id
-			    AND m.active_hashes @> jsonb_build_array(vault_blobs.blob_hash)
-		  )
-		RETURNING COALESCE(OCTET_LENGTH(data), 0);
-	`
-
-	rows, err := db.Query(query)
+	// 1. Fetch all manifests from the database
+	rows, err := db.Query("SELECT vault_alias_id, active_hashes FROM vault_blob_manifests")
 	if err != nil {
-		log.Printf("[Blob-GC] Error running blob garbage collection: %v\n", err)
+		log.Printf("[Blob-GC] Error fetching manifests: %v\n", err)
 		return
 	}
 	defer rows.Close()
 
-	var totalReclaimed uint64
+	activeManifests := make(map[string]map[string]bool)
 	for rows.Next() {
-		var size uint64
-		if err := rows.Scan(&size); err == nil {
-			totalReclaimed += size
+		var vaultID string
+		var hashesJSON []byte
+		if err := rows.Scan(&vaultID, &hashesJSON); err != nil {
+			continue
+		}
+
+		var hashList []string
+		if err := json.Unmarshal(hashesJSON, &hashList); err == nil {
+			hashSet := make(map[string]bool)
+			for _, h := range hashList {
+				hashSet[h] = true
+			}
+			activeManifests[vaultID] = hashSet
+		}
+	}
+
+	// 2. Scan the local physical data directory
+	blobsDir := "./data/blobs"
+	vaultDirs, err := os.ReadDir(blobsDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("[Blob-GC] Error reading blobs directory: %v\n", err)
+		}
+		return
+	}
+
+	var totalReclaimed uint64
+
+	for _, vDir := range vaultDirs {
+		if !vDir.IsDir() {
+			continue
+		}
+		vaultID := vDir.Name()
+		activeHashes, hasManifest := activeManifests[vaultID]
+
+		// Only clean up vaults that have reported a manifest at least once
+		if !hasManifest {
+			continue
+		}
+
+		vaultPath := filepath.Join(blobsDir, vaultID)
+		files, err := os.ReadDir(vaultPath)
+		if err != nil {
+			continue
+		}
+
+		for _, file := range files {
+			if file.IsDir() {
+				continue
+			}
+			hash := file.Name()
+			
+			// If the physical file's hash isn't in the active manifest, delete it
+			if !activeHashes[hash] {
+				filePath := filepath.Join(vaultPath, hash)
+				info, err := file.Info()
+				if err == nil {
+					size := uint64(info.Size())
+					if err := os.Remove(filePath); err == nil {
+						totalReclaimed += size
+					}
+				}
+			}
 		}
 	}
 
 	if totalReclaimed > 0 {
 		atomic.AddUint64(&gcReclaimedBytes, totalReclaimed)
-		log.Printf("[Blob-GC] Cleaned up unreferenced blobs, reclaimed %d bytes in %v.\n", totalReclaimed, time.Since(start))
+		log.Printf("[Blob-GC] Cleaned up unreferenced blobs on disk, reclaimed %d bytes in %v.\n", totalReclaimed, time.Since(start))
 	} else {
 		log.Printf("[Blob-GC] Garbage collection finished in %v. No unreferenced blobs to purge.\n", time.Since(start))
 	}
@@ -272,7 +315,12 @@ func main() {
 	mux.HandleFunc("GET /api/telemetry", handleGetTelemetry)
 	mux.HandleFunc("GET /api/vault/manifest", handleGetManifest)
 	mux.HandleFunc("POST /api/blobs/manifest", handlePostBlobManifest)
-	mux.HandleFunc("GET /api/vault/latest_ids", handleGetBulkLatestUpdateIDs) // NEW BULK ENDPOINT
+	
+	// NEW: Direct-to-Disk Binary Endpoints
+	mux.HandleFunc("PUT /api/blobs/{hash}", handlePutBlob)
+	mux.HandleFunc("GET /api/blobs/{hash}", handleGetBlob)
+	
+	mux.HandleFunc("GET /api/vault/latest_ids", handleGetBulkLatestUpdateIDs)
 	mux.HandleFunc("GET /api/snapshots/{id}", handleGetSnapshot)
 	mux.HandleFunc("GET /api/snapshots/{id}/updates", handleGetUpdates)
 	mux.HandleFunc("GET /api/snapshots/{id}/latest_id", handleGetLatestUpdateID)
@@ -312,15 +360,13 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Vault-Alias-ID, X-API-Key")
-		
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 
-		// Case-insensitive check for WebSockets or Upgrade requests
 		isWebSocket := strings.EqualFold(r.Header.Get("Upgrade"), "websocket") ||
 			strings.EqualFold(r.Header.Get("Connection"), "upgrade")
 
@@ -407,14 +453,6 @@ func runMigrations() {
 			active_hashes JSONB NOT NULL DEFAULT '[]'::jsonb,
 			updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 		);`,
-		`CREATE TABLE IF NOT EXISTS vault_blobs (
-			vault_alias_id TEXT NOT NULL,
-			blob_hash TEXT NOT NULL,
-			data BYTEA,
-			created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (vault_alias_id, blob_hash)
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_vault_blobs_created_at ON vault_blobs(created_at);`,
 	}
 
 	for idx, query := range migrations {
@@ -437,6 +475,69 @@ func byteaToHex(b []byte) string {
 		return ""
 	}
 	return "\\x" + hex.EncodeToString(b)
+}
+
+func getVaultAliasIDHeader(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get("X-Vault-Alias-ID"))
+}
+
+func handlePutBlob(w http.ResponseWriter, r *http.Request) {
+	vaultAliasID := getVaultAliasIDHeader(r)
+	hash := r.PathValue("hash")
+	
+	if vaultAliasID == "" || hash == "" {
+		http.Error(w, "Missing headers or path param", http.StatusBadRequest)
+		return
+	}
+
+	dir := filepath.Join("./data/blobs", vaultAliasID)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Printf("Disk mkdir error: %v", err)
+		http.Error(w, "Disk error", http.StatusInternalServerError)
+		return
+	}
+
+	filePath := filepath.Join(dir, hash)
+	out, err := os.Create(filePath)
+	if err != nil {
+		log.Printf("Disk create error: %v", err)
+		http.Error(w, "Disk error", http.StatusInternalServerError)
+		return
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, r.Body); err != nil {
+		log.Printf("Disk write error: %v", err)
+		http.Error(w, "Write error", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+}
+
+func handleGetBlob(w http.ResponseWriter, r *http.Request) {
+	vaultAliasID := getVaultAliasIDHeader(r)
+	hash := r.PathValue("hash")
+	
+	if vaultAliasID == "" || hash == "" {
+		http.Error(w, "Missing headers or path param", http.StatusBadRequest)
+		return
+	}
+
+	filePath := filepath.Join("./data/blobs", vaultAliasID, hash)
+
+	file, err := os.Open(filePath)
+	if os.IsNotExist(err) {
+		http.Error(w, "Blob not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "Disk error", http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	io.Copy(w, file)
 }
 
 func handleGetTelemetry(w http.ResponseWriter, r *http.Request) {
@@ -465,10 +566,6 @@ func handleGetTelemetry(w http.ResponseWriter, r *http.Request) {
 		SystemHealth:         "healthy",
 		GCReclaimedBytes:     atomic.LoadUint64(&gcReclaimedBytes),
 	})
-}
-
-type BlobManifestPayload struct {
-	ActiveHashes []string `json:"active_hashes"`
 }
 
 func handlePostBlobManifest(w http.ResponseWriter, r *http.Request) {
@@ -512,11 +609,6 @@ func handlePostBlobManifest(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "manifest_received"})
 }
 
-func getVaultAliasIDHeader(r *http.Request) string {
-	return strings.TrimSpace(r.Header.Get("X-Vault-Alias-ID"))
-}
-
-// BULK OPTIMIZATION
 func handleGetBulkLatestUpdateIDs(w http.ResponseWriter, r *http.Request) {
 	vaultAliasID := getVaultAliasIDHeader(r)
 	if vaultAliasID == "" {
@@ -959,11 +1051,18 @@ func handlePostTruncate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := db.Exec("TRUNCATE TABLE vault_updates, vault_snapshots CASCADE;")
+	// 1. Truncate database tables
+	_, err := db.Exec("TRUNCATE TABLE vault_updates, vault_snapshots, vault_blob_manifests CASCADE;")
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
+
+	// 2. Clear physical disk storage
+	if err := os.RemoveAll("./data/blobs"); err != nil {
+		log.Printf("Failed to clear disk blobs: %v", err)
+	}
+	os.MkdirAll("./data/blobs", 0755)
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "truncated"})
@@ -972,7 +1071,7 @@ func handlePostTruncate(w http.ResponseWriter, r *http.Request) {
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("WebSocket Upgrade error: %v\n", err)
+		log.Printf("[WebSocket Error] Upgrade failed: %v\n", err)
 		return
 	}
 

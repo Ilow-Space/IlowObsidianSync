@@ -8,7 +8,7 @@ import { ObsidianDiskReconciler } from './ObsidianDiskReconciler';
 import { Mutex } from 'async-mutex';
 import { backOff } from 'exponential-backoff';
 import pLimit from 'p-limit';
-import { isBinaryPath } from '@domain/Utils/BinaryUtils';
+import { isBinaryPath, base64ToUint8Array, uint8ArrayToBase64 } from '@domain/Utils/BinaryUtils';
 
 export type SyncStatus = 'synced' | 'syncing' | 'error' | 'offline';
 
@@ -185,7 +185,7 @@ export class NetworkOrchestrator {
 		if (this.isSyncingFull || ObsidianDiskReconciler.suppressedPaths.has(payload.path)) return;
 
 		let documentId = this.vfsController.getUuidForPath(payload.path);
-		
+    
 		if (!documentId) {
 			const filename = payload.path.substring(payload.path.lastIndexOf('/') + 1);
 			const movedMatch = this.vfsController.findMovedFileMatch(filename, payload.path);
@@ -201,129 +201,247 @@ export class NetworkOrchestrator {
 				documentId = this.vfsController.getUuidForPath(payload.path);
 			}
 		}
-		
+    
 		if (!documentId) return;
 
-		const updateBinary = await this.crdtEngine.handleLocalChange(documentId, payload.content, isBinaryPath(payload.path));
+		// --- NEW DECOUPLED BINARY UPLOAD LOGIC ---
+		if (isBinaryPath(payload.path)) {
+			const rawBytes = base64ToUint8Array(payload.content);
+			const hash = await (this.crypto as any).hashData(rawBytes);
+
+			// Check if the current VFS node already has this hash to prevent redundant uploads
+			const currentHash = (this.vfsController as any).getBlobHashForUuid(documentId);
+			if (currentHash === hash) return;
+
+			this.addActiveTask(payload.path);
+			try {
+				const encrypted = await this.crypto.encrypt(rawBytes, this.activeKey!);
+				const payloadBytes = new TextEncoder().encode(JSON.stringify(encrypted));
+				await (this.remoteStore as any).uploadBlob(hash, payloadBytes);
+            
+				// Link the newly uploaded blob to the VFS tree
+				(this.vfsController as any).setBlobHashForUuid(documentId, hash);
+			} catch (err) {
+				console.error('[NetworkOrchestrator] Failed to upload binary blob:', err);
+				this.hasConnectionError = true;
+				this.lastErrorMessage = 'Blob upload failed';
+			} finally {
+				this.removeActiveTask(payload.path);
+			}
+			return;
+		}
+
+		const updateBinary = await this.crdtEngine.handleLocalChange(documentId, payload.content, false);
 		if (updateBinary) {
-			await this.handleLocalDeltaReadyForPush({
-				documentId,
-				updateBinary,
-				path: payload.path
-			});
+			await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path: payload.path });
+		}
+	}
+
+	private async reconcileExistingLocalFile(documentId: string, path: string, localContent: string, bulkUpdates: Record<string, number> = {}): Promise<void> {
+		// --- NEW DECOUPLED BINARY OFFLINE INGESTION ---
+		if (isBinaryPath(path)) {
+			const rawBytes = base64ToUint8Array(localContent);
+			const localHash = await (this.crypto as any).hashData(rawBytes);
+			const currentHash = (this.vfsController as any).getBlobHashForUuid(documentId);
+
+			if (currentHash === localHash) return;
+
+			this.addActiveTask(path);
+			try {
+				const encrypted = await this.crypto.encrypt(rawBytes, this.activeKey!);
+				const payloadBytes = new TextEncoder().encode(JSON.stringify(encrypted));
+				await (this.remoteStore as any).uploadBlob(localHash, payloadBytes);
+				(this.vfsController as any).setBlobHashForUuid(documentId, localHash);
+			} catch (err) {
+				console.error('[NetworkOrchestrator] Failed to upload offline binary blob:', err);
+			} finally {
+				this.removeActiveTask(path);
+			}
+			return;
+		}
+
+		const doc = await this.crdtEngine.getOrCreateDoc(documentId);
+		const crdtContent = doc.getText('markdown').toString();
+    
+		if (localContent === crdtContent) {
+			const lastSyncId = this.fileLastSyncIds.get(documentId) || 0;
+			const remoteLatestId = bulkUpdates[documentId] || 0;
+			if (lastSyncId === 0 && remoteLatestId === 0) {
+				const snapshotBytes = doc.export({ mode: 'snapshot' });
+				if (snapshotBytes && snapshotBytes.length > 0) {
+					await this.handleLocalDeltaReadyForPush({ documentId, updateBinary: snapshotBytes, path });
+				}
+			}
+			return;
+		}
+
+		const baselineContent = this.prePullBaselineContents.get(documentId);
+		if (baselineContent !== undefined && localContent.trim() === baselineContent.trim()) {
+			await this.safeWriteNote(path, crdtContent);
+			return;
+		}
+
+		if (crdtContent.length > 0 && crdtContent.includes(localContent.trim())) {
+			await this.safeWriteNote(path, crdtContent);
+			return;
+		}
+
+		let contentToApply = localContent;
+		if (crdtContent.length > 0 && !localContent.includes(crdtContent.trim())) {
+			if (path.endsWith('.json')) {
+				contentToApply = localContent;
+			} else {
+				contentToApply = `${localContent.trim()}\n${crdtContent.trim()}\n`;
+			}
+		}
+		const updateBinary = await this.crdtEngine.handleLocalChange(documentId, contentToApply, false);
+		if (updateBinary) {
+			await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
 		}
 	}
 
 	public async runFullSync(): Promise<void> {
-	    if (!this.activeKey || this.isSyncingFull) return;
-	    this.isSyncingFull = true;
+		if (!this.activeKey || this.isSyncingFull) return;
+		this.isSyncingFull = true;
 		this.syncStartTime = Date.now();
-	    this.addActiveTask('System Index');
+		this.addActiveTask('System Index');
 
-	    try {
-	        console.log('[NetworkOrchestrator] Starting VFS Index Sync...');
+		try {
+			console.log('[NetworkOrchestrator] Starting VFS Index Sync...');
 
-	        if (this.pendingRetries.length > 0) {
-	            const retries = [...this.pendingRetries];
-	            this.pendingRetries = [];
-	            for (const retryItem of retries) {
-	                await this.handleLocalDeltaReadyForPush(retryItem);
-	            }
-	        }
+			if (this.pendingRetries.length > 0) {
+				const retries = [...this.pendingRetries];
+				this.pendingRetries = [];
+				for (const retryItem of retries) {
+					await this.handleLocalDeltaReadyForPush(retryItem);
+				}
+			}
 
-	        let bulkUpdates: Record<string, number> = {};
-	        try {
-	            bulkUpdates = await this.remoteStore.getBulkLatestUpdateIds();
-	        } catch (e) {
-	            console.warn('[NetworkOrchestrator] Bulk fetch failed, falling back to sequential checks.');
-	        }
+			let bulkUpdates: Record<string, number> = {};
+			try {
+				bulkUpdates = await this.remoteStore.getBulkLatestUpdateIds();
+			} catch (e) {
+				console.warn('[NetworkOrchestrator] Bulk fetch failed, falling back to sequential checks.');
+			}
 
-	        // --- 1. SNAPSHOT VFS & PULL REMOTE INDEX ---
-	        const indexLatest = bulkUpdates['shard-index'] || 0;
-	        this.vfsController.prepareForRemoteVfsUpdate();
-	        await this.pullDocument('shard-index', null, true, indexLatest);
+			const indexLatest = bulkUpdates['shard-index'] || 0;
+			this.vfsController.prepareForRemoteVfsUpdate();
+			await this.pullDocument('shard-index', null, true, indexLatest);
 
-	        if (this.hasConnectionError) {
-	            throw new Error(this.lastErrorMessage || 'Sync failed');
-	        }
+			if (this.hasConnectionError) {
+				throw new Error(this.lastErrorMessage || 'Sync failed');
+			}
 
-	        this.vfsController.flushPendingPush();
-	        this.vfsController.processRemoteVfsUpdates();
-	        console.log('[NetworkOrchestrator] VFS Index Processed.');
+			this.vfsController.flushPendingPush();
+			this.vfsController.processRemoteVfsUpdates();
+			console.log('[NetworkOrchestrator] VFS Index Processed.');
 
 			this.reconcileVfsDiskPaths();
 
-	        if (this.diskReconciler) {
-	            await this.diskReconciler.onIdle();
-	        }
+			if (this.diskReconciler) {
+				await this.diskReconciler.onIdle();
+			}
 
-	        const indexRemoteLatest = bulkUpdates['shard-index'] || 0;
-	        const indexLastSync = this.fileLastSyncIds.get('shard-index') || 0;
-	        if (indexLastSync === 0 && indexRemoteLatest === 0) {
-	            const indexDoc = await this.crdtEngine.getOrCreateDoc('shard-index');
-	            const indexSnapshot = indexDoc.export({ mode: 'snapshot' });
-	            if (indexSnapshot && indexSnapshot.length > 0) {
-	                await this.handleLocalDeltaReadyForPush({ documentId: 'shard-index', updateBinary: indexSnapshot, path: null });
-	            }
-	        }
+			const indexRemoteLatest = bulkUpdates['shard-index'] || 0;
+			const indexLastSync = this.fileLastSyncIds.get('shard-index') || 0;
+			if (indexLastSync === 0 && indexRemoteLatest === 0) {
+				const indexDoc = await this.crdtEngine.getOrCreateDoc('shard-index');
+				const indexSnapshot = indexDoc.export({ mode: 'snapshot' });
+				if (indexSnapshot && indexSnapshot.length > 0) {
+					await this.handleLocalDeltaReadyForPush({ documentId: 'shard-index', updateBinary: indexSnapshot, path: null });
+				}
+			}
 
-	        // --- 2. PULL DOCUMENT TEXT ---
-	       const activeFiles = this.vfsController.getActiveFiles().filter(file => file.type !== 'folder');
-	        
-	        this.prePullBaselineContents.clear();
-	        for (const file of activeFiles) {
-	            const doc = await this.crdtEngine.getOrCreateDoc(file.uuid);
-	            this.prePullBaselineContents.set(file.uuid, doc.getText('markdown').toString());
-	        }
+			// --- 2. PULL DOCUMENT TEXT & BLOBS DECOUPLED ---
+			const activeFiles = this.vfsController.getActiveFiles().filter(file => file.type !== 'folder');
+			const textFiles = activeFiles.filter(f => !isBinaryPath(f.path));
+			const binaryFiles = activeFiles.filter(f => isBinaryPath(f.path));
+        
+			this.prePullBaselineContents.clear();
+			for (const file of textFiles) {
+				const doc = await this.crdtEngine.getOrCreateDoc(file.uuid);
+				this.prePullBaselineContents.set(file.uuid, doc.getText('markdown').toString());
+			}
 
-	        const limit = pLimit(20);
-	        const pullPromises = activeFiles.map(file =>
-	            limit(async () => {
-	                if (this.hasConnectionError) return;
-	                const latestRemoteId = bulkUpdates[file.uuid] || 0;
-	                await this.pullDocument(file.uuid, file.path, true, latestRemoteId);
-	            })
-	        );
-	        await Promise.all(pullPromises);
+			// Pull Text CRDTs
+			const limit = pLimit(20);
+			const pullPromises = textFiles.map(file =>
+				limit(async () => {
+					if (this.hasConnectionError) return;
+					const latestRemoteId = bulkUpdates[file.uuid] || 0;
+					await this.pullDocument(file.uuid, file.path, true, latestRemoteId);
+				})
+			);
+			await Promise.all(pullPromises);
 
-	        if (this.diskReconciler) {
-	            await this.diskReconciler.onIdle();
-	        }
+			// Download Decoupled Binary Blobs
+			const blobLimit = pLimit(5);
+			const blobPromises = binaryFiles.map(file => blobLimit(async () => {
+				if (this.hasConnectionError) return;
+				const expectedHash = (this.vfsController as any).getBlobHashForUuid(file.uuid);
+				if (!expectedHash) return;
 
-	        for (const file of activeFiles) {
-	            const doc = await this.crdtEngine.getOrCreateDoc(file.uuid);
-	            this.prePullBaselineContents.set(file.uuid, doc.getText('markdown').toString());
-	        }
+				const localBase64 = await this.noteRepo.readNote(file.path);
+				if (localBase64) {
+					const localBytes = base64ToUint8Array(localBase64);
+					const localHash = await (this.crypto as any).hashData(localBytes);
+					if (localHash === expectedHash) return; // Up to date on disk
+				}
 
-	        console.log('[NetworkOrchestrator] 🟢 REMOTE CHANGES PULLED AND SETTLED. Now ingesting and pushing local offline state...');
+				this.addActiveTask(file.path);
+				try {
+					const encryptedBytes = await (this.remoteStore as any).downloadBlob(expectedHash);
+					if (encryptedBytes) {
+						const payloadJson = new TextDecoder().decode(encryptedBytes);
+						const encryptedBlob = JSON.parse(payloadJson);
+						const decryptedBytes = await this.crypto.decrypt(encryptedBlob, this.activeKey!);
+						const base64ToWrite = uint8ArrayToBase64(decryptedBytes);
+						await this.safeWriteNote(file.path, base64ToWrite);
+					}
+				} catch (err) {
+					console.error(`[NetworkOrchestrator] Failed to download blob for ${file.path}:`, err);
+				} finally {
+					this.removeActiveTask(file.path);
+				}
+			}));
+			await Promise.all(blobPromises);
 
-	        // --- 3. INGEST LOCAL OFFLINE MODIFICATIONS AND CREATIONS ---
-	        await this.ingestLocalOfflineNotes(bulkUpdates);
+			if (this.diskReconciler) {
+				await this.diskReconciler.onIdle();
+			}
 
-	        if (this.diskReconciler) {
-	            await this.diskReconciler.onIdle();
-	        }
+			for (const file of textFiles) {
+				const doc = await this.crdtEngine.getOrCreateDoc(file.uuid);
+				this.prePullBaselineContents.set(file.uuid, doc.getText('markdown').toString());
+			}
 
-	        // --- 4. REPORT ACTIVE BLOB MANIFEST FOR SERVER-SIDE GC ---
-	        try {
-	            const activeHashes = this.vfsController.getActiveBlobHashes();
-	            if (typeof this.remoteStore.uploadBlobManifest === 'function') {
-	                await this.remoteStore.uploadBlobManifest(activeHashes);
-	            }
-	        } catch (manifestErr) {
-	            console.warn('[NetworkOrchestrator] Failed to upload active blob manifest:', manifestErr);
-	        }
+			console.log('[NetworkOrchestrator] 🟢 REMOTE CHANGES PULLED AND SETTLED. Now ingesting and pushing local offline state...');
 
-	        this.isInitialized = true;
-	        console.log('[NetworkOrchestrator] Full Sync Complete.');
-	    } catch (error) {
-	        console.error('[NetworkOrchestrator] Sync failed:', error);
-	        this.hasConnectionError = true;
-	        this.lastErrorMessage = 'Sync failed';
-	    } finally {
-	        this.removeActiveTask('System Index');
-	        this.isSyncingFull = false;
-	    }
+			await this.ingestLocalOfflineNotes(bulkUpdates);
+
+			if (this.diskReconciler) {
+				await this.diskReconciler.onIdle();
+			}
+
+			try {
+				const activeHashes = this.vfsController.getActiveBlobHashes();
+				if (typeof this.remoteStore.uploadBlobManifest === 'function') {
+					await this.remoteStore.uploadBlobManifest(activeHashes);
+				}
+			} catch (manifestErr) {
+				console.warn('[NetworkOrchestrator] Failed to upload active blob manifest:', manifestErr);
+			}
+
+			this.isInitialized = true;
+			console.log('[NetworkOrchestrator] Full Sync Complete.');
+		} catch (error) {
+			console.error('[NetworkOrchestrator] Sync failed:', error);
+			this.hasConnectionError = true;
+			this.lastErrorMessage = 'Sync failed';
+		} finally {
+			this.removeActiveTask('System Index');
+			this.isSyncingFull = false;
+		}
 	}
 
 	private reconcileVfsDiskPaths(): void {
@@ -401,68 +519,6 @@ export class NetworkOrchestrator {
 			}
 		}
 		if (updateBinary && updateBinary.length > 0) {
-			await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
-		}
-	}
-
-	private async reconcileExistingLocalFile(documentId: string, path: string, localContent: string, bulkUpdates: Record<string, number> = {}): Promise<void> {
-		const doc = await this.crdtEngine.getOrCreateDoc(documentId);
-		const crdtContent = doc.getText('markdown').toString();
-		console.log(`[VAULT A INGEST] ${path} | local: ${localContent} | crdt: ${crdtContent}`);
-		if (localContent === crdtContent) {
-			const lastSyncId = this.fileLastSyncIds.get(documentId) || 0;
-			const remoteLatestId = bulkUpdates[documentId] || 0;
-			if (lastSyncId === 0 && remoteLatestId === 0) {
-				const snapshotBytes = doc.export({ mode: 'snapshot' });
-				if (snapshotBytes && snapshotBytes.length > 0) {
-					await this.handleLocalDeltaReadyForPush({ documentId, updateBinary: snapshotBytes, path });
-				}
-			}
-			return;
-		}
-
-		const isBinary = isBinaryPath(path);
-
-		if (isBinary) {
-			// Binary Base64 content must strictly avoid trimming, CRLF conversions, or newline concatenation
-			const baselineContent = this.prePullBaselineContents.get(documentId);
-			if (baselineContent !== undefined && localContent === baselineContent) {
-				await this.safeWriteNote(path, crdtContent);
-				return;
-			}
-
-			// Apply the local offline binary content directly as an atomic overwrite
-			const updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent, true);
-			if (updateBinary) {
-				await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
-			}
-			return;
-		}
-
-		const baselineContent = this.prePullBaselineContents.get(documentId);
-		if (baselineContent !== undefined && localContent.trim() === baselineContent.trim()) {
-			await this.safeWriteNote(path, crdtContent);
-			return;
-		}
-
-		if (crdtContent.length > 0 && crdtContent.includes(localContent.trim())) {
-			await this.safeWriteNote(path, crdtContent);
-			return;
-		}
-
-		let contentToApply = localContent;
-		if (crdtContent.length > 0 && !localContent.includes(crdtContent.trim())) {
-			if (path.endsWith('.json')) {
-				// FIX: Never concatenate JSON files. Favor the local offline edit 
-				// to ensure the resulting file remains valid JSON.
-				contentToApply = localContent;
-			} else {
-				// Standard fallback: safely append conflicting Markdown text
-				contentToApply = `${localContent.trim()}\n${crdtContent.trim()}\n`;
-			}
-		}
-		const updateBinary = await this.crdtEngine.handleLocalChange(documentId, contentToApply, false);
-		if (updateBinary) {
 			await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
 		}
 	}
