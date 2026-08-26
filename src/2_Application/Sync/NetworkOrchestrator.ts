@@ -452,7 +452,14 @@ export class NetworkOrchestrator {
 
 		let contentToApply = localContent;
 		if (crdtContent.length > 0 && !localContent.includes(crdtContent.trim())) {
-			contentToApply = `${localContent.trim()}\n${crdtContent.trim()}\n`;
+			if (path.endsWith('.json')) {
+				// FIX: Never concatenate JSON files. Favor the local offline edit 
+				// to ensure the resulting file remains valid JSON.
+				contentToApply = localContent;
+			} else {
+				// Standard fallback: safely append conflicting Markdown text
+				contentToApply = `${localContent.trim()}\n${crdtContent.trim()}\n`;
+			}
 		}
 		const updateBinary = await this.crdtEngine.handleLocalChange(documentId, contentToApply, false);
 		if (updateBinary) {
