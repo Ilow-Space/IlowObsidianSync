@@ -296,6 +296,11 @@ export class LoroVfsController {
 		this.uuidToNodeId.delete(nodeUuid);
 		this.nodeIdToUuid.delete(this.getNodeIdStr(targetNodeId));
 
+		try {
+			this.loroTree.delete(targetNodeId);
+			this.treeDoc.commit();
+		} catch (e) {}
+
 		this.scheduleLocalPush();
 	}
 

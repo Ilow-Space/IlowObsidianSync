@@ -59,7 +59,15 @@ export class NetworkOrchestrator {
 		
 		// Garbage collect UUID tracking maps when a file is deleted locally
 		this.eventBus.on('LocalFileDeleted', (payload) => {
-			const documentId = this.vfsController.getUuidForPath(payload.path) || (payload as any).uuid;
+			const documentId = (payload as any).uuid || this.vfsController.getUuidForPath(payload.path);
+			if (documentId) {
+				this.fileLastSyncIds.delete(documentId);
+				this.fileUpdateCounters.delete(documentId);
+			}
+		});
+
+		this.eventBus.on('CrdtNodeSoftDeleted', (payload) => {
+			const documentId = payload.uuid || this.vfsController.getUuidForPath(payload.path);
 			if (documentId) {
 				this.fileLastSyncIds.delete(documentId);
 				this.fileUpdateCounters.delete(documentId);
@@ -145,6 +153,15 @@ export class NetworkOrchestrator {
 		
 	        await this.remoteStore.pushUpdate(payload.documentId, encryptedUpdate, encryptedPath);
 	        this.hasConnectionError = false;
+
+	        if (payload.documentId !== 'shard-index') {
+	            const count = (this.fileUpdateCounters.get(payload.documentId) || 0) + 1;
+	            this.fileUpdateCounters.set(payload.documentId, count);
+	            if (count >= 50) {
+	                this.fileUpdateCounters.set(payload.documentId, 0);
+	                this.forceSyncAndCompact(payload.documentId).catch(() => {});
+	            }
+	        }
 	    } catch (err) {
 			console.error('[NetworkOrchestrator] Failed to push local delta:', err);
 	        this.hasConnectionError = true;
