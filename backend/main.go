@@ -109,6 +109,10 @@ type CompactPayload struct {
 	PEncryptedPath *string `json:"p_encrypted_path,omitempty"`
 }
 
+type BlobManifestPayload struct {
+	ActiveHashes []string `json:"active_hashes"`
+}
+
 func startTelemetryTracker() {
 	secTicker := time.NewTicker(1 * time.Second)
 	hourTicker := time.NewTicker(1 * time.Hour)
