@@ -65,6 +65,11 @@ export class PostgresRemoteStore implements IRemoteStore {
 	}
 
 	public connectWebSocket(wssUrl: string) {
+
+		if (!this.vaultAliasId) {
+			return; 
+		}
+
 		try {
 			const socketUrl = new URL(wssUrl);
 

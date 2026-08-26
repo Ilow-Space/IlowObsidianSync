@@ -98,30 +98,6 @@ export default class MyPlugin extends Plugin {
 			this.activateSidebar();
 		});
 
-		this.initializeSyncOrchestrator();
-
-		// Auto-load master sync key from secret storage
-		try {
-			const keyData = await (this.app as any).secretStorage.getSecret('ilow-master-key');
-			if (keyData) {
-				this.updateStatusBar('syncing', 'Loading key...');
-				this.derivedKey = await this.cryptoService.importKey(keyData);
-
-				if (this.remoteStore) {
-					const vaultAliasId = await this.cryptoService.getVaultAliasId(this.derivedKey);
-					this.remoteStore.setVaultAliasId(vaultAliasId);
-				}
-
-				if (this.networkOrchestrator) {
-					this.networkOrchestrator.setCryptoKey(this.derivedKey);
-					this.runBackgroundBootstrap().catch(console.error);
-				}
-			}
-		} catch (err) {
-			console.error('Failed to auto-load master sync key:', err);
-			this.updateStatusBar('error', 'Failed to load key');
-		}
-
 		// Add settings tab
 		this.addSettingTab(new SettingsTab(this.app, this));
 
@@ -133,6 +109,21 @@ export default class MyPlugin extends Plugin {
 				}
 			})
 		);
+
+		// 2. Auto-load master sync key FIRST before starting network sockets
+		try {
+			const keyData = await (this.app as any).secretStorage?.getSecret('ilow-master-key');
+			if (keyData) {
+				this.updateStatusBar('syncing', 'Loading key...');
+				this.derivedKey = await this.cryptoService.importKey(keyData);
+			}
+		} catch (err) {
+			console.error('Failed to auto-load master sync key:', err);
+			this.updateStatusBar('error', 'Failed to load key');
+		}
+
+		// 3. Initialize orchestrator (derivedKey is now set, allowing vaultAliasId to be passed on connection #1)
+		await this.initializeSyncOrchestrator();
 	}
 
 	onunload() {

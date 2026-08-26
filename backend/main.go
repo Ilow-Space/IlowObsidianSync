@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"compress/gzip"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -293,6 +296,13 @@ func (g gzipResponseWriter) Write(b []byte) (int, error) {
 	return g.Writer.Write(b)
 }
 
+func (g gzipResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := g.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddUint64(&reqsLastSecond, 1)
@@ -303,13 +313,18 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Vault-Alias-ID")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Vault-Alias-ID, X-API-Key")
+		
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 
-		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") && r.Header.Get("Upgrade") != "websocket" {
+		// Case-insensitive check for WebSockets or Upgrade requests
+		isWebSocket := strings.EqualFold(r.Header.Get("Upgrade"), "websocket") ||
+			strings.EqualFold(r.Header.Get("Connection"), "upgrade")
+
+		if !isWebSocket && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 			w.Header().Set("Content-Encoding", "gzip")
 			gz := gzip.NewWriter(w)
 			defer gz.Close()
@@ -957,6 +972,7 @@ func handlePostTruncate(w http.ResponseWriter, r *http.Request) {
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		log.Printf("WebSocket Upgrade error: %v\n", err)
 		return
 	}
 
