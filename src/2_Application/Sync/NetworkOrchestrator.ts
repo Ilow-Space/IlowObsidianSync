@@ -55,6 +55,7 @@ export class NetworkOrchestrator {
 	public initialize(): void {
 		this.eventBus.on('LocalDeltaReadyForPush', this.handleLocalDeltaReadyForPush.bind(this));
 		this.eventBus.on('LocalFileModified', this.handleLocalFileModified.bind(this));
+		this.eventBus.on('LocalFileCreated', this.handleLocalFileCreated.bind(this));
 		this.eventBus.on('CrdtNodeCreated', this.handleRemoteNodeDiscovered.bind(this));
 		
 		// Garbage collect UUID tracking maps when a file is deleted locally
@@ -178,6 +179,18 @@ export class NetworkOrchestrator {
 			await this.noteRepo.writeNote(path, content);
 		} finally {
 			ObsidianDiskReconciler.unsuppressPath(path, 1500);
+		}
+	}
+
+	private async handleLocalFileCreated(payload: { path: string; isFolder: boolean; content?: string }): Promise<void> {
+		if (this.isSyncingFull || ObsidianDiskReconciler.suppressedPaths.has(payload.path)) return;
+		if (payload.isFolder) return;
+
+		let documentId = this.vfsController.getUuidForPath(payload.path);
+		if (!documentId) return;
+
+		if (payload.content !== undefined) {
+			await this.handleLocalFileModified({ path: payload.path, content: payload.content });
 		}
 	}
 
