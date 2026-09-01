@@ -1,9 +1,10 @@
 {
   "id": "ilow-sync",
   "name": "Ilow Sync",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "minAppVersion": "1.0.0",
-  "description": "An elegant peer-to-peer sync plugin for Obsidian powered by Loro CRDT, WebCrypto E2EE, and PostgREST.",
-  "author": "Exfur",
+  "description": "Sync notes, files, settings and themes across devices in real time, end-to-end encrypted, via your own self-hosted server.",
+  "author": "Ilow",
+  "authorUrl": "https://github.com/Ilow-Space",
   "isDesktopOnly": false
 }
