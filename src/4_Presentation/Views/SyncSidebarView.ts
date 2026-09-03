@@ -1,5 +1,5 @@
 import { ItemView, WorkspaceLeaf, setIcon } from 'obsidian';
-import MyPlugin from '../Plugin';
+import IlowSyncPlugin from '../Plugin';
 import { ServerTelemetry } from '@domain/Interfaces/IRemoteStore';
 
 export const SYNC_SIDEBAR_VIEW_TYPE = 'ilow-sync-sidebar-view';
@@ -7,7 +7,7 @@ export const SYNC_SIDEBAR_VIEW_TYPE = 'ilow-sync-sidebar-view';
 export class SyncSidebarView extends ItemView {
 	private telemetry: ServerTelemetry | null = null;
 
-	constructor(leaf: WorkspaceLeaf, private plugin: MyPlugin) {
+	constructor(leaf: WorkspaceLeaf, private plugin: IlowSyncPlugin) {
 		super(leaf);
 	}
 
@@ -56,31 +56,15 @@ export class SyncSidebarView extends ItemView {
 		if (isConnected && this.telemetry) {
 			container.createEl('h4', { text: 'Server Telemetry', cls: 'nav-folder-title' });
             
-			const statsGrid = container.createDiv();
-			statsGrid.style.display = 'grid';
-			statsGrid.style.gridTemplateColumns = '1fr 1fr';
-			statsGrid.style.gap = '8px';
-			statsGrid.style.padding = '8px';
-			statsGrid.style.marginBottom = '12px';
-			statsGrid.style.border = '1px solid var(--background-modifier-border)';
-			statsGrid.style.borderRadius = 'var(--radius-s)';
-			statsGrid.style.backgroundColor = 'var(--background-secondary)';
+			const statsGrid = container.createDiv({ cls: 'ilow-sync-stats-grid' });
 
 			const createStat = (label: string, value: string, color?: string) => {
-				const statBox = statsGrid.createDiv();
-				statBox.style.display = 'flex';
-				statBox.style.flexDirection = 'column';
+				const statBox = statsGrid.createDiv({ cls: 'ilow-sync-stat-box' });
                 
-				const labelEl = statBox.createSpan({ text: label });
-				labelEl.style.fontSize = 'var(--font-ui-smaller)';
-				labelEl.style.color = 'var(--text-muted)';
-				labelEl.style.textTransform = 'uppercase';
-				labelEl.style.letterSpacing = '0.05em';
+				statBox.createSpan({ cls: 'ilow-sync-stat-label', text: label });
                 
-				const valEl = statBox.createSpan({ text: value });
-				valEl.style.fontWeight = 'var(--font-bold)';
-				valEl.style.fontSize = 'var(--font-ui-medium)';
-				if (color) valEl.style.color = color;
+				const valEl = statBox.createSpan({ cls: 'ilow-sync-stat-val', text: value });
+				if (color) valEl.setCssStyles({ color });
 			};
 
 			const healthColor = this.telemetry.systemHealth === 'healthy' ? 'var(--text-success)' :

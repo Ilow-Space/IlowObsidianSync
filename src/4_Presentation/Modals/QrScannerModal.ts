@@ -16,10 +16,6 @@ export class QrScannerModal extends Modal {
 		const nativeSyncEnabled = (this.app as any).internalPlugins?.plugins?.sync?.enabled;
 		if (nativeSyncEnabled) {
 			const warning = contentEl.createDiv({ cls: 'ilow-sync-warning' });
-			warning.style.backgroundColor = 'var(--background-modifier-error)';
-			warning.style.padding = '10px';
-			warning.style.borderRadius = '5px';
-			warning.style.marginBottom = '15px';
 			warning.createEl('h3', { text: '⚠️ Conflict Warning' });
 			warning.createEl('p', { text: 'For Ilow Sync to function correctly and avoid data corruption, please disable the official Obsidian Sync plugin in your Core Plugins settings.' });
 		}
@@ -59,7 +55,7 @@ export class QrScannerModal extends Modal {
 
 		const readerDiv = contentEl.createDiv({ attr: { id: 'ilow-sync-reader' } });
 
-		setTimeout(() => {
+		window.setTimeout(() => {
 			try {
 				this.html5QrcodeScanner = new Html5Qrcode('ilow-sync-reader');
 				this.html5QrcodeScanner

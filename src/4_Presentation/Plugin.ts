@@ -1,4 +1,4 @@
-import { Plugin, Notice, TFile, TAbstractFile, WorkspaceLeaf, TFolder } from 'obsidian';
+import { Plugin, TFile, WorkspaceLeaf } from 'obsidian';
 import { SettingsTab } from './SettingsTab';
 import { WebCryptoService } from '@infrastructure/Crypto/WebCryptoService';
 import { PostgresRemoteStore } from '@infrastructure/Postgres/PostgresRemoteStore';
@@ -36,7 +36,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
 	syncAppearance: true
 };
 
-export default class MyPlugin extends Plugin {
+export default class IlowSyncPlugin extends Plugin {
 	public settings!: PluginSettings;
 	public cryptoService!: WebCryptoService;
 	private noteRepo!: ObsidianNoteRepository;

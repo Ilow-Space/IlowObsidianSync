@@ -38,14 +38,14 @@ export class VaultEventWatcher {
 					if (this.app.vault.adapter && await this.app.vault.adapter.exists(file.path)) {
 						let arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
 						if (arrayBuffer.byteLength === 0) {
-							await new Promise(r => setTimeout(r, 100));
+							await new Promise(r => window.setTimeout(r, 100));
 							arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
 						}
 						const bytes = new Uint8Array(arrayBuffer);
 						return uint8ArrayToBase64(bytes);
 					}
-				} catch (e) {
-					await new Promise(r => setTimeout(r, 150));
+				} catch {
+					await new Promise(r => window.setTimeout(r, 150));
 				}
 			}
 			return '';
@@ -60,7 +60,7 @@ export class VaultEventWatcher {
 				if (this.app.vault.adapter && await this.app.vault.adapter.exists(path)) {
 					return await this.app.vault.adapter.read(path);
 				}
-			} catch (e) {
+			} catch {
 				return null;
 			}
 			return null;
@@ -78,7 +78,7 @@ export class VaultEventWatcher {
 					const bytes = new Uint8Array(arrayBuffer);
 					return uint8ArrayToBase64(bytes);
 				}
-			} catch (e) {
+			} catch {
 				return null;
 			}
 		} else {
@@ -86,7 +86,7 @@ export class VaultEventWatcher {
 				if (this.app.vault.adapter && await this.app.vault.adapter.exists(path)) {
 					return await this.app.vault.adapter.read(path);
 				}
-			} catch (e) {
+			} catch {
 				return null;
 			}
 		}
@@ -117,7 +117,7 @@ export class VaultEventWatcher {
 				};
 				await walkAdapter('');
 			}
-		} catch (e) {}
+		} catch {}
 
 		if (typeof this.app.vault.getFiles === 'function') {
 			for (const file of this.app.vault.getFiles()) {
@@ -215,7 +215,7 @@ export class VaultEventWatcher {
 
 		this.pollVaultFiles().catch(() => {});
 
-		this.pollTimer = setInterval(() => {
+		this.pollTimer = window.setInterval(() => {
 			this.pollVaultFiles().catch(() => {});
 		}, 2000);
 	}
@@ -261,12 +261,12 @@ export class VaultEventWatcher {
 					this.eventBus.emit('LocalFileModified', { path, content });
 				}
 			}
-		} catch (e) {}
+		} catch {}
 	}
 
 	public destroy(): void {
 		if (this.pollTimer) {
-			clearInterval(this.pollTimer);
+			window.clearInterval(this.pollTimer);
 			this.pollTimer = null;
 		}
 		for (const listener of this.activeListeners) {

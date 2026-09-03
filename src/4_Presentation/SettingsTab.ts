@@ -1,10 +1,10 @@
 ﻿import { App, PluginSettingTab, Setting, Notice } from 'obsidian';
-import MyPlugin from './Plugin';
+import IlowSyncPlugin from './Plugin';
 import { QrDisplayModal } from './Modals/QrDisplayModal';
 import { QrScannerModal } from './Modals/QrScannerModal';
 
 export class SettingsTab extends PluginSettingTab {
-	constructor(app: App, private plugin: MyPlugin) {
+	constructor(app: App, private plugin: IlowSyncPlugin) {
 		super(app, plugin);
 	}
 
@@ -12,15 +12,11 @@ export class SettingsTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		containerEl.createEl('h2', { text: 'Ilow Sync Settings' });
+		new Setting(containerEl).setName('Ilow Sync Settings').setHeading();
 
 		const nativeSyncEnabled = (this.app as any).internalPlugins?.plugins?.sync?.enabled;
 		if (nativeSyncEnabled) {
 			const warning = containerEl.createDiv({ cls: 'ilow-sync-warning' });
-			warning.style.backgroundColor = 'var(--background-modifier-error)';
-			warning.style.padding = '10px';
-			warning.style.borderRadius = '5px';
-			warning.style.marginBottom = '15px';
 			warning.createEl('h3', { text: '⚠️ Conflict Warning', cls: 'ilow-sync-warning-title' });
 			warning.createEl('p', { text: 'For Ilow Sync to function correctly and avoid data corruption, please disable the official Obsidian Sync plugin in your Core Plugins settings.' });
 		}
@@ -86,7 +82,7 @@ export class SettingsTab extends PluginSettingTab {
 			.addButton((btn) =>
 				btn
 					.setButtonText('Regenerate Salt')
-					.setWarning()
+					.setDestructive()
 					.onClick(async () => {
 						if (confirm('Warning: Regenerating the salt will change your encryption key. You will lose access to any previously encrypted data in the remote database unless they are re-encrypted.')) {
 							this.plugin.settings.salt = this.plugin.cryptoService.generateSalt();
@@ -112,7 +108,7 @@ export class SettingsTab extends PluginSettingTab {
 			.addButton((btn) => {
 				if (this.plugin.isKeyDerived) {
 					btn.setButtonText('Unload Key')
-						.setWarning()
+						.setDestructive()
 						.onClick(async () => {
 							await this.plugin.unloadKey();
 							this.display();
@@ -181,7 +177,7 @@ export class SettingsTab extends PluginSettingTab {
 					})
 			);
 
-		containerEl.createEl('h3', { text: 'Extension & Theme Sync Settings' });
+		new Setting(containerEl).setName('Extension & Theme Sync Settings').setHeading();
 
 		// Sync Plugin Settings
 		new Setting(containerEl)
@@ -235,7 +231,7 @@ export class SettingsTab extends PluginSettingTab {
 					})
 			);
 
-		containerEl.createEl('h3', { text: 'Multi-Device Onboarding' });
+		new Setting(containerEl).setName('Multi-Device Onboarding').setHeading();
 
 		// Generate Setup QR Code
 		new Setting(containerEl)
@@ -291,7 +287,7 @@ export class SettingsTab extends PluginSettingTab {
 					})
 			);
 
-		containerEl.createEl('h3', { text: 'Maintenance & Danger Zone' });
+		new Setting(containerEl).setName('Maintenance & Danger Zone').setHeading();
 
 		// Hard Reset Local State
 		new Setting(containerEl)
@@ -300,7 +296,7 @@ export class SettingsTab extends PluginSettingTab {
 			.addButton((btn) =>
 				btn
 					.setButtonText('Hard Reset Local State')
-					.setWarning()
+					.setDestructive()
 					.onClick(async () => {
 						if (confirm('Are you sure you want to hard reset local state? This will wipe your local CRDT database cache and re-download all documents from the server.')) {
 							try {
@@ -330,7 +326,7 @@ export class SettingsTab extends PluginSettingTab {
 			.addButton((btn) =>
 				btn
 					.setButtonText('Purge Server Data')
-					.setWarning()
+					.setDestructive()
 					.onClick(async () => {
 						const token = this.plugin.settings.adminToken;
 						if (!token) {

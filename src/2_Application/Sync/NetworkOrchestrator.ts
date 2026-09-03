@@ -719,6 +719,6 @@ export class NetworkOrchestrator {
 		try {
 			await this.remoteStore.deleteSnapshot(documentId);
 			await this.crdtEngine.localStore.deleteDocumentState(documentId);
-		} catch (err) {}
+		} catch {}
 	}
 }

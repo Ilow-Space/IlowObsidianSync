@@ -14,9 +14,6 @@ export class QrDisplayModal extends Modal {
 
 		// QR Code Container
 		const container = contentEl.createDiv({ cls: 'ilow-sync-settings-qr' });
-		container.style.textAlign = 'center';
-		container.style.margin = '16px 0';
-		container.style.cursor = 'pointer';
 
 		const canvas = container.createEl('canvas');
 		canvas.title = 'Click to copy connection string';
@@ -40,9 +37,7 @@ export class QrDisplayModal extends Modal {
 			.addTextArea((text) => {
 				text.setValue(this.payload);
 				text.inputEl.rows = 3;
-				text.inputEl.style.width = '100%';
-				text.inputEl.style.fontFamily = 'monospace';
-				text.inputEl.style.fontSize = '11px';
+				text.inputEl.addClass('ilow-sync-setup-textarea');
 				text.inputEl.readOnly = true;
 			})
 			.addButton((btn) =>
