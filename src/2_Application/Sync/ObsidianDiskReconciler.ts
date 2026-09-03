@@ -1,4 +1,4 @@
-import { App, TFile } from 'obsidian';
+import { App, TFile, TFolder } from 'obsidian';
 import { Mutex } from 'async-mutex';
 import PQueue from 'p-queue';
 import { SyncEventBus } from './SyncEventBus';
@@ -17,10 +17,10 @@ export class ObsidianDiskReconciler {
 	) {}
 
 	public initialize(): void {
-		this.eventBus.on('CrdtNodeCreated', this.handleCrdtNodeCreated.bind(this));
-		this.eventBus.on('CrdtNodeMoved', this.handleCrdtNodeMoved.bind(this));
-		this.eventBus.on('CrdtNodeSoftDeleted', this.handleCrdtNodeSoftDeleted.bind(this));
-		this.eventBus.on('CrdtTextChanged', this.handleCrdtTextChanged.bind(this));
+		this.eventBus.on('CrdtNodeCreated', (p) => { void this.handleCrdtNodeCreated(p); });
+		this.eventBus.on('CrdtNodeMoved', (p) => { void this.handleCrdtNodeMoved(p); });
+		this.eventBus.on('CrdtNodeSoftDeleted', (p) => { void this.handleCrdtNodeSoftDeleted(p); });
+		this.eventBus.on('CrdtTextChanged', (p) => { void this.handleCrdtTextChanged(p); });
 	}
 
 	public static suppressPath(path: string): void {
@@ -85,12 +85,13 @@ export class ObsidianDiskReconciler {
 	private getPathsToSuppress(oldPath: string, newPath: string): string[] {
 		const paths = [oldPath, newPath];
 		const prefix = oldPath.endsWith('/') ? oldPath : oldPath + '/';
-		const allFiles = (this.app.vault as any).getAllLoadedFiles ? (this.app.vault as any).getAllLoadedFiles() : [];
-	    
+		const vaultWithFiles = this.app.vault as unknown as { getAllLoadedFiles?: () => Array<{ path?: string }> };
+		const allFiles = typeof vaultWithFiles.getAllLoadedFiles === 'function' ? vaultWithFiles.getAllLoadedFiles() : [];
+
 		for (const f of allFiles) {
 			if (f.path && f.path.startsWith(prefix)) {
 				paths.push(f.path);
-				const suffix = (f.path as string).substring(oldPath.length);
+				const suffix = f.path.substring(oldPath.length);
 				paths.push(newPath + suffix);
 			}
 		}
@@ -186,7 +187,7 @@ export class ObsidianDiskReconciler {
 						if (!payload.isFolder && existing instanceof TFile) {
 							const diskContent = await this.readPhysicalFileContent(existing);
 							if (diskContent === (payload.content || '')) {
-							    this.eventBus.emit('RebalancePathUuid' as any, { remoteUuid: payload.uuid, path: targetPath });
+							    this.eventBus.emit('RebalancePathUuid', { remoteUuid: payload.uuid, path: targetPath });
 							    return;
 							}
 						}
@@ -280,14 +281,20 @@ export class ObsidianDiskReconciler {
 		let targetPath = payload.newPath;
 		if (targetExists && (targetExists as { path?: string }).path !== payload.oldPath) {
 			if ((targetExists as { stat?: { size?: number } }).stat?.size === 0) {
-				try { await this.app.vault.trash(targetExists as TFile, true); } catch {}
+				try {
+					if (targetExists instanceof TFile || targetExists instanceof TFolder) {
+						await this.app.fileManager.trashFile(targetExists);
+					}
+				} catch {
+					// Ignore trash failure
+				}
 			} else {
 				const doc = await this.syncEngine.getOrCreateDoc(payload.uuid);
 				const incomingContent = doc.getText('markdown').toString();
 				const diskContent = targetExists instanceof TFile ? await this.readPhysicalFileContent(targetExists) : null;
-                
+
 				if (diskContent === incomingContent) {
-					this.eventBus.emit('RebalancePathUuid' as any, { remoteUuid: payload.uuid, path: targetPath });
+					this.eventBus.emit('RebalancePathUuid', { remoteUuid: payload.uuid, path: targetPath });
 					return { targetPath, rebalanced: true };
 				}
 
@@ -391,10 +398,15 @@ export class ObsidianDiskReconciler {
 
 					ObsidianDiskReconciler.suppressPath(payload.path);
 					try {
-						try {
-							await this.app.vault.trash(file, true);
-						} catch {
-							await this.app.vault.trash(file, false);
+						const fileManager = (this.app as unknown as { fileManager?: { trashFile?: (f: unknown) => Promise<void> } }).fileManager;
+						if (typeof fileManager?.trashFile === 'function') {
+							await fileManager.trashFile(file);
+						} else {
+							try {
+								await this.app.vault.trash(file, true);
+							} catch {
+								await this.app.vault.trash(file, false);
+							}
 						}
 					} catch (e) {
 						console.error('[ObsidianDiskReconciler] Failed to trash file:', e);
@@ -414,8 +426,8 @@ export class ObsidianDiskReconciler {
 			try {
 				await mutex.runExclusive(async () => {
 					let file = this.app.vault.getAbstractFileByPath(payload.path);
-					if (!file && typeof (this.app.vault as any).getFiles === 'function') {
-						file = this.app.vault.getFiles().find((f: any) => f.path === payload.path) || null;
+					if (!file && typeof this.app.vault.getFiles === 'function') {
+						file = this.app.vault.getFiles().find(f => f.path === payload.path) || null;
 					}
 
 					const configDir = this.app.vault.configDir || '.obsidian';
@@ -469,16 +481,18 @@ export class ObsidianDiskReconciler {
 	private triggerHotReload(configFilePath: string): void {
 		try {
 			if (configFilePath.includes('/themes/') || configFilePath.endsWith('appearance.json')) {
-				if (typeof (this.app as any).customCss?.loadManifests === 'function') {
-					(this.app as any).customCss.loadManifests();
+				const customCss = (this.app as unknown as { customCss?: { loadManifests?: () => void } }).customCss;
+				if (typeof customCss?.loadManifests === 'function') {
+					customCss.loadManifests();
 				}
 			} else if (configFilePath.endsWith('data.json')) {
 				const match = configFilePath.match(/plugins\/([^/]+)\/data\.json$/);
 				if (match && match[1]) {
 					const pluginId = match[1];
-					const plugin = (this.app as any).plugins?.getPlugin(pluginId);
+					const plugins = (this.app as unknown as { plugins?: { getPlugin?: (id: string) => { loadData?: () => Promise<unknown> } | undefined } }).plugins;
+					const plugin = plugins?.getPlugin?.(pluginId);
 					if (plugin && typeof plugin.loadData === 'function') {
-						plugin.loadData().catch(console.error);
+						plugin.loadData().catch(() => {});
 					}
 				}
 			}

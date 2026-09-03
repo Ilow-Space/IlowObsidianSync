@@ -13,10 +13,11 @@ export class QrScannerModal extends Modal {
 		contentEl.empty();
 		contentEl.createEl('h2', { text: 'Import Setup Credentials' });
 
-		const nativeSyncEnabled = (this.app as any).internalPlugins?.plugins?.sync?.enabled;
+		const internalPlugins = (this.app as unknown as { internalPlugins?: { plugins?: { sync?: { enabled?: boolean } } } }).internalPlugins;
+		const nativeSyncEnabled = internalPlugins?.plugins?.sync?.enabled;
 		if (nativeSyncEnabled) {
 			const warning = contentEl.createDiv({ cls: 'ilow-sync-warning' });
-			warning.createEl('h3', { text: '⚠️ Conflict Warning' });
+			warning.createDiv({ text: '⚠️ Conflict Warning', cls: 'ilow-sync-warning-title' });
 			warning.createEl('p', { text: 'For Ilow Sync to function correctly and avoid data corruption, please disable the official Obsidian Sync plugin in your Core Plugins settings.' });
 		}
 
@@ -79,7 +80,7 @@ export class QrScannerModal extends Modal {
 							cls: 'mod-warning'
 						});
 					});
-			} catch (err: unknown) {
+			} catch {
 				readerDiv.createEl('p', {
 					text: 'Camera access not supported on this device. Please use the paste box above.',
 					cls: 'mod-warning'
@@ -92,7 +93,7 @@ export class QrScannerModal extends Modal {
 		if (this.html5QrcodeScanner) {
 			this.html5QrcodeScanner
 				.stop()
-				.catch((err: unknown) => console.error('Error stopping scanner:', err));
+				.catch(() => {});
 		}
 		const { contentEl } = this;
 		contentEl.empty();
