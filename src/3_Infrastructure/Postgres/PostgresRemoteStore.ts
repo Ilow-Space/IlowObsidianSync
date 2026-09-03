@@ -135,7 +135,7 @@ export class PostgresRemoteStore implements IRemoteStore {
 
 			this.socket.onclose = () => {
 				if (this.socket === null) return;
-				setTimeout(() => {
+				window.setTimeout(() => {
 					this.connectWebSocket(wssUrl);
 				}, 3000);
 			};

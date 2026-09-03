@@ -1,8 +1,8 @@
 ﻿import { Modal, App } from 'obsidian';
-import MyPlugin from '../Plugin';
+import IlowSyncPlugin from '../Plugin';
 
 export class SyncActivityModal extends Modal {
-	constructor(app: App, private plugin: MyPlugin) {
+	constructor(app: App, private plugin: IlowSyncPlugin) {
 		super(app);
 	}
 

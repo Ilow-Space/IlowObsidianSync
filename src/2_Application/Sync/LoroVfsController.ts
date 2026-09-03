@@ -46,7 +46,7 @@ export class LoroVfsController {
 			try {
 				const j = JSON.stringify(id);
 				if (j !== '{}') return j;
-			} catch (e) {}
+			} catch {}
 		}
 		return String(id);
 	}
@@ -66,9 +66,9 @@ export class LoroVfsController {
 		this.unsubscribeDoc = this.treeDoc.subscribe((event) => {
 			if (event.by === 'local') return;
 
-			if (this.changeTimeout) clearTimeout(this.changeTimeout);
+			if (this.changeTimeout) window.clearTimeout(this.changeTimeout);
 
-			this.changeTimeout = setTimeout(() => {
+			this.changeTimeout = window.setTimeout(() => {
 				this.treeDoc.commit();
 				this.rebuildCacheAndEmitRemoteDiffs();
 			}, 10);
@@ -82,16 +82,16 @@ export class LoroVfsController {
 	}
 
 	private scheduleLocalPush(): void {
-		if (this.pushTimeout) clearTimeout(this.pushTimeout);
+		if (this.pushTimeout) window.clearTimeout(this.pushTimeout);
 
-		this.pushTimeout = setTimeout(() => {
+		this.pushTimeout = window.setTimeout(() => {
 			this.flushPendingPush();
 		}, 10);
 	}
 
 	public flushPendingPush(): void {
 		if (this.pushTimeout) {
-			clearTimeout(this.pushTimeout);
+			window.clearTimeout(this.pushTimeout);
 			this.pushTimeout = null;
 		}
 		if (this.pendingFrontier) {
@@ -127,7 +127,7 @@ export class LoroVfsController {
 							return uuid;
 						}
 					}
-				} catch (e) {}
+				} catch {}
 			}
 		}
 
@@ -150,7 +150,7 @@ export class LoroVfsController {
 						hashes.add(blobHash.trim());
 					}
 				}
-			} catch (e) {}
+			} catch {}
 		}
 
 		return Array.from(hashes);
@@ -171,7 +171,7 @@ export class LoroVfsController {
 						const type = node.data.get('type') as string;
 						result.push({ uuid, path, type });
 					}
-				} catch (e) {}
+				} catch {}
 			}
 		}
 		return result;
@@ -193,10 +193,10 @@ export class LoroVfsController {
 				const resolvedPath = this.resolvePathForNode(node, nodeMap);
 				if (resolvedPath === payload.path) {
 					node.data.set('isDeleted', true);
-					try { this.loroTree.delete(node.id); } catch (e) {}
+					try { this.loroTree.delete(node.id); } catch {}
 					mutated = true;
 				}
-			} catch (e) {}
+			} catch {}
 		}
 
 		if (mutated) {
@@ -224,7 +224,7 @@ export class LoroVfsController {
 		if (parentUuid) {
 			const parentNodeId = this.uuidToNodeId.get(parentUuid);
 			if (parentNodeId) {
-				try { this.loroTree.move(childNode.id, parentNodeId); } catch (e) {}
+				try { this.loroTree.move(childNode.id, parentNodeId); } catch {}
 			}
 		}
 
@@ -268,7 +268,7 @@ export class LoroVfsController {
 			if (freshNode) freshNode.data.set('filename', name);
 
 			this.treeDoc.commit();
-		} catch (e) {}
+		} catch {}
 
 		this.rebuildCache();
 		this.scheduleLocalPush();
@@ -289,7 +289,7 @@ export class LoroVfsController {
 			if (freshNode) freshNode.data.set('isDeleted', true);
 
 			this.treeDoc.commit();
-		} catch (e) {}
+		} catch {}
 
 		this.pathToUuid.delete(payload.path);
 		this.uuidToLastKnownPath.delete(nodeUuid);
@@ -299,7 +299,7 @@ export class LoroVfsController {
 		try {
 			this.loroTree.delete(targetNodeId);
 			this.treeDoc.commit();
-		} catch (e) {}
+		} catch {}
 
 		this.scheduleLocalPush();
 	}
@@ -325,7 +325,7 @@ export class LoroVfsController {
 
 				this.uuidToNodeId.set(nodeUuid, node.id);
 				this.nodeIdToUuid.set(idStr, nodeUuid);
-			} catch (e) {}
+			} catch {}
 		}
 
 		for (const node of nodes) {
@@ -340,7 +340,7 @@ export class LoroVfsController {
 					this.pathToUuid.set(resolvedPath, nodeUuid);
 					this.uuidToLastKnownPath.set(nodeUuid, resolvedPath);
 				}
-			} catch (e) {}
+			} catch {}
 		}
 	}
 
@@ -366,7 +366,7 @@ export class LoroVfsController {
 				const parentId = parentNode.id !== undefined ? parentNode.id : parentNode;
 				const parentIdStr = this.getNodeIdStr(parentId);
 				curr = nodeMap.get(parentIdStr) || null;
-			} catch (e) { break; }
+			} catch { break; }
 		}
 
 		return parts.length > 0 ? parts.join('/') : null;
@@ -391,7 +391,7 @@ export class LoroVfsController {
 				if (currentParentUuid) {
 					const parentNodeId = this.uuidToNodeId.get(currentParentUuid);
 					if (parentNodeId) {
-						try { this.loroTree.move(newFolderNode.id, parentNodeId); } catch (e) {}
+						try { this.loroTree.move(newFolderNode.id, parentNodeId); } catch {}
 					}
 				}
 
@@ -422,7 +422,7 @@ export class LoroVfsController {
 	
 	public processRemoteVfsUpdates(): void {
 		if (this.changeTimeout) {
-			clearTimeout(this.changeTimeout);
+			window.clearTimeout(this.changeTimeout);
 			this.changeTimeout = null;
 		}
 		this.treeDoc.commit();
@@ -451,7 +451,7 @@ export class LoroVfsController {
 				} else if (oldPath !== newPath) {
 					this.eventBus.emit('CrdtNodeMoved', { uuid, oldPath, newPath });
 				}
-			} catch (e) {}
+			} catch {}
 		}
 
 		for (const [uuid, oldPath] of oldUuidToLastKnown.entries()) {
@@ -476,7 +476,7 @@ export class LoroVfsController {
 						return true;
 					}
 				}
-			} catch (e) {}
+			} catch {}
 		}
 		return false;
 	}
@@ -527,11 +527,11 @@ export class LoroVfsController {
 			this.unsubscribeDoc = null;
 		}
 		if (this.changeTimeout) {
-			clearTimeout(this.changeTimeout);
+			window.clearTimeout(this.changeTimeout);
 			this.changeTimeout = null;
 		}
 		if (this.pushTimeout) {
-			clearTimeout(this.pushTimeout);
+			window.clearTimeout(this.pushTimeout);
 			this.pushTimeout = null;
 		}
 	}

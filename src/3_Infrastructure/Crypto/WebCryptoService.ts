@@ -41,7 +41,7 @@ export class WebCryptoService implements ICryptography {
 				WebCryptoService.derivedKeyCache.set(cacheKey, key);
 				return key;
 			}
-		} catch (e) {}
+		} catch {}
 
 		const enc = new TextEncoder();
 		const keyMaterial = await window.crypto.subtle.importKey(
@@ -70,7 +70,7 @@ export class WebCryptoService implements ICryptography {
 		try {
 			const jwkString = await this.exportKey(derivedKey);
 			window.sessionStorage?.setItem(`ilow-key-${cacheKey}`, jwkString);
-		} catch (e) {}
+		} catch {}
 
 		WebCryptoService.derivedKeyCache.set(cacheKey, derivedKey);
 		return derivedKey;

@@ -19,7 +19,7 @@ export class ObsidianNoteRepository implements INoteRepository {
 				if (await this.app.vault.adapter.exists(path)) {
 					return await this.app.vault.adapter.read(path);
 				}
-			} catch (e) {
+			} catch {
 				return null;
 			}
 			return null;
@@ -32,7 +32,7 @@ export class ObsidianNoteRepository implements INoteRepository {
 					const arrayBuffer = await this.app.vault.readBinary(file);
 					const bytes = new Uint8Array(arrayBuffer);
 					return uint8ArrayToBase64(bytes);
-				} catch (e) {}
+				} catch {}
 			} else {
 				return await this.app.vault.read(file);
 			}
@@ -45,7 +45,7 @@ export class ObsidianNoteRepository implements INoteRepository {
 					const bytes = new Uint8Array(arrayBuffer);
 					return uint8ArrayToBase64(bytes);
 				}
-			} catch (e) {
+			} catch {
 				return null;
 			}
 		}

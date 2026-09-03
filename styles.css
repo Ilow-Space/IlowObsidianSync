@@ -4,7 +4,9 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  margin: 20px 0;
+  margin: 16px 0;
+  text-align: center;
+  cursor: pointer;
 }
 
 .ilow-sync-qr-container {
@@ -17,4 +19,78 @@
   width: 100%;
   max-width: 400px;
   margin: 10px auto;
+}
+
+.ilow-sync-warning {
+  background-color: var(--background-modifier-error);
+  padding: 10px;
+  border-radius: 5px;
+  margin-bottom: 15px;
+}
+
+.ilow-sync-stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 8px;
+  margin-bottom: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background-color: var(--background-secondary);
+}
+
+.ilow-sync-stat-box {
+  display: flex;
+  flex-direction: column;
+}
+
+.ilow-sync-stat-label {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ilow-sync-stat-val {
+  font-weight: var(--font-bold);
+  font-size: var(--font-ui-medium);
+}
+
+.ilow-sync-queue-item {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ilow-sync-queue-text {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ilow-sync-queue-name {
+  color: var(--text-normal);
+  font-weight: var(--font-medium);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.ilow-sync-queue-path {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-family: var(--font-monospace);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.ilow-sync-setup-textarea {
+  width: 100%;
+  font-family: monospace;
+  font-size: 11px;
 }

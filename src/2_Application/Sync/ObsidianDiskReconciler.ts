@@ -28,7 +28,8 @@ export class ObsidianDiskReconciler {
 	}
 
 	public static unsuppressPath(path: string, delayMs = 20): void {
-		setTimeout(() => {
+		const setTimer = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
+		setTimer(() => {
 			ObsidianDiskReconciler.suppressedPaths.delete(path);
 		}, delayMs);
 	}
@@ -60,7 +61,7 @@ export class ObsidianDiskReconciler {
 			if (!existing) {
 				try {
 					await this.app.vault.createFolder(currentPath);
-				} catch (e) {
+				} catch {
 					// Ignore if created concurrently or already exists in vault
 				}
 			}
@@ -89,7 +90,7 @@ export class ObsidianDiskReconciler {
 		for (const f of allFiles) {
 			if (f.path && f.path.startsWith(prefix)) {
 				paths.push(f.path);
-				const suffix = f.path.substring(oldPath.length);
+				const suffix = (f.path as string).substring(oldPath.length);
 				paths.push(newPath + suffix);
 			}
 		}
@@ -106,7 +107,7 @@ export class ObsidianDiskReconciler {
 			try {
 				const arrayBuffer = await this.app.vault.readBinary(file);
 				return uint8ArrayToBase64(new Uint8Array(arrayBuffer));
-			} catch (e) {
+			} catch {
 				return null;
 			}
 		}
@@ -203,7 +204,8 @@ export class ObsidianDiskReconciler {
 						}
 
 						if (isConflict) {
-							setTimeout(() => {
+							const setTimer = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
+							setTimer(() => {
 								this.eventBus.emit('LocalFileRenamed', {
 									oldPath: payload.path,
 									newPath: targetPath
@@ -274,11 +276,11 @@ export class ObsidianDiskReconciler {
 		}
 	}
 
-	private async resolveTargetConflict(payload: { uuid: string; oldPath: string; newPath: string }, targetExists: any): Promise<{ targetPath: string; rebalanced: boolean }> {
+	private async resolveTargetConflict(payload: { uuid: string; oldPath: string; newPath: string }, targetExists: unknown): Promise<{ targetPath: string; rebalanced: boolean }> {
 		let targetPath = payload.newPath;
-		if (targetExists && targetExists.path !== payload.oldPath) {
-			if ((targetExists as any).stat?.size === 0) {
-				try { await this.app.vault.trash(targetExists, true); } catch (e) {}
+		if (targetExists && (targetExists as { path?: string }).path !== payload.oldPath) {
+			if ((targetExists as { stat?: { size?: number } }).stat?.size === 0) {
+				try { await this.app.vault.trash(targetExists as TFile, true); } catch {}
 			} else {
 				const doc = await this.syncEngine.getOrCreateDoc(payload.uuid);
 				const incomingContent = doc.getText('markdown').toString();
@@ -290,7 +292,8 @@ export class ObsidianDiskReconciler {
 				}
 
 				targetPath = this.resolveConflictPath(targetPath);
-				setTimeout(() => {
+				const setTimer = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
+				setTimer(() => {
 					this.eventBus.emit('LocalFileRenamed', {
 						oldPath: payload.newPath,
 						newPath: targetPath
@@ -350,7 +353,8 @@ export class ObsidianDiskReconciler {
 						} catch (e) {
 							console.error('[ObsidianDiskReconciler] Failed to rename file:', e);
 						} finally {
-							setTimeout(() => {
+							const setTimer = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
+							setTimer(() => {
 								for (const p of pathsToSuppress) ObsidianDiskReconciler.unsuppressPath(p, 20);
 							}, 20);
 						}
@@ -389,7 +393,7 @@ export class ObsidianDiskReconciler {
 					try {
 						try {
 							await this.app.vault.trash(file, true);
-						} catch (e) {
+						} catch {
 							await this.app.vault.trash(file, false);
 						}
 					} catch (e) {
