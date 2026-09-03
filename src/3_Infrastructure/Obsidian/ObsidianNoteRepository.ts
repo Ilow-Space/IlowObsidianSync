@@ -32,7 +32,9 @@ export class ObsidianNoteRepository implements INoteRepository {
 					const arrayBuffer = await this.app.vault.readBinary(file);
 					const bytes = new Uint8Array(arrayBuffer);
 					return uint8ArrayToBase64(bytes);
-				} catch {}
+				} catch {
+					// Suppress read binary error
+				}
 			} else {
 				return await this.app.vault.read(file);
 			}

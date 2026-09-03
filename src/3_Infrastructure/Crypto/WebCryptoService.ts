@@ -24,7 +24,7 @@ export class WebCryptoService implements ICryptography {
 	}
 
 	public async hashData(data: Uint8Array): Promise<string> {
-		const hashBuffer = await window.crypto.subtle.digest('SHA-256', data as any);
+		const hashBuffer = await window.crypto.subtle.digest('SHA-256', data as BufferSource);
 		return CryptoUtils.bufToHex(new Uint8Array(hashBuffer));
 	}
 
@@ -41,7 +41,9 @@ export class WebCryptoService implements ICryptography {
 				WebCryptoService.derivedKeyCache.set(cacheKey, key);
 				return key;
 			}
-		} catch {}
+		} catch {
+			// Suppress sessionStorage lookup error
+		}
 
 		const enc = new TextEncoder();
 		const keyMaterial = await window.crypto.subtle.importKey(
@@ -57,7 +59,7 @@ export class WebCryptoService implements ICryptography {
 		const derivedKey = await window.crypto.subtle.deriveKey(
 			{
 				name: 'PBKDF2',
-				salt: saltBuffer as any,
+				salt: saltBuffer as BufferSource,
 				iterations: 100000,
 				hash: 'SHA-256'
 			},
@@ -70,7 +72,9 @@ export class WebCryptoService implements ICryptography {
 		try {
 			const jwkString = await this.exportKey(derivedKey);
 			window.sessionStorage?.setItem(`ilow-key-${cacheKey}`, jwkString);
-		} catch {}
+		} catch {
+			// Suppress sessionStorage save error
+		}
 
 		WebCryptoService.derivedKeyCache.set(cacheKey, derivedKey);
 		return derivedKey;
@@ -97,9 +101,9 @@ export class WebCryptoService implements ICryptography {
 	public async encrypt(data: Uint8Array, key: CryptoKey): Promise<EncryptedBlob> {
 		const iv = window.crypto.getRandomValues(new Uint8Array(12));
 		const ciphertextBuffer = await window.crypto.subtle.encrypt(
-			{ name: 'AES-GCM', iv: iv as any },
+			{ name: 'AES-GCM', iv: iv as BufferSource },
 			key,
-            data as any
+			data as BufferSource
 		);
 
 		return {
@@ -113,9 +117,9 @@ export class WebCryptoService implements ICryptography {
 		const iv = CryptoUtils.hexToBuf(blob.iv);
 
 		const decryptedBuffer = await window.crypto.subtle.decrypt(
-			{ name: 'AES-GCM', iv: iv as any },
+			{ name: 'AES-GCM', iv: iv as BufferSource },
 			key,
-            ciphertext as any
+			ciphertext as BufferSource
 		);
 
 		return new Uint8Array(decryptedBuffer);

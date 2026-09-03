@@ -4,6 +4,8 @@ import { QrDisplayModal } from './Modals/QrDisplayModal';
 import { QrScannerModal } from './Modals/QrScannerModal';
 
 export class SettingsTab extends PluginSettingTab {
+	private tempPassword = '';
+
 	constructor(app: App, private plugin: IlowSyncPlugin) {
 		super(app, plugin);
 	}
@@ -12,12 +14,13 @@ export class SettingsTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		new Setting(containerEl).setName('Ilow Sync Settings').setHeading();
+		new Setting(containerEl).setName('General').setHeading();
 
-		const nativeSyncEnabled = (this.app as any).internalPlugins?.plugins?.sync?.enabled;
+		const internalPlugins = (this.app as unknown as { internalPlugins?: { plugins?: { sync?: { enabled?: boolean } } } }).internalPlugins;
+		const nativeSyncEnabled = internalPlugins?.plugins?.sync?.enabled;
 		if (nativeSyncEnabled) {
 			const warning = containerEl.createDiv({ cls: 'ilow-sync-warning' });
-			warning.createEl('h3', { text: '⚠️ Conflict Warning', cls: 'ilow-sync-warning-title' });
+			warning.createDiv({ text: '⚠️ Conflict Warning', cls: 'ilow-sync-warning-title' });
 			warning.createEl('p', { text: 'For Ilow Sync to function correctly and avoid data corruption, please disable the official Obsidian Sync plugin in your Core Plugins settings.' });
 		}
 
@@ -84,7 +87,7 @@ export class SettingsTab extends PluginSettingTab {
 					.setButtonText('Regenerate Salt')
 					.setDestructive()
 					.onClick(async () => {
-						if (confirm('Warning: Regenerating the salt will change your encryption key. You will lose access to any previously encrypted data in the remote database unless they are re-encrypted.')) {
+						if (window.confirm('Warning: Regenerating the salt will change your encryption key. You will lose access to any previously encrypted data in the remote database unless they are re-encrypted.')) {
 							this.plugin.settings.salt = this.plugin.cryptoService.generateSalt();
 							await this.plugin.saveSettings();
 							this.display();
@@ -101,8 +104,8 @@ export class SettingsTab extends PluginSettingTab {
 				text
 					.setPlaceholder('Enter secure password')
 					.setDisabled(this.plugin.isKeyDerived)
-					.onChange(async (value) => {
-						(this as any).tempPassword = value;
+					.onChange((value) => {
+						this.tempPassword = value;
 					})
 			)
 			.addButton((btn) => {
@@ -118,7 +121,7 @@ export class SettingsTab extends PluginSettingTab {
 					btn.setButtonText('Derive Key')
 						.setCta()
 						.onClick(async () => {
-							const pwd = (this as any).tempPassword;
+							const pwd = this.tempPassword;
 							if (!pwd) {
 								new Notice('Please enter a password first');
 								return;
@@ -127,7 +130,7 @@ export class SettingsTab extends PluginSettingTab {
 								await this.plugin.deriveKeyFromPassword(pwd);
 								this.display();
 								new Notice('Key derived successfully! Sync is now active.');
-							} catch (err: unknown) {
+							} catch {
 								new Notice('Failed to derive key. See console.');
 							}
 						});
@@ -177,7 +180,7 @@ export class SettingsTab extends PluginSettingTab {
 					})
 			);
 
-		new Setting(containerEl).setName('Extension & Theme Sync Settings').setHeading();
+		new Setting(containerEl).setName('Extension & Theme Sync').setHeading();
 
 		// Sync Plugin Settings
 		new Setting(containerEl)
@@ -268,7 +271,7 @@ export class SettingsTab extends PluginSettingTab {
 							}
 							try {
 								const base64 = text.replace('ilow-sync://', '');
-								const parsed = JSON.parse(atob(base64));
+								const parsed = JSON.parse(atob(base64)) as { serverUrl?: string; apiKey?: string; salt?: string };
 								if (parsed.serverUrl && parsed.apiKey !== undefined && parsed.salt) {
 									this.plugin.settings.serverUrl = parsed.serverUrl;
 									this.plugin.settings.apiKey = parsed.apiKey;
@@ -279,7 +282,7 @@ export class SettingsTab extends PluginSettingTab {
 								} else {
 									new Notice('QR payload is missing required configuration parameters.');
 								}
-							} catch (err: unknown) {
+							} catch {
 								new Notice('Failed to parse QR code setup configuration.');
 							}
 						});
@@ -298,16 +301,21 @@ export class SettingsTab extends PluginSettingTab {
 					.setButtonText('Hard Reset Local State')
 					.setDestructive()
 					.onClick(async () => {
-						if (confirm('Are you sure you want to hard reset local state? This will wipe your local CRDT database cache and re-download all documents from the server.')) {
+						if (window.confirm('Are you sure you want to hard reset local state? This will wipe your local CRDT database cache and re-download all documents from the server.')) {
 							try {
 								if (this.plugin.getSyncOrchestrator()) {
 									this.plugin.getSyncOrchestrator()?.stopAll();
 								}
-								await window.indexedDB.deleteDatabase('ilow-snapshot-store-db');
+								await new Promise<void>((resolve, reject) => {
+									const req = window.indexedDB.deleteDatabase('ilow-snapshot-store-db');
+									req.onsuccess = () => resolve();
+									req.onerror = () => reject(req.error || new Error('Failed to delete database'));
+									req.onblocked = () => resolve();
+								});
 								new Notice('Local state hard reset successful! Initiating fresh re-sync...');
 
 								if (this.plugin.isKeyDerived && this.plugin.getSyncOrchestrator()) {
-									await (this.plugin as any).treeIndexManager?.initialize();
+									await this.plugin.getVfsController()?.initialize();
 									await this.plugin.getSyncOrchestrator()?.runFullSync();
 									new Notice('Local re-sync completed successfully!');
 								}
@@ -333,7 +341,7 @@ export class SettingsTab extends PluginSettingTab {
 							new Notice('Please configure your Admin API Token first!');
 							return;
 						}
-						if (confirm('WARNING: Are you absolutely sure you want to purge all data on the remote server? This action will permanently delete all snapshots and updates and cannot be undone!')) {
+						if (window.confirm('WARNING: Are you absolutely sure you want to purge all data on the remote server? This action will permanently delete all snapshots and updates and cannot be undone!')) {
 							try {
 								const store = this.plugin.getRemoteStore();
 								if (!store) {

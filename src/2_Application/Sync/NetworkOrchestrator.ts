@@ -60,7 +60,7 @@ export class NetworkOrchestrator {
 		
 		// Garbage collect UUID tracking maps when a file is deleted locally
 		this.eventBus.on('LocalFileDeleted', (payload) => {
-			const documentId = (payload as any).uuid || this.vfsController.getUuidForPath(payload.path);
+			const documentId = payload.uuid || this.vfsController.getUuidForPath(payload.path);
 			if (documentId) {
 				this.fileLastSyncIds.delete(documentId);
 				this.fileUpdateCounters.delete(documentId);
@@ -123,16 +123,16 @@ export class NetworkOrchestrator {
 		}
 
 		if (this.statusIdleTimer) {
-			clearTimeout(this.statusIdleTimer);
+			window.clearTimeout(this.statusIdleTimer);
 			this.statusIdleTimer = null;
 		}
 
 		if (this.activeTasks.size > 0) {
 			this.statusCallback('syncing', `Syncing ${this.activeTasks.size} files...`);
 		} else {
-			this.statusIdleTimer = setTimeout(() => {
+			this.statusIdleTimer = window.setTimeout(() => {
 				this.statusCallback('synced', 'Fully synced');
-			}, 1000);
+			}, 1000) as unknown as ReturnType<typeof setTimeout>;
 		}
 	}
 
@@ -145,11 +145,11 @@ export class NetworkOrchestrator {
 	    this.addActiveTask(payload.path || 'System Index');
 	
 	    try {
-	        const encryptedUpdate = await this.crypto.encrypt(payload.updateBinary, this.activeKey!);
+	        const encryptedUpdate = await this.crypto.encrypt(payload.updateBinary, this.activeKey);
 	        let encryptedPath = null;
 	        if (payload.path) {
 	            const pathBytes = new TextEncoder().encode(payload.path);
-	            encryptedPath = await this.crypto.encrypt(pathBytes, this.activeKey!);
+	            encryptedPath = await this.crypto.encrypt(pathBytes, this.activeKey);
 	        }
 		
 	        await this.remoteStore.pushUpdate(payload.documentId, encryptedUpdate, encryptedPath);
@@ -220,20 +220,22 @@ export class NetworkOrchestrator {
 		// --- NEW DECOUPLED BINARY UPLOAD LOGIC ---
 		if (isBinaryPath(payload.path)) {
 			const rawBytes = base64ToUint8Array(payload.content);
-			const hash = await (this.crypto as any).hashData(rawBytes);
+			const hash = await this.crypto.hashData(rawBytes);
 
 			// Check if the current VFS node already has this hash to prevent redundant uploads
-			const currentHash = (this.vfsController as any).getBlobHashForUuid(documentId);
+			const currentHash = this.vfsController.getBlobHashForUuid(documentId);
 			if (currentHash === hash) return;
 
 			this.addActiveTask(payload.path);
 			try {
-				const encrypted = await this.crypto.encrypt(rawBytes, this.activeKey!);
-				const payloadBytes = new TextEncoder().encode(JSON.stringify(encrypted));
-				await (this.remoteStore as any).uploadBlob(hash, payloadBytes);
-            
-				// Link the newly uploaded blob to the VFS tree
-				(this.vfsController as any).setBlobHashForUuid(documentId, hash);
+				if (this.activeKey) {
+					const encrypted = await this.crypto.encrypt(rawBytes, this.activeKey);
+					const payloadBytes = new TextEncoder().encode(JSON.stringify(encrypted));
+					await this.remoteStore.uploadBlob(hash, payloadBytes);
+
+					// Link the newly uploaded blob to the VFS tree
+					this.vfsController.setBlobHashForUuid(documentId, hash);
+				}
 			} catch (err) {
 				console.error('[NetworkOrchestrator] Failed to upload binary blob:', err);
 				this.hasConnectionError = true;
@@ -254,17 +256,19 @@ export class NetworkOrchestrator {
 		// --- NEW DECOUPLED BINARY OFFLINE INGESTION ---
 		if (isBinaryPath(path)) {
 			const rawBytes = base64ToUint8Array(localContent);
-			const localHash = await (this.crypto as any).hashData(rawBytes);
-			const currentHash = (this.vfsController as any).getBlobHashForUuid(documentId);
+			const localHash = await this.crypto.hashData(rawBytes);
+			const currentHash = this.vfsController.getBlobHashForUuid(documentId);
 
 			if (currentHash === localHash) return;
 
 			this.addActiveTask(path);
 			try {
-				const encrypted = await this.crypto.encrypt(rawBytes, this.activeKey!);
-				const payloadBytes = new TextEncoder().encode(JSON.stringify(encrypted));
-				await (this.remoteStore as any).uploadBlob(localHash, payloadBytes);
-				(this.vfsController as any).setBlobHashForUuid(documentId, localHash);
+				if (this.activeKey) {
+					const encrypted = await this.crypto.encrypt(rawBytes, this.activeKey);
+					const payloadBytes = new TextEncoder().encode(JSON.stringify(encrypted));
+					await this.remoteStore.uploadBlob(localHash, payloadBytes);
+					this.vfsController.setBlobHashForUuid(documentId, localHash);
+				}
 			} catch (err) {
 				console.error('[NetworkOrchestrator] Failed to upload offline binary blob:', err);
 			} finally {
@@ -333,7 +337,7 @@ export class NetworkOrchestrator {
 			let bulkUpdates: Record<string, number> = {};
 			try {
 				bulkUpdates = await this.remoteStore.getBulkLatestUpdateIds();
-			} catch (e) {
+			} catch {
 				console.warn('[NetworkOrchestrator] Bulk fetch failed, falling back to sequential checks.');
 			}
 
@@ -388,30 +392,30 @@ export class NetworkOrchestrator {
 			await Promise.all(pullPromises);
 
 			// Download Decoupled Binary Blobs (Safely guarded for test mocks)
-			if (typeof (this.remoteStore as any).downloadBlob === 'function') {
+			if (typeof this.remoteStore.downloadBlob === 'function') {
 				const blobLimit = pLimit(5);
 				const blobPromises = binaryFiles.map(file => blobLimit(async () => {
 					if (this.hasConnectionError) return;
-					const expectedHash = (this.vfsController as any).getBlobHashForUuid?.(file.uuid);
+					const expectedHash = this.vfsController.getBlobHashForUuid(file.uuid);
 					if (!expectedHash) return;
 
 					const localBase64 = await this.noteRepo.readNote(file.path);
 					if (localBase64) {
 						const localBytes = base64ToUint8Array(localBase64);
 						let localHash = '';
-						if (typeof (this.crypto as any).hashData === 'function') {
-							localHash = await (this.crypto as any).hashData(localBytes);
+						if (typeof this.crypto.hashData === 'function') {
+							localHash = await this.crypto.hashData(localBytes);
 						}
 						if (localHash && localHash === expectedHash) return;
 					}
 
 					this.addActiveTask(file.path);
 					try {
-						const encryptedBytes = await (this.remoteStore as any).downloadBlob(expectedHash);
-						if (encryptedBytes) {
+						const encryptedBytes = await this.remoteStore.downloadBlob(expectedHash);
+						if (encryptedBytes && this.activeKey) {
 							const payloadJson = new TextDecoder().decode(encryptedBytes);
 							const encryptedBlob = JSON.parse(payloadJson);
-							const decryptedBytes = await this.crypto.decrypt(encryptedBlob, this.activeKey!);
+							const decryptedBytes = await this.crypto.decrypt(encryptedBlob, this.activeKey);
 							const base64ToWrite = uint8ArrayToBase64(decryptedBytes);
 							await this.safeWriteNote(file.path, base64ToWrite);
 						}
@@ -464,18 +468,19 @@ export class NetworkOrchestrator {
 
 	private reconcileVfsDiskPaths(): void {
 		if (!this.diskReconciler) return;
-		const app = (this.diskReconciler as any).app;
+		const reconcilerWithApp = this.diskReconciler as unknown as { app?: { vault?: { getFiles?: () => Array<{ path: string; name: string }> } } };
+		const app = reconcilerWithApp.app;
 		if (!app?.vault?.getFiles) return;
 
 		const activeFiles = this.vfsController.getActiveFiles().filter(f => f.type !== 'folder');
 		const allVaultFiles = app.vault.getFiles();
 
 		for (const file of activeFiles) {
-			const existsAtTargetPath = allVaultFiles.some((f: any) => f.path === file.path);
+			const existsAtTargetPath = allVaultFiles.some(f => f.path === file.path);
 			if (!existsAtTargetPath) {
 				const filename = file.path.substring(file.path.lastIndexOf('/') + 1);
-				const localMatch = allVaultFiles.find((f: any) => f.name === filename);
-				
+				const localMatch = allVaultFiles.find(f => f.name === filename);
+
 				if (localMatch && localMatch.path !== file.path) {
 					this.eventBus.emit('CrdtNodeMoved', {
 						uuid: file.uuid,
@@ -591,7 +596,7 @@ export class NetworkOrchestrator {
 				]);
 
 				for (const update of updates) {
-					const decBytes = await this.crypto.decrypt(update.encryptedUpdate, this.activeKey!);
+					const decBytes = await this.crypto.decrypt(update.encryptedUpdate, this.activeKey);
 					decryptedUpdates.push(decBytes);
 				}
 			} catch (err) {
@@ -612,8 +617,8 @@ export class NetworkOrchestrator {
 						offlineContent = await this.noteRepo.readNote(path);
 					}
 
-					if (details.encryptedState) {
-						const decryptedBytes = await this.crypto.decrypt(details.encryptedState, this.activeKey!);
+					if (details.encryptedState && this.activeKey) {
+						const decryptedBytes = await this.crypto.decrypt(details.encryptedState, this.activeKey);
 						await this.crdtEngine.applyUpdates(documentId, [decryptedBytes]);
 					}
 
@@ -663,7 +668,7 @@ export class NetworkOrchestrator {
 			this.remoteStore.connectWebSocket(wssUrl);
 		};
 
-		backOff(establishConnection, retryOptions as any).catch((e) => {
+		backOff(establishConnection, retryOptions as unknown as Parameters<typeof backOff>[1]).catch((e: unknown) => {
 			console.error('[NetworkOrchestrator] Permanent WebSocket Connection Failure:', e);
 		});
 	}
@@ -673,7 +678,7 @@ export class NetworkOrchestrator {
 		this.activeSubscriptions.clear();
 
 		if (this.statusIdleTimer) {
-			clearTimeout(this.statusIdleTimer);
+			window.clearTimeout(this.statusIdleTimer);
 			this.statusIdleTimer = null;
 		}
 

@@ -10,7 +10,7 @@ export class LoroMigrationManager {
 					await new Promise<void>((resolve, reject) => {
 						const req = indexedDB.deleteDatabase(dbName);
 						req.onsuccess = () => resolve();
-						req.onerror = () => reject(req.error);
+						req.onerror = () => reject(new Error(req.error?.message || `Failed to delete database ${dbName}`));
 					});
 					clearedYjs = true;
 					console.log(`[LoroMigrationManager] Legacy IndexedDB (${dbName}) successfully purged.`);

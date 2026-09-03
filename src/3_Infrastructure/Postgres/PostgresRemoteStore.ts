@@ -98,35 +98,41 @@ export class PostgresRemoteStore implements IRemoteStore {
 
 			this.socket.onmessage = (event) => {
 				try {
-					const payload = JSON.parse(event.data);
+					const payload = JSON.parse(event.data as string) as { type?: string; table?: string; record?: { vault_alias_id?: string; document_id?: string } };
 					if (payload.record && payload.record.vault_alias_id && payload.record.vault_alias_id !== this.vaultAliasId) {
 						return; // Discard misrouted cross-tenant updates
 					}
 
 					const action = payload.type === 'DELETE' ? 'delete' : 'insert';
 
-					if (payload.type === 'INSERT' && payload.table === 'vault_updates') {
+					if (payload.type === 'INSERT' && payload.table === 'vault_updates' && payload.record) {
 						const docId = payload.record.document_id;
-						const callbacks = this.subscriptions.get(docId);
-						if (callbacks) {
-							callbacks.forEach(cb => cb(docId, action));
+						if (docId) {
+							const callbacks = this.subscriptions.get(docId);
+							if (callbacks) {
+								callbacks.forEach(cb => cb(docId, action));
+							}
+							const manifestCallbacks = this.subscriptions.get('manifest');
+							if (manifestCallbacks) {
+								manifestCallbacks.forEach(cb => cb(docId, action));
+							}
 						}
-						const manifestCallbacks = this.subscriptions.get('manifest');
-						if (manifestCallbacks) {
-							manifestCallbacks.forEach(cb => cb(docId, action));
-						}
-					} else if (payload.type === 'DELETE' && payload.table === 'vault_snapshots') {
+					} else if (payload.type === 'DELETE' && payload.table === 'vault_snapshots' && payload.record) {
 						const docId = payload.record.document_id;
-						const callbacks = this.subscriptions.get(docId);
-						if (callbacks) {
-							callbacks.forEach(cb => cb(docId, action));
-						}
-						const manifestCallbacks = this.subscriptions.get('manifest');
-						if (manifestCallbacks) {
-							manifestCallbacks.forEach(cb => cb(docId, action));
+						if (docId) {
+							const callbacks = this.subscriptions.get(docId);
+							if (callbacks) {
+								callbacks.forEach(cb => cb(docId, action));
+							}
+							const manifestCallbacks = this.subscriptions.get('manifest');
+							if (manifestCallbacks) {
+								manifestCallbacks.forEach(cb => cb(docId, action));
+							}
 						}
 					}
-				} catch (err) {}
+				} catch {
+					// Ignore message parsing error
+				}
 			};
 
 			this.socket.onerror = (err) => {
@@ -214,120 +220,104 @@ export class PostgresRemoteStore implements IRemoteStore {
 	}
 
 	public async getLatestUpdateId(documentId: string): Promise<number> {
-		try {
-			const url = `${this.serverUrl}/api/snapshots/${encodeURIComponent(documentId)}/latest_id`;
-			const res = await requestUrl({
-				url: url,
-				method: 'GET',
-				headers: this.headers,
-				throw: false
-			});
+		const url = `${this.serverUrl}/api/snapshots/${encodeURIComponent(documentId)}/latest_id`;
+		const res = await requestUrl({
+			url: url,
+			method: 'GET',
+			headers: this.headers,
+			throw: false
+		});
 
-			if (res.status >= 200 && res.status < 300) {
-				return res.json.id || 0;
-			}
-			return 0;
-		} catch (err) {
-			throw err;
+		if (res.status >= 200 && res.status < 300) {
+			return (res.json as { id?: number })?.id || 0;
 		}
+		return 0;
 	}
 
 	public async fetchSnapshot(documentId: string): Promise<EncryptedBlob | null> {
-		try {
-			const url = `${this.serverUrl}/api/snapshots/${encodeURIComponent(documentId)}`;
-			const res = await requestUrl({
-				url: url,
-				method: 'GET',
-				headers: this.headers,
-				throw: false
-			});
+		const url = `${this.serverUrl}/api/snapshots/${encodeURIComponent(documentId)}`;
+		const res = await requestUrl({
+			url: url,
+			method: 'GET',
+			headers: this.headers,
+			throw: false
+		});
 
-			if (res.status === 404) return null;
-			if (res.status < 200 || res.status >= 300) {
-				throw new Error(`Failed to fetch snapshot: ${res.status}`);
-			}
-
-			const data = res.json;
-			if (Array.isArray(data) && data.length > 0) {
-				const row = data[0];
-				if (row.is_deleted) return null;
-				if (!row.encrypted_state) return null;
-
-				const rawJson = CryptoUtils.hexToString(row.encrypted_state);
-				return JSON.parse(rawJson) as EncryptedBlob;
-			}
-			return null;
-		} catch (err) {
-			throw err;
+		if (res.status === 404) return null;
+		if (res.status < 200 || res.status >= 300) {
+			throw new Error(`Failed to fetch snapshot: ${res.status}`);
 		}
+
+		const data = res.json as Array<{ is_deleted?: boolean; encrypted_state?: string }>;
+		if (Array.isArray(data) && data.length > 0) {
+			const row = data[0];
+			if (row.is_deleted) return null;
+			if (!row.encrypted_state) return null;
+
+			const rawJson = CryptoUtils.hexToString(row.encrypted_state);
+			return JSON.parse(rawJson) as EncryptedBlob;
+		}
+		return null;
 	}
 
 	public async fetchSnapshotDetails(documentId: string): Promise<{ encryptedState: EncryptedBlob | null; maxCompactedId: number; isDeleted: boolean } | null> {
-		try {
-			const url = `${this.serverUrl}/api/snapshots/${encodeURIComponent(documentId)}`;
-			const res = await requestUrl({
-				url: url,
-				method: 'GET',
-				headers: this.headers,
-				throw: false
-			});
+		const url = `${this.serverUrl}/api/snapshots/${encodeURIComponent(documentId)}`;
+		const res = await requestUrl({
+			url: url,
+			method: 'GET',
+			headers: this.headers,
+			throw: false
+		});
 
-			if (res.status === 404) return null;
-			if (res.status < 200 || res.status >= 300) {
-				throw new Error(`Failed to fetch snapshot details: ${res.status}`);
-			}
-
-			const data = res.json;
-			if (Array.isArray(data) && data.length > 0) {
-				const row = data[0];
-				let encStateBlob: EncryptedBlob | null = null;
-				if (row.encrypted_state) {
-					const rawJson = CryptoUtils.hexToString(row.encrypted_state);
-					encStateBlob = JSON.parse(rawJson) as EncryptedBlob;
-				}
-				return {
-					encryptedState: encStateBlob,
-					maxCompactedId: row.max_compacted_id || 0,
-					isDeleted: !!row.is_deleted
-				};
-			}
-			return null;
-		} catch (err) {
-			throw err;
+		if (res.status === 404) return null;
+		if (res.status < 200 || res.status >= 300) {
+			throw new Error(`Failed to fetch snapshot details: ${res.status}`);
 		}
+
+		const data = res.json as Array<{ is_deleted?: boolean; encrypted_state?: string; max_compacted_id?: number }>;
+		if (Array.isArray(data) && data.length > 0) {
+			const row = data[0];
+			let encStateBlob: EncryptedBlob | null = null;
+			if (row.encrypted_state) {
+				const rawJson = CryptoUtils.hexToString(row.encrypted_state);
+				encStateBlob = JSON.parse(rawJson) as EncryptedBlob;
+			}
+			return {
+				encryptedState: encStateBlob,
+				maxCompactedId: row.max_compacted_id || 0,
+				isDeleted: !!row.is_deleted
+			};
+		}
+		return null;
 	}
 
 	public async fetchUpdatesSince(documentId: string, lastId: number): Promise<CRDTUpdate[]> {
-		try {
-			const url = `${this.serverUrl}/api/snapshots/${encodeURIComponent(documentId)}/updates?since=${lastId}`;
-			const res = await requestUrl({
-				url: url,
-				method: 'GET',
-				headers: this.headers,
-				throw: false
-			});
+		const url = `${this.serverUrl}/api/snapshots/${encodeURIComponent(documentId)}/updates?since=${lastId}`;
+		const res = await requestUrl({
+			url: url,
+			method: 'GET',
+			headers: this.headers,
+			throw: false
+		});
 
-			if (res.status < 200 || res.status >= 300) {
-				throw new Error(`Failed to fetch updates: ${res.status}`);
-			}
-
-			const data = res.json;
-			if (Array.isArray(data)) {
-				return data.map((row: any) => {
-					const rawJson = CryptoUtils.hexToString(row.encrypted_update);
-					const blob = JSON.parse(rawJson) as EncryptedBlob;
-					return {
-						id: row.id,
-						documentId: row.document_id,
-						encryptedUpdate: blob,
-						createdAt: row.created_at
-					};
-				});
-			}
-			return [];
-		} catch (err) {
-			throw err;
+		if (res.status < 200 || res.status >= 300) {
+			throw new Error(`Failed to fetch updates: ${res.status}`);
 		}
+
+		const data = res.json as Array<{ id: number; document_id: string; encrypted_update: string; created_at?: string }>;
+		if (Array.isArray(data)) {
+			return data.map((row) => {
+				const rawJson = CryptoUtils.hexToString(row.encrypted_update);
+				const blob = JSON.parse(rawJson) as EncryptedBlob;
+				return {
+					id: row.id,
+					documentId: row.document_id,
+					encryptedUpdate: blob,
+					createdAt: row.created_at || ''
+				};
+			});
+		}
+		return [];
 	}
 
 	public async pushUpdate(documentId: string, update: EncryptedBlob, encryptedPath?: EncryptedBlob | null): Promise<void> {

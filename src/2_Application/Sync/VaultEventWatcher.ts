@@ -8,9 +8,9 @@ import { isAllowedConfigPath } from '@domain/Utils/ConfigPathFilter';
 import { isBinaryPath, uint8ArrayToBase64 } from '@domain/Utils/BinaryUtils';
 
 export class VaultEventWatcher {
-	private activeListeners: Array<{ eventName: string; ref: any }> = [];
+	private activeListeners: Array<{ eventName: string; ref: unknown }> = [];
 	private orchestrator: NetworkOrchestrator | null = null;
-	private pollTimer: any = null;
+	private pollTimer: number | null = null;
 	private knownDiskFiles = new Map<string, string>();
 
 	constructor(
@@ -25,7 +25,7 @@ export class VaultEventWatcher {
 
 	private shouldIgnore(path: string): boolean {
 		if (ObsidianDiskReconciler.suppressedPaths.has(path)) return true;
-		if (this.orchestrator && (this.orchestrator as any).isSyncingFull) return true;
+		if (this.orchestrator && (this.orchestrator as unknown as { isSyncingFull?: boolean }).isSyncingFull) return true;
 		const configDir = this.app.vault.configDir || '.obsidian';
 		if (!isAllowedConfigPath(path, configDir, this.settings)) return true;
 		return false;
@@ -117,7 +117,9 @@ export class VaultEventWatcher {
 				};
 				await walkAdapter('');
 			}
-		} catch {}
+		} catch {
+			// Suppress adapter walking errors
+		}
 
 		if (typeof this.app.vault.getFiles === 'function') {
 			for (const file of this.app.vault.getFiles()) {
@@ -134,7 +136,7 @@ export class VaultEventWatcher {
 		const onCreate = this.app.vault.on('create', (file: TAbstractFile) => {
 			if (this.shouldIgnore(file.path)) return;
 
-			const isFolder = file instanceof TFolder || (file as any).children !== undefined;
+			const isFolder = file instanceof TFolder || (file as unknown as { children?: unknown }).children !== undefined;
 			if (file instanceof TFile) {
 				this.readTFileContent(file).then((content) => {
 					if (this.shouldIgnore(file.path)) return;
@@ -186,7 +188,7 @@ export class VaultEventWatcher {
 
 			this.eventBus.emit('LocalFileDeleted', {
 				path: file.path,
-				uuid: (file as any).uuid
+				uuid: (file as unknown as { uuid?: string }).uuid
 			});
 		});
 
@@ -221,8 +223,7 @@ export class VaultEventWatcher {
 	}
 
 	public async pollVaultFiles(): Promise<void> {
-		if (this.orchestrator && (this.orchestrator as any).isSyncingFull) return;
-		const configDir = this.app.vault.configDir || '.obsidian';
+		if (this.orchestrator && (this.orchestrator as unknown as { isSyncingFull?: boolean }).isSyncingFull) return;
 
 		try {
 			const diskPaths = await this.listAllDiskPaths();
@@ -261,7 +262,9 @@ export class VaultEventWatcher {
 					this.eventBus.emit('LocalFileModified', { path, content });
 				}
 			}
-		} catch {}
+		} catch {
+			// Suppress polling errors
+		}
 	}
 
 	public destroy(): void {
@@ -270,7 +273,7 @@ export class VaultEventWatcher {
 			this.pollTimer = null;
 		}
 		for (const listener of this.activeListeners) {
-			this.app.vault.off(listener.eventName as any, listener.ref);
+			this.app.vault.off(listener.eventName as Parameters<typeof this.app.vault.off>[0], listener.ref as Parameters<typeof this.app.vault.off>[1]);
 		}
 		this.activeListeners = [];
 		this.knownDiskFiles.clear();

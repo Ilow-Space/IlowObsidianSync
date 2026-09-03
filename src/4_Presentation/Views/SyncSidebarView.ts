@@ -18,8 +18,8 @@ export class SyncSidebarView extends ItemView {
 	async onOpen() {
 		this.render();
 		this.registerInterval(window.setInterval(() => this.render(), 1000));
-		this.registerInterval(window.setInterval(() => this.fetchTelemetry(), 5000));
-		this.fetchTelemetry();
+		this.registerInterval(window.setInterval(() => { void this.fetchTelemetry(); }, 5000));
+		void this.fetchTelemetry();
 	}
 
 	private async fetchTelemetry() {
@@ -91,18 +91,10 @@ export class SyncSidebarView extends ItemView {
             
 			if (activePaths.length === 0) {
 				const emptyEl = queueContainer.createDiv({ cls: 'nav-file' });
-				emptyEl.createDiv({ cls: 'nav-file-title', text: 'All files are up to date.' }).style.color = 'var(--text-muted)';
+				emptyEl.createDiv({ cls: 'nav-file-title ilow-sync-stat-label', text: 'All files are up to date.' });
 			} else {
 				for (const path of activePaths) {
-					const itemEl = queueContainer.createDiv({ cls: 'nav-file mod-clickable' });
-                    
-					itemEl.style.border = '1px solid var(--background-modifier-border)';
-					itemEl.style.borderRadius = 'var(--radius-s)';
-					itemEl.style.padding = '6px 8px';
-					itemEl.style.marginBottom = '6px';
-					itemEl.style.display = 'flex';
-					itemEl.style.alignItems = 'center';
-					itemEl.style.gap = '8px';
+					const itemEl = queueContainer.createDiv({ cls: 'ilow-sync-queue-item mod-clickable' });
 
 					const iconEl = itemEl.createDiv({ cls: 'nav-file-icon' });
 					setIcon(iconEl, 'document');
@@ -111,30 +103,16 @@ export class SyncSidebarView extends ItemView {
 					const fileName = pathParts.pop() || path;
 					const dirName = pathParts.join('/');
 
-					const textContainer = itemEl.createDiv();
-					textContainer.style.display = 'flex';
-					textContainer.style.flexDirection = 'column';
-					textContainer.style.overflow = 'hidden';
+					const textContainer = itemEl.createDiv({ cls: 'ilow-sync-queue-text' });
 
-					const nameEl = textContainer.createDiv({ text: fileName });
-					nameEl.style.color = 'var(--text-normal)';
-					nameEl.style.fontWeight = 'var(--font-medium)';
-					nameEl.style.whiteSpace = 'nowrap';
-					nameEl.style.textOverflow = 'ellipsis';
-					nameEl.style.overflow = 'hidden';
+					textContainer.createDiv({ cls: 'ilow-sync-queue-name', text: fileName });
 
 					if (dirName) {
-						const pathEl = textContainer.createDiv({ text: dirName });
-						pathEl.style.color = 'var(--text-muted)';
-						pathEl.style.fontSize = 'var(--font-ui-smaller)';
-						pathEl.style.fontFamily = 'var(--font-monospace)';
-						pathEl.style.whiteSpace = 'nowrap';
-						pathEl.style.textOverflow = 'ellipsis';
-						pathEl.style.overflow = 'hidden';
+						textContainer.createDiv({ cls: 'ilow-sync-queue-path', text: dirName });
 					}
-                    
+
 					itemEl.onClickEvent(() => {
-						this.app.workspace.openLinkText(path, '', false);
+						void this.app.workspace.openLinkText(path, '', false);
 					});
 				}
 			}

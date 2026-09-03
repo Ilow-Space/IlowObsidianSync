@@ -20,8 +20,8 @@ export class LoroVfsController {
 	private boundRebalance = this.handleRebalancePathUuid.bind(this);
 
 	private unsubscribeDoc: (() => void) | null = null;
-	private changeTimeout: any = null;
-	private pushTimeout: any = null;
+	private changeTimeout: number | null = null;
+	private pushTimeout: number | null = null;
 	private pendingFrontier: any = null;
 
 	constructor(
@@ -36,17 +36,20 @@ export class LoroVfsController {
 		this.snapshotBeforeRemoteUpdate = new Map(this.uuidToLastKnownPath);
 	}
 
-	private getNodeIdStr(id: any): string {
+	private getNodeIdStr(id: unknown): string {
 		if (id === null || id === undefined) return '';
 		if (typeof id === 'string') return id;
 		if (typeof id === 'object') {
-			if (id.peer !== undefined && id.counter !== undefined) {
-				return `${id.peer.toString()}_${id.counter}`;
+			const idObj = id as { peer?: unknown; counter?: unknown };
+			if (idObj.peer !== undefined && idObj.counter !== undefined) {
+				return `${String(idObj.peer)}_${String(idObj.counter)}`;
 			}
 			try {
 				const j = JSON.stringify(id);
 				if (j !== '{}') return j;
-			} catch {}
+			} catch {
+				// Suppress JSON error
+			}
 		}
 		return String(id);
 	}
@@ -61,7 +64,7 @@ export class LoroVfsController {
 		this.eventBus.on('LocalFileCreated', this.boundCreated);
 		this.eventBus.on('LocalFileRenamed', this.boundRenamed);
 		this.eventBus.on('LocalFileDeleted', this.boundDeleted);
-		this.eventBus.on('RebalancePathUuid' as any, this.boundRebalance);
+		this.eventBus.on('RebalancePathUuid', this.boundRebalance);
 
 		this.unsubscribeDoc = this.treeDoc.subscribe((event) => {
 			if (event.by === 'local') return;
@@ -520,7 +523,7 @@ export class LoroVfsController {
 		this.eventBus.off('LocalFileCreated', this.boundCreated);
 		this.eventBus.off('LocalFileRenamed', this.boundRenamed);
 		this.eventBus.off('LocalFileDeleted', this.boundDeleted);
-		this.eventBus.off('RebalancePathUuid' as any, this.boundRebalance);
+		this.eventBus.off('RebalancePathUuid', this.boundRebalance);
 
 		if (this.unsubscribeDoc) {
 			this.unsubscribeDoc();

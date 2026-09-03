@@ -112,7 +112,8 @@ export default class IlowSyncPlugin extends Plugin {
 
 		// 2. Auto-load master sync key FIRST before starting network sockets
 		try {
-			const keyData = await (this.app as any).secretStorage?.getSecret('ilow-master-key');
+			const secretStorage = (this.app as unknown as { secretStorage?: { getSecret: (key: string) => Promise<string | null> } }).secretStorage;
+			const keyData = await secretStorage?.getSecret('ilow-master-key');
 			if (keyData) {
 				this.updateStatusBar('syncing', 'Loading key...');
 				this.derivedKey = await this.cryptoService.importKey(keyData);
@@ -174,6 +175,10 @@ export default class IlowSyncPlugin extends Plugin {
 		return this.networkOrchestrator;
 	}
 
+	public getVfsController(): LoroVfsController | null {
+		return this.vfsController;
+	}
+
 	public updateStatusBar(status: SyncStatus, msg: string) {
 		let icon = '🔴';
 		if (status === 'synced') icon = '🟢';
@@ -208,13 +213,14 @@ export default class IlowSyncPlugin extends Plugin {
 			this.derivedKey = await this.cryptoService.deriveKey(password, this.settings.salt);
 
 			const exportedKey = await this.cryptoService.exportKey(this.derivedKey);
-			(this.app as any).secretStorage?.setSecret('ilow-master-key', exportedKey)?.catch(() => {});
+			const secretStorage = (this.app as unknown as { secretStorage?: { setSecret: (key: string, val: string) => Promise<void> } }).secretStorage;
+			void secretStorage?.setSecret('ilow-master-key', exportedKey)?.catch(() => {});
 
 			await this.initializeSyncOrchestrator();
 
 			if (this.networkOrchestrator) {
 				this.networkOrchestrator.setCryptoKey(this.derivedKey);
-				this.runBackgroundBootstrap().catch(console.error);
+				void this.runBackgroundBootstrap().catch(console.error);
 			}
 		} catch (err) {
 			console.error('Error deriving master key:', err);
@@ -274,7 +280,10 @@ export default class IlowSyncPlugin extends Plugin {
 		this.updateStatusBar('offline', 'Disconnected');
 
 		try {
-			await (this.app as any).secretStorage.deleteSecret('ilow-master-key');
+			const secretStorage = (this.app as unknown as { secretStorage?: { deleteSecret: (key: string) => Promise<void> } }).secretStorage;
+			if (secretStorage) {
+				await secretStorage.deleteSecret('ilow-master-key');
+			}
 		} catch (err) {
 			console.error('Failed to remove master sync key:', err);
 		}
@@ -316,7 +325,7 @@ export default class IlowSyncPlugin extends Plugin {
 
 			const socketUrl = this.settings.serverUrl.replace(/^http/i, 'ws');
 
-			const configDir = (this.app.vault as any).configDir || '.obsidian';
+			const configDir = this.app.vault.configDir || '.obsidian';
 			this.noteRepo = new ObsidianNoteRepository(this.app, this.settings);
 			this.vfsController = new LoroVfsController(this.syncEngine, this.eventBus, this.settings, configDir);
 			this.diskReconciler = new ObsidianDiskReconciler(this.app, this.syncEngine, this.eventBus);
@@ -341,7 +350,7 @@ export default class IlowSyncPlugin extends Plugin {
 
 			if (this.derivedKey) {
 				this.networkOrchestrator.setCryptoKey(this.derivedKey);
-				this.runBackgroundBootstrap().catch(console.error);
+				void this.runBackgroundBootstrap().catch(console.error);
 			}
 		}
 	}
