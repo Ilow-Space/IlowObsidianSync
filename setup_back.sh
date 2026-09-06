@@ -6,7 +6,7 @@ SSH_REPO="git@github.com:Ilow-Space/IlowObsidianSync.git"
 INSTALL_DIR="/opt/ilow-backend"
 DB_NAME="ilow_db"
 DB_USER="ilow_user"
-PORT="3001"
+PORT="6058"
 
 ENDPOINT="http://localhost:${PORT}"
 
