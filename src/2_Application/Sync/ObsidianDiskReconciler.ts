@@ -99,8 +99,8 @@ export class ObsidianDiskReconciler {
 	}
 
 	private isConfigPath(path: string): boolean {
-		const configDir = this.app.vault.configDir || '.obsidian';
-		return path.startsWith(configDir);
+		const configDir = this.app.vault.configDir;
+		return !!configDir && path.startsWith(configDir);
 	}
 
 	private async readPhysicalFileContent(file: TFile): Promise<string | null> {
@@ -285,8 +285,9 @@ export class ObsidianDiskReconciler {
 					if (targetExists instanceof TFile || targetExists instanceof TFolder) {
 						await this.app.fileManager.trashFile(targetExists);
 					}
-				} catch {
+				} catch (e: unknown) {
 					// Ignore trash failure
+					void e;
 				}
 			} else {
 				const doc = await this.syncEngine.getOrCreateDoc(payload.uuid);
@@ -312,7 +313,6 @@ export class ObsidianDiskReconciler {
 	}
 
 	private async handleCrdtNodeMoved(payload: { uuid: string; oldPath: string; newPath: string }): Promise<void> {
-		console.log(`[Reconciler Inbound Move Received] UUID: ${payload.uuid} | "${payload.oldPath}" -> "${payload.newPath}"`);
 		return this.diskQueue.add(async () => {
 			const oldMutex = this.getFileMutex(payload.oldPath);
 			const newMutex = this.getFileMutex(payload.newPath);
@@ -398,9 +398,8 @@ export class ObsidianDiskReconciler {
 
 					ObsidianDiskReconciler.suppressPath(payload.path);
 					try {
-						const fileManager = (this.app as unknown as { fileManager?: { trashFile?: (f: unknown) => Promise<void> } }).fileManager;
-						if (typeof fileManager?.trashFile === 'function') {
-							await fileManager.trashFile(file);
+						if (typeof this.app.fileManager?.trashFile === 'function') {
+							await this.app.fileManager.trashFile(file);
 						} else {
 							try {
 								await this.app.vault.trash(file, true);
@@ -430,8 +429,8 @@ export class ObsidianDiskReconciler {
 						file = this.app.vault.getFiles().find(f => f.path === payload.path) || null;
 					}
 
-					const configDir = this.app.vault.configDir || '.obsidian';
-					if (payload.path.startsWith(configDir)) {
+					const configDir = this.app.vault.configDir;
+					if (configDir && payload.path.startsWith(configDir)) {
 						try {
 							let currentDiskContent = '';
 							if (await this.app.vault.adapter.exists(payload.path)) {

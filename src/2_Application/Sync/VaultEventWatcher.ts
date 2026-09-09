@@ -26,7 +26,7 @@ export class VaultEventWatcher {
 	private shouldIgnore(path: string): boolean {
 		if (ObsidianDiskReconciler.suppressedPaths.has(path)) return true;
 		if (this.orchestrator && (this.orchestrator as unknown as { isSyncingFull?: boolean }).isSyncingFull) return true;
-		const configDir = this.app.vault.configDir || '.obsidian';
+		const configDir = this.app.vault.configDir;
 		if (!isAllowedConfigPath(path, configDir, this.settings)) return true;
 		return false;
 	}
@@ -54,8 +54,8 @@ export class VaultEventWatcher {
 	}
 
 	private async readFileContent(path: string): Promise<string | null> {
-		const configDir = this.app.vault.configDir || '.obsidian';
-		if (path.startsWith(configDir)) {
+		const configDir = this.app.vault.configDir;
+		if (configDir && path.startsWith(configDir)) {
 			try {
 				if (this.app.vault.adapter && await this.app.vault.adapter.exists(path)) {
 					return await this.app.vault.adapter.read(path);
@@ -96,7 +96,7 @@ export class VaultEventWatcher {
 
 	private async listAllDiskPaths(): Promise<string[]> {
 		const allDiskFiles = new Set<string>();
-		const configDir = this.app.vault.configDir || '.obsidian';
+		const configDir = this.app.vault.configDir;
 
 		try {
 			if (this.app.vault.adapter) {
@@ -138,7 +138,7 @@ export class VaultEventWatcher {
 
 			const isFolder = file instanceof TFolder || (file as unknown as { children?: unknown }).children !== undefined;
 			if (file instanceof TFile) {
-				this.readTFileContent(file).then((content) => {
+				void this.readTFileContent(file).then((content) => {
 					if (this.shouldIgnore(file.path)) return;
 					this.knownDiskFiles.set(file.path, content);
 
@@ -196,7 +196,7 @@ export class VaultEventWatcher {
 			if (this.shouldIgnore(file.path)) return;
 
 			if (file instanceof TFile) {
-				this.readTFileContent(file).then((content) => {
+				void this.readTFileContent(file).then((content) => {
 					if (this.shouldIgnore(file.path)) return;
 					this.knownDiskFiles.set(file.path, content);
 

@@ -90,12 +90,12 @@ export default class IlowSyncPlugin extends Plugin {
 		this.statusBarItem.addClass('mod-clickable');
 		this.updateStatusBar('offline', 'Disconnected');
 		this.statusBarItem.onClickEvent(() => {
-			this.activateSidebar();
+			void this.activateSidebar();
 		});
 
 		// Ribbon Icon Setup
 		this.addRibbonIcon('folder-sync', 'Ilow Sync History', () => {
-			this.activateSidebar();
+			void this.activateSidebar();
 		});
 
 		// Add settings tab
@@ -163,7 +163,7 @@ export default class IlowSyncPlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 		if (this.derivedKey) {
-			this.initializeSyncOrchestrator();
+			await this.initializeSyncOrchestrator();
 		}
 	}
 
@@ -245,18 +245,18 @@ export default class IlowSyncPlugin extends Plugin {
 				if (!docId) return;
 
 				if (docId === 'shard-index') {
-					this.networkOrchestrator?.pullDocument('shard-index', null, true).catch(console.error);
+					void this.networkOrchestrator?.pullDocument('shard-index', null, true).catch(() => {});
 				} else {
-					(async () => {
-						let path = this.vfsController!.getPathForUuid(docId);
+					void (async () => {
+						let path = this.vfsController?.getPathForUuid(docId);
 						if (!path) {
 							await this.networkOrchestrator?.pullDocument('shard-index', null, true);
-							path = this.vfsController!.getPathForUuid(docId);
+							path = this.vfsController?.getPathForUuid(docId);
 						}
 						if (path) {
 							await this.networkOrchestrator?.pullDocument(docId, path, true);
 						}
-					})().catch(console.error);
+					})().catch(() => {});
 				}
 			});
 
@@ -325,7 +325,7 @@ export default class IlowSyncPlugin extends Plugin {
 
 			const socketUrl = this.settings.serverUrl.replace(/^http/i, 'ws');
 
-			const configDir = this.app.vault.configDir || '.obsidian';
+			const configDir = this.app.vault.configDir;
 			this.noteRepo = new ObsidianNoteRepository(this.app, this.settings);
 			this.vfsController = new LoroVfsController(this.syncEngine, this.eventBus, this.settings, configDir);
 			this.diskReconciler = new ObsidianDiskReconciler(this.app, this.syncEngine, this.eventBus);

@@ -2,6 +2,7 @@
 import IlowSyncPlugin from './Plugin';
 import { QrDisplayModal } from './Modals/QrDisplayModal';
 import { QrScannerModal } from './Modals/QrScannerModal';
+import { ConfirmationModal } from './Modals/ConfirmationModal';
 
 export class SettingsTab extends PluginSettingTab {
 	private tempPassword = '';
@@ -14,7 +15,7 @@ export class SettingsTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		new Setting(containerEl).setName('General').setHeading();
+		new Setting(containerEl).setName('Connection & Security').setHeading();
 
 		const internalPlugins = (this.app as unknown as { internalPlugins?: { plugins?: { sync?: { enabled?: boolean } } } }).internalPlugins;
 		const nativeSyncEnabled = internalPlugins?.plugins?.sync?.enabled;
@@ -86,13 +87,19 @@ export class SettingsTab extends PluginSettingTab {
 				btn
 					.setButtonText('Regenerate Salt')
 					.setDestructive()
-					.onClick(async () => {
-						if (window.confirm('Warning: Regenerating the salt will change your encryption key. You will lose access to any previously encrypted data in the remote database unless they are re-encrypted.')) {
-							this.plugin.settings.salt = this.plugin.cryptoService.generateSalt();
-							await this.plugin.saveSettings();
-							this.display();
-							new Notice('New salt generated! Please set your Master Password to derive the new key.');
-						}
+					.onClick(() => {
+						new ConfirmationModal(
+							this.app,
+							'Regenerate Salt',
+							'Warning: Regenerating the salt will change your encryption key. You will lose access to any previously encrypted data in the remote database unless they are re-encrypted.',
+							'Regenerate Salt',
+							async () => {
+								this.plugin.settings.salt = this.plugin.cryptoService.generateSalt();
+								await this.plugin.saveSettings();
+								this.display();
+								new Notice('New salt generated! Please set your Master Password to derive the new key.');
+							}
+						).open();
 					})
 			);
 
@@ -189,9 +196,9 @@ export class SettingsTab extends PluginSettingTab {
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.syncPluginSettings)
-					.onChange(async (value) => {
+					.onChange((value) => {
 						this.plugin.settings.syncPluginSettings = value;
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 					})
 			);
 
@@ -208,10 +215,11 @@ export class SettingsTab extends PluginSettingTab {
 					})
 			);
 
+		const themesDir = `${this.app.vault.configDir}/themes/`;
 		// Sync Themes
 		new Setting(containerEl)
 			.setName('Sync Themes')
-			.setDesc('Synchronize custom installed themes (.obsidian/themes/).')
+			.setDesc(`Synchronize custom installed themes (${themesDir}).`)
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.syncThemes)
@@ -300,30 +308,36 @@ export class SettingsTab extends PluginSettingTab {
 				btn
 					.setButtonText('Hard Reset Local State')
 					.setDestructive()
-					.onClick(async () => {
-						if (window.confirm('Are you sure you want to hard reset local state? This will wipe your local CRDT database cache and re-download all documents from the server.')) {
-							try {
-								if (this.plugin.getSyncOrchestrator()) {
-									this.plugin.getSyncOrchestrator()?.stopAll();
-								}
-								await new Promise<void>((resolve, reject) => {
-									const req = window.indexedDB.deleteDatabase('ilow-snapshot-store-db');
-									req.onsuccess = () => resolve();
-									req.onerror = () => reject(req.error || new Error('Failed to delete database'));
-									req.onblocked = () => resolve();
-								});
-								new Notice('Local state hard reset successful! Initiating fresh re-sync...');
+					.onClick(() => {
+						new ConfirmationModal(
+							this.app,
+							'Hard Reset Local State',
+							'Are you sure you want to hard reset local state? This will wipe your local CRDT database cache and re-download all documents from the server.',
+							'Hard Reset Local State',
+							async () => {
+								try {
+									if (this.plugin.getSyncOrchestrator()) {
+										this.plugin.getSyncOrchestrator()?.stopAll();
+									}
+									await new Promise<void>((resolve, reject) => {
+										const req = window.indexedDB.deleteDatabase('ilow-snapshot-store-db');
+										req.onsuccess = () => resolve();
+										req.onerror = () => reject(req.error || new Error('Failed to delete database'));
+										req.onblocked = () => resolve();
+									});
+									new Notice('Local state hard reset successful! Initiating fresh re-sync...');
 
-								if (this.plugin.isKeyDerived && this.plugin.getSyncOrchestrator()) {
-									await this.plugin.getVfsController()?.initialize();
-									await this.plugin.getSyncOrchestrator()?.runFullSync();
-									new Notice('Local re-sync completed successfully!');
+									if (this.plugin.isKeyDerived && this.plugin.getSyncOrchestrator()) {
+										await this.plugin.getVfsController()?.initialize();
+										await this.plugin.getSyncOrchestrator()?.runFullSync();
+										new Notice('Local re-sync completed successfully!');
+									}
+								} catch (err: unknown) {
+									const msg = err instanceof Error ? err.message : String(err);
+									new Notice(`Hard reset failed: ${msg}`);
 								}
-							} catch (err: unknown) {
-								const msg = err instanceof Error ? err.message : String(err);
-								new Notice(`Hard reset failed: ${msg}`);
 							}
-						}
+						).open();
 					})
 			);
 
@@ -335,26 +349,32 @@ export class SettingsTab extends PluginSettingTab {
 				btn
 					.setButtonText('Purge Server Data')
 					.setDestructive()
-					.onClick(async () => {
+					.onClick(() => {
 						const token = this.plugin.settings.adminToken;
 						if (!token) {
 							new Notice('Please configure your Admin API Token first!');
 							return;
 						}
-						if (window.confirm('WARNING: Are you absolutely sure you want to purge all data on the remote server? This action will permanently delete all snapshots and updates and cannot be undone!')) {
-							try {
-								const store = this.plugin.getRemoteStore();
-								if (!store) {
-									new Notice('Connection info incomplete');
-									return;
+						new ConfirmationModal(
+							this.app,
+							'Purge Server Data',
+							'WARNING: Are you absolutely sure you want to purge all data on the remote server? This action will permanently delete all snapshots and updates and cannot be undone!',
+							'Purge Server Data',
+							async () => {
+								try {
+									const store = this.plugin.getRemoteStore();
+									if (!store) {
+										new Notice('Connection info incomplete');
+										return;
+									}
+									await store.truncateServer(token);
+									new Notice('Remote server data successfully purged! The server is now at a clean slate.');
+								} catch (err: unknown) {
+									const msg = err instanceof Error ? err.message : String(err);
+									new Notice(`Purge failed: ${msg}`);
 								}
-								await store.truncateServer(token);
-								new Notice('Remote server data successfully purged! The server is now at a clean slate.');
-							} catch (err: unknown) {
-								const msg = err instanceof Error ? err.message : String(err);
-								new Notice(`Purge failed: ${msg}`);
 							}
-						}
+						).open();
 					})
 			);
 	}

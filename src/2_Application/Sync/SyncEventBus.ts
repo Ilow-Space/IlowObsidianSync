@@ -48,12 +48,12 @@ export const CrdtNodeSoftDeletedSchema = z.object({
 
 export const RemoteSnapshotReceivedSchema = z.object({
 	documentId: z.string(),
-	encryptedState: z.any()
+	encryptedState: z.unknown()
 });
 
 export const IncrementalUpdatesReceivedSchema = z.object({
 	documentId: z.string(),
-	updates: z.array(z.any())
+	updates: z.array(z.unknown())
 });
 
 export const LocalDeltaReadyForPushSchema = z.object({
@@ -128,7 +128,7 @@ export class SyncEventBus {
 		this.clear();
 	}
 
-	private validate<K extends keyof SyncEvents>(event: K, payload: any): void {
+	private validate<K extends keyof SyncEvents>(event: K, payload: unknown): void {
 		switch (event) {
 			case 'LocalFileCreated':
 				LocalFileCreatedSchema.parse(payload);

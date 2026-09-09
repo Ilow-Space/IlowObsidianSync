@@ -56,10 +56,11 @@ export class PostgresRemoteStore implements IRemoteStore {
 			});
 
 			if (res.status >= 200 && res.status < 300) {
-				return res.json || {};
+				return (res.json as Record<string, number>) || {};
 			}
 			return {};
-		} catch (err) {
+		} catch (e: unknown) {
+			void e;
 			return {};
 		}
 	}
@@ -196,7 +197,8 @@ export class PostgresRemoteStore implements IRemoteStore {
 				throw: false
 			});
 			return res.status >= 200 && res.status < 300;
-		} catch (err) {
+		} catch (e: unknown) {
+			void e;
 			return false;
 		}
 	}
@@ -214,7 +216,8 @@ export class PostgresRemoteStore implements IRemoteStore {
 				return res.json as ServerTelemetry;
 			}
 			return null;
-		} catch (err) {
+		} catch (e: unknown) {
+			void e;
 			return null;
 		}
 	}

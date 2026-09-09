@@ -1,5 +1,6 @@
 import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
 import { ICryptography } from '@domain/Interfaces/ICryptography';
+import { EncryptedBlob } from '@domain/ValueObjects/CryptoTypes';
 import { LoroSyncEngine } from '@infrastructure/Crdt/LoroSyncEngine';
 import { INoteRepository } from '@domain/Interfaces/INoteRepository';
 import { LoroVfsController } from './LoroVfsController';
@@ -53,10 +54,10 @@ export class NetworkOrchestrator {
 	) {}
 
 	public initialize(): void {
-		this.eventBus.on('LocalDeltaReadyForPush', this.handleLocalDeltaReadyForPush.bind(this));
-		this.eventBus.on('LocalFileModified', this.handleLocalFileModified.bind(this));
-		this.eventBus.on('LocalFileCreated', this.handleLocalFileCreated.bind(this));
-		this.eventBus.on('CrdtNodeCreated', this.handleRemoteNodeDiscovered.bind(this));
+		this.eventBus.on('LocalDeltaReadyForPush', (p) => { void this.handleLocalDeltaReadyForPush(p); });
+		this.eventBus.on('LocalFileModified', (p) => { void this.handleLocalFileModified(p); });
+		this.eventBus.on('LocalFileCreated', (p) => { void this.handleLocalFileCreated(p); });
+		this.eventBus.on('CrdtNodeCreated', (p) => { void this.handleRemoteNodeDiscovered(p); });
 		
 		// Garbage collect UUID tracking maps when a file is deleted locally
 		this.eventBus.on('LocalFileDeleted', (payload) => {
@@ -160,7 +161,7 @@ export class NetworkOrchestrator {
 	            this.fileUpdateCounters.set(payload.documentId, count);
 	            if (count >= 50) {
 	                this.fileUpdateCounters.set(payload.documentId, 0);
-	                this.forceSyncAndCompact(payload.documentId).catch(() => {});
+	                void this.forceSyncAndCompact(payload.documentId).catch(() => {});
 	            }
 	        }
 	    } catch (err) {
@@ -324,8 +325,6 @@ export class NetworkOrchestrator {
 		this.addActiveTask('System Index');
 
 		try {
-			console.log('[NetworkOrchestrator] Starting VFS Index Sync...');
-
 			if (this.pendingRetries.length > 0) {
 				const retries = [...this.pendingRetries];
 				this.pendingRetries = [];
@@ -337,7 +336,8 @@ export class NetworkOrchestrator {
 			let bulkUpdates: Record<string, number> = {};
 			try {
 				bulkUpdates = await this.remoteStore.getBulkLatestUpdateIds();
-			} catch {
+			} catch (e: unknown) {
+				void e;
 				console.warn('[NetworkOrchestrator] Bulk fetch failed, falling back to sequential checks.');
 			}
 
@@ -351,7 +351,6 @@ export class NetworkOrchestrator {
 
 			this.vfsController.flushPendingPush();
 			this.vfsController.processRemoteVfsUpdates();
-			console.log('[NetworkOrchestrator] VFS Index Processed.');
 
 			this.reconcileVfsDiskPaths();
 
@@ -437,8 +436,6 @@ export class NetworkOrchestrator {
 				this.prePullBaselineContents.set(file.uuid, doc.getText('markdown').toString());
 			}
 
-			console.log('[NetworkOrchestrator] 🟢 REMOTE CHANGES PULLED AND SETTLED. Now ingesting and pushing local offline state...');
-
 			await this.ingestLocalOfflineNotes(bulkUpdates);
 
 			if (this.diskReconciler) {
@@ -455,7 +452,6 @@ export class NetworkOrchestrator {
 			}
 
 			this.isInitialized = true;
-			console.log('[NetworkOrchestrator] Full Sync Complete.');
 		} catch (error) {
 			console.error('[NetworkOrchestrator] Sync failed:', error);
 			this.hasConnectionError = true;
@@ -494,7 +490,6 @@ export class NetworkOrchestrator {
 
 	private async ingestLocalOfflineNotes(bulkUpdates: Record<string, number>): Promise<void> {
 	    const localPaths = typeof this.noteRepo.listAllNotes === 'function' ? await this.noteRepo.listAllNotes() : [];
-	    console.log('[ALL NOTES LISTED]', localPaths);
 	    const limit = pLimit(10);
 	    await Promise.all(localPaths.map(path => limit(() => this.processSingleLocalPath(path, bulkUpdates))));
 	}
@@ -584,23 +579,25 @@ export class NetworkOrchestrator {
 
 		try {
 			const start = performance.now();
-			let details: { encryptedState: any; maxCompactedId: number; isDeleted: boolean } | null = null;
-			let updates: any[] = [];
+			let details: { encryptedState: unknown; maxCompactedId: number; isDeleted: boolean } | null = null;
+			let updates: Array<{ id: number; encryptedUpdate: unknown }> = [];
 			const decryptedUpdates: Uint8Array[] = [];
 
 			try {
 				const currentLastId = this.fileLastSyncIds.get(documentId) || 0;
-				[details, updates] = await Promise.all([
+				const [fetchedDetails, fetchedUpdates] = await Promise.all([
 					this.remoteStore.fetchSnapshotDetails(documentId),
 					this.remoteStore.fetchUpdatesSince(documentId, currentLastId)
 				]);
+				details = fetchedDetails as { encryptedState: unknown; maxCompactedId: number; isDeleted: boolean } | null;
+				updates = fetchedUpdates as Array<{ id: number; encryptedUpdate: unknown }>;
 
 				for (const update of updates) {
-					const decBytes = await this.crypto.decrypt(update.encryptedUpdate, this.activeKey);
+					const decBytes = await this.crypto.decrypt(update.encryptedUpdate as EncryptedBlob, this.activeKey);
 					decryptedUpdates.push(decBytes);
 				}
-			} catch (err) {
-				console.log('[NetworkOrchestrator] pullDocument network fetch failed for ' + documentId + ':', String(err));
+			} catch (err: unknown) {
+				const errMsg = err instanceof Error ? err.message : String(err);
 				this.hasConnectionError = true;
 				this.lastErrorMessage = 'Connection failed';
 				return;
@@ -610,15 +607,13 @@ export class NetworkOrchestrator {
 				const currentLastId = this.fileLastSyncIds.get(documentId) || 0;
 
 				if (details && currentLastId < details.maxCompactedId) {
-					console.log(`[NetworkOrchestrator] Lagging client detected for ${documentId}. Initiating snapshot rehydration...`);
-
 					let offlineContent: string | null = null;
 					if (path) {
 						offlineContent = await this.noteRepo.readNote(path);
 					}
 
 					if (details.encryptedState && this.activeKey) {
-						const decryptedBytes = await this.crypto.decrypt(details.encryptedState, this.activeKey);
+						const decryptedBytes = await this.crypto.decrypt(details.encryptedState as EncryptedBlob, this.activeKey);
 						await this.crdtEngine.applyUpdates(documentId, [decryptedBytes]);
 					}
 
@@ -724,6 +719,9 @@ export class NetworkOrchestrator {
 		try {
 			await this.remoteStore.deleteSnapshot(documentId);
 			await this.crdtEngine.localStore.deleteDocumentState(documentId);
-		} catch {}
+		} catch (e: unknown) {
+			// Ignore remote snapshot deletion errors
+			void e;
+		}
 	}
 }

@@ -88,7 +88,7 @@ export class WebCryptoService implements ICryptography {
 
 	public async importKey(keyData: string): Promise<CryptoKey> {
 		// Re-import the JWK string back into a functional CryptoKey
-		const jwk = JSON.parse(keyData);
+		const jwk = JSON.parse(keyData) as JsonWebKey;
 		return await window.crypto.subtle.importKey(
 			'jwk',
 			jwk,
