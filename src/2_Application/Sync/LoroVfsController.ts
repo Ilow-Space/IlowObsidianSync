@@ -390,11 +390,10 @@ export class LoroVfsController {
 				const filename = curr.data.get('filename');
 				if (typeof filename === 'string' && filename) parts.unshift(filename);
 
-				const parentNode = typeof curr.parent === 'function' ? curr.parent() : (curr as any).parent;
+				const parentNode = typeof curr.parent === 'function' ? curr.parent() : undefined;
 				if (!parentNode) break;
 
-				const parentId = parentNode.id !== undefined ? parentNode.id : parentNode;
-				const parentIdStr = this.getNodeIdStr(parentId);
+				const parentIdStr = this.getNodeIdStr(parentNode.id);
 				curr = nodeMap.get(parentIdStr) || null;
 			} catch (e: unknown) {
 				void e;

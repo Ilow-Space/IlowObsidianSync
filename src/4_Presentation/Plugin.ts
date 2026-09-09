@@ -60,8 +60,6 @@ export default class IlowSyncPlugin extends Plugin {
 	}
 
 	async onload() {
-		console.log('Loading Ilow Sync Plugin (Loro Reactive VFS Edition)');
-
 		// 1. Perform Yjs -> Loro Migration schema check and purge on boot
 		await LoroMigrationManager.performLibraryMigrationCheck();
 
@@ -128,7 +126,6 @@ export default class IlowSyncPlugin extends Plugin {
 	}
 
 	onunload() {
-		console.log('Unloading Ilow Sync Plugin');
 		if (this.manifestUnsubscribe) {
 			this.manifestUnsubscribe();
 			this.manifestUnsubscribe = null;
@@ -163,7 +160,7 @@ export default class IlowSyncPlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 		if (this.derivedKey) {
-			await this.initializeSyncOrchestrator();
+			void this.initializeSyncOrchestrator();
 		}
 	}
 

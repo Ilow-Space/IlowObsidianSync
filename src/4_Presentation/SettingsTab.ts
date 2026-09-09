@@ -272,7 +272,7 @@ export class SettingsTab extends PluginSettingTab {
 			.addButton((btn) =>
 				btn.setButtonText('Scan QR Code')
 					.onClick(() => {
-						const modal = new QrScannerModal(this.app, async (text) => {
+						const modal = new QrScannerModal(this.app, (text) => {
 							if (!text.startsWith('ilow-sync://')) {
 								new Notice('Invalid QR code format.');
 								return;
@@ -284,9 +284,10 @@ export class SettingsTab extends PluginSettingTab {
 									this.plugin.settings.serverUrl = parsed.serverUrl;
 									this.plugin.settings.apiKey = parsed.apiKey;
 									this.plugin.settings.salt = parsed.salt;
-									await this.plugin.saveSettings();
-									this.display();
-									new Notice('Network settings loaded! Enter your Master Password to derive your key.');
+									void this.plugin.saveSettings().then(() => {
+										this.display();
+										new Notice('Network settings loaded! Enter your Master Password to derive your key.');
+									});
 								} else {
 									new Notice('QR payload is missing required configuration parameters.');
 								}

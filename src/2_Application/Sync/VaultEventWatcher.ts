@@ -7,6 +7,8 @@ import { PluginSettings } from '@presentation/Plugin';
 import { isAllowedConfigPath } from '@domain/Utils/ConfigPathFilter';
 import { isBinaryPath, uint8ArrayToBase64 } from '@domain/Utils/BinaryUtils';
 
+import { EventRef } from 'obsidian';
+
 export class VaultEventWatcher {
 	private activeListeners: Array<{ eventName: string; ref: unknown }> = [];
 	private orchestrator: NetworkOrchestrator | null = null;
@@ -273,7 +275,7 @@ export class VaultEventWatcher {
 			this.pollTimer = null;
 		}
 		for (const listener of this.activeListeners) {
-			this.app.vault.off(listener.eventName as Parameters<typeof this.app.vault.off>[0], listener.ref as Parameters<typeof this.app.vault.off>[1]);
+			this.app.vault.off(listener.eventName as 'create' | 'rename' | 'delete' | 'modify', listener.ref as (...args: unknown[]) => unknown);
 		}
 		this.activeListeners = [];
 		this.knownDiskFiles.clear();

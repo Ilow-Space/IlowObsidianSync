@@ -579,27 +579,24 @@ export class NetworkOrchestrator {
 
 		try {
 			const start = performance.now();
-			let details: { encryptedState: unknown; maxCompactedId: number; isDeleted: boolean } | null = null;
-			let updates: Array<{ id: number; encryptedUpdate: unknown }> = [];
+			let details: { encryptedState: EncryptedBlob | null; maxCompactedId: number; isDeleted: boolean } | null = null;
+			let updates: Array<{ id: number; encryptedUpdate: EncryptedBlob }> = [];
 			const decryptedUpdates: Uint8Array[] = [];
 
 			try {
 				const currentLastId = this.fileLastSyncIds.get(documentId) || 0;
-				const [fetchedDetails, fetchedUpdates] = await Promise.all([
+				[details, updates] = await Promise.all([
 					this.remoteStore.fetchSnapshotDetails(documentId),
 					this.remoteStore.fetchUpdatesSince(documentId, currentLastId)
 				]);
-				details = fetchedDetails as { encryptedState: unknown; maxCompactedId: number; isDeleted: boolean } | null;
-				updates = fetchedUpdates as Array<{ id: number; encryptedUpdate: unknown }>;
 
 				for (const update of updates) {
-					const decBytes = await this.crypto.decrypt(update.encryptedUpdate as EncryptedBlob, this.activeKey);
+					const decBytes = await this.crypto.decrypt(update.encryptedUpdate, this.activeKey);
 					decryptedUpdates.push(decBytes);
 				}
 			} catch (err: unknown) {
-				const errMsg = err instanceof Error ? err.message : String(err);
 				this.hasConnectionError = true;
-				this.lastErrorMessage = 'Connection failed';
+				this.lastErrorMessage = err instanceof Error ? err.message : 'Connection failed';
 				return;
 			}
 
