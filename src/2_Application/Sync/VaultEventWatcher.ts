@@ -7,10 +7,8 @@ import { PluginSettings } from '@presentation/Plugin';
 import { isAllowedConfigPath } from '@domain/Utils/ConfigPathFilter';
 import { isBinaryPath, uint8ArrayToBase64 } from '@domain/Utils/BinaryUtils';
 
-import { EventRef } from 'obsidian';
-
 export class VaultEventWatcher {
-	private activeListeners: Array<{ eventName: string; ref: unknown }> = [];
+	private activeListeners: Array<{ eventName: 'create' | 'rename' | 'delete' | 'modify'; ref: (...data: unknown[]) => unknown }> = [];
 	private orchestrator: NetworkOrchestrator | null = null;
 	private pollTimer: number | null = null;
 	private knownDiskFiles = new Map<string, string>();
@@ -211,10 +209,10 @@ export class VaultEventWatcher {
 		});
 
 		this.activeListeners.push(
-			{ eventName: 'create', ref: onCreate },
-			{ eventName: 'rename', ref: onRename },
-			{ eventName: 'delete', ref: onDelete },
-			{ eventName: 'modify', ref: onModify }
+			{ eventName: 'create', ref: onCreate as unknown as (...data: unknown[]) => unknown },
+			{ eventName: 'rename', ref: onRename as unknown as (...data: unknown[]) => unknown },
+			{ eventName: 'delete', ref: onDelete as unknown as (...data: unknown[]) => unknown },
+			{ eventName: 'modify', ref: onModify as unknown as (...data: unknown[]) => unknown }
 		);
 
 		this.pollVaultFiles().catch(() => {});
@@ -275,7 +273,7 @@ export class VaultEventWatcher {
 			this.pollTimer = null;
 		}
 		for (const listener of this.activeListeners) {
-			this.app.vault.off(listener.eventName as 'create' | 'rename' | 'delete' | 'modify', listener.ref as (...args: unknown[]) => unknown);
+			this.app.vault.off(listener.eventName, listener.ref);
 		}
 		this.activeListeners = [];
 		this.knownDiskFiles.clear();

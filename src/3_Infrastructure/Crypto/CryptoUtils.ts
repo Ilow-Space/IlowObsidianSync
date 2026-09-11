@@ -1,7 +1,7 @@
 ﻿
 export class CryptoUtils {
 	private static HEX_OCTETS: string[] = (() => {
-		const octets: string[] = new Array(256);
+		const octets: string[] = new Array<string>(256);
 		for (let i = 0; i < 256; i++) {
 			octets[i] = i.toString(16).padStart(2, '0');
 		}

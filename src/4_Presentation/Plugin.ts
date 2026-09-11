@@ -154,7 +154,7 @@ export default class IlowSyncPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<PluginSettings>);
 	}
 
 	async saveSettings() {
@@ -201,7 +201,7 @@ export default class IlowSyncPlugin extends Plugin {
 		}
         
 		if (leaf) {
-			workspace.revealLeaf(leaf);
+			await workspace.revealLeaf(leaf);
 		}
 	}
 

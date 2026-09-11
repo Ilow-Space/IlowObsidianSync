@@ -413,7 +413,7 @@ export class NetworkOrchestrator {
 						const encryptedBytes = await this.remoteStore.downloadBlob(expectedHash);
 						if (encryptedBytes && this.activeKey) {
 							const payloadJson = new TextDecoder().decode(encryptedBytes);
-							const encryptedBlob = JSON.parse(payloadJson);
+							const encryptedBlob = JSON.parse(payloadJson) as EncryptedBlob;
 							const decryptedBytes = await this.crypto.decrypt(encryptedBlob, this.activeKey);
 							const base64ToWrite = uint8ArrayToBase64(decryptedBytes);
 							await this.safeWriteNote(file.path, base64ToWrite);
@@ -566,7 +566,7 @@ export class NetworkOrchestrator {
 			try {
 				const latestRemoteId = await this.remoteStore.getLatestUpdateId(documentId);
 				if (latestRemoteId <= lastId) return;
-			} catch (err) {
+			} catch {
 				this.hasConnectionError = true;
 				this.lastErrorMessage = 'Connection failed';
 				this.triggerStatusUpdate();
@@ -610,7 +610,7 @@ export class NetworkOrchestrator {
 					}
 
 					if (details.encryptedState && this.activeKey) {
-						const decryptedBytes = await this.crypto.decrypt(details.encryptedState as EncryptedBlob, this.activeKey);
+						const decryptedBytes = await this.crypto.decrypt(details.encryptedState, this.activeKey);
 						await this.crdtEngine.applyUpdates(documentId, [decryptedBytes]);
 					}
 

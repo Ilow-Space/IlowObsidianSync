@@ -45,7 +45,7 @@ export function isAllowedConfigPath(
 	configDir?: string,
 	settings?: Partial<PluginSettings>
 ): boolean {
-	const rawConfigDir = configDir ?? '.obsidian';
+	const rawConfigDir = configDir || '.obsidian';
 	const normalizedConfigDir = rawConfigDir.replace(/^\/+|\/+$/g, '');
 
 	if (!path.startsWith(normalizedConfigDir + '/') && path !== normalizedConfigDir) {
