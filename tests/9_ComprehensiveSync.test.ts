@@ -65,6 +65,9 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
                 getAllLoadedFiles: vi.fn(() => Array.from(mockVaultFiles.values()))
             },
             fileManager: {
+                trashFile: vi.fn().mockImplementation(async (f: any) => {
+                    mockVaultFiles.delete(f.path);
+                }),
                 renameFile: vi.fn().mockImplementation(async (f: any, newPath: string) => {
                     mockVaultFiles.delete(f.path);
                     f.path = newPath;
@@ -404,7 +407,7 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
             (vfsController as any).rebuildCacheAndEmitRemoteDiffs();
             await waitForDisk();
 
-            expect(appMock.vault.trash).toHaveBeenCalledWith(expect.any(TFile), true);
+            expect(appMock.fileManager.trashFile).toHaveBeenCalledWith(expect.any(TFile));
         });
     });
 
@@ -541,7 +544,7 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
                     tree.delete(file.id);
                 }
             });
-            expect(appMock.vault.trash).toHaveBeenCalledWith(expect.any(TFile), true);
+            expect(appMock.fileManager.trashFile).toHaveBeenCalledWith(expect.any(TFile));
         });
     });
 
@@ -579,7 +582,7 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
             await waitForDisk();
 
             expect(appMock.fileManager.renameFile).not.toHaveBeenCalled();
-            expect(appMock.vault.trash).toHaveBeenCalledWith(expect.any(TFile), true);
+            expect(appMock.fileManager.trashFile).toHaveBeenCalledWith(expect.any(TFile));
         });
 
         it('28. Offline Create + Back Online Pull Conflict applies safely when contents differ', async () => {

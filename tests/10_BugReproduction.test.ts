@@ -82,6 +82,9 @@ describe('Bug Reproduction: Offline Moves, Crashes & Duplications', () => {
                 read: vi.fn().mockResolvedValue('Mock Content')
             },
             fileManager: {
+                trashFile: vi.fn().mockImplementation(async (file: any) => {
+                    if (file && file.path) mockVaultFiles.delete(file.path);
+                }),
                 renameFile: vi.fn().mockImplementation(async (file: any, newPath: string) => {
                     if (file && file.path) mockVaultFiles.delete(file.path);
                     file.path = newPath;
@@ -470,7 +473,7 @@ it('TEST 6: Exposes massive performance leak in ObsidianNoteRepository (Vestigia
                 }
             });
 
-            expect(appMock.vault.trash).toHaveBeenCalledWith(expect.any(TFile), true);
+            expect(appMock.fileManager.trashFile).toHaveBeenCalledWith(expect.any(TFile));
         });
 
         it('Case 5: Remote Folder Creation', async () => {
@@ -548,7 +551,7 @@ it('TEST 6: Exposes massive performance leak in ObsidianNoteRepository (Vestigia
             });
 
             // In ObsidianDiskReconciler, when a node is deleted, it resolves to its path and trashes it
-            expect(appMock.vault.trash).toHaveBeenCalledWith(expect.any(TFolder), true);
+            expect(appMock.fileManager.trashFile).toHaveBeenCalledWith(expect.any(TFolder));
         });
     });
 describe('CRDT Node Deduplication & Path Collision Self-Healing', () => {

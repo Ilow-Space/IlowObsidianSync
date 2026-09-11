@@ -15,8 +15,19 @@ export class SettingsTab extends PluginSettingTab {
 		return [];
 	}
 
-	display(): void {
-		const { containerEl } = this;
+	override display(): void {
+		this.render(this.containerEl);
+	}
+
+	private refreshTab(): void {
+		if (typeof (this as unknown as { update?: () => void }).update === 'function') {
+			(this as unknown as { update: () => void }).update();
+		} else {
+			this.display();
+		}
+	}
+
+	render(containerEl: HTMLElement): void {
 		containerEl.empty();
 
 		new Setting(containerEl).setName('Connection & Security').setHeading();
@@ -100,7 +111,7 @@ export class SettingsTab extends PluginSettingTab {
 							async () => {
 								this.plugin.settings.salt = this.plugin.cryptoService.generateSalt();
 								await this.plugin.saveSettings();
-								this.display();
+								this.refreshTab();
 								new Notice('New salt generated! Please set your Master Password to derive the new key.');
 							}
 						).open();
@@ -125,7 +136,7 @@ export class SettingsTab extends PluginSettingTab {
 						.setDestructive()
 						.onClick(async () => {
 							await this.plugin.unloadKey();
-							this.display();
+							this.refreshTab();
 							new Notice('Master key unloaded from memory and disk.');
 						});
 				} else {
@@ -139,7 +150,7 @@ export class SettingsTab extends PluginSettingTab {
 							}
 							try {
 								await this.plugin.deriveKeyFromPassword(pwd);
-								this.display();
+								this.refreshTab();
 								new Notice('Key derived successfully! Sync is now active.');
 							} catch {
 								new Notice('Failed to derive key. See console.');
@@ -289,7 +300,7 @@ export class SettingsTab extends PluginSettingTab {
 									this.plugin.settings.apiKey = parsed.apiKey;
 									this.plugin.settings.salt = parsed.salt;
 									void this.plugin.saveSettings().then(() => {
-										this.display();
+										this.refreshTab();
 										new Notice('Network settings loaded! Enter your Master Password to derive your key.');
 									});
 								} else {

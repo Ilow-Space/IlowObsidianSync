@@ -42,10 +42,14 @@ function checkPluginPath(relPath: string, settings?: Partial<PluginSettings>): b
 
 export function isAllowedConfigPath(
 	path: string,
-	configDir?: string,
+	configDir: string = '',
 	settings?: Partial<PluginSettings>
 ): boolean {
-	const rawConfigDir = configDir || '.obsidian';
+	if (!configDir) {
+		return !path.startsWith('.') && !path.includes('/.');
+	}
+
+	const rawConfigDir = configDir;
 	const normalizedConfigDir = rawConfigDir.replace(/^\/+|\/+$/g, '');
 
 	if (!path.startsWith(normalizedConfigDir + '/') && path !== normalizedConfigDir) {

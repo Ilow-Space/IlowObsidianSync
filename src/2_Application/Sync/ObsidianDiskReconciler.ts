@@ -398,15 +398,7 @@ export class ObsidianDiskReconciler {
 
 					ObsidianDiskReconciler.suppressPath(payload.path);
 					try {
-						if (typeof this.app.fileManager?.trashFile === 'function') {
-							await this.app.fileManager.trashFile(file);
-						} else {
-							try {
-								await this.app.vault.trash(file, true);
-							} catch {
-								await this.app.vault.trash(file, false);
-							}
-						}
+						await this.app.fileManager.trashFile(file);
 					} catch (e) {
 						console.error('[ObsidianDiskReconciler] Failed to trash file:', e);
 					} finally {

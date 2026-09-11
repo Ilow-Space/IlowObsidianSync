@@ -222,7 +222,7 @@ export class LoroVfsController {
 
 	private handleLocalFileCreated(payload: { path: string; isFolder: boolean; content?: string }): void {
 		if (payload.path === '/') return;
-		if (!isAllowedConfigPath(payload.path, this.configDir || '.obsidian', this.settings)) return;
+		if (!isAllowedConfigPath(payload.path, this.configDir, this.settings)) return;
 		if (this.pathToUuid.has(payload.path)) return;
 
 		const filename = payload.path.substring(payload.path.lastIndexOf('/') + 1);

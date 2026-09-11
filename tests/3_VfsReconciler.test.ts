@@ -26,6 +26,7 @@ describe('Reactive Event-Driven VFS Reconciler Tests', () => {
 				read: vi.fn().mockResolvedValue('Mock Content')
 			},
 			fileManager: {
+				trashFile: vi.fn().mockResolvedValue(undefined),
 				renameFile: vi.fn().mockResolvedValue(undefined)
 			}
 		};
@@ -115,12 +116,9 @@ describe('Reactive Event-Driven VFS Reconciler Tests', () => {
 		expect(maxConcurrentWrites).toBeLessThanOrEqual(5);
 	});
 
-	it('Processes CrdtNodeSoftDeleted and invokes trashing fallback correctly', async () => {
+	it('Processes CrdtNodeSoftDeleted and invokes fileManager.trashFile correctly', async () => {
 		const fileObj = { path: 'TrashMe.md' };
 		appMock.vault.getAbstractFileByPath.mockImplementation((p: string) => p === 'TrashMe.md' ? fileObj : null);
-
-		appMock.vault.trash.mockImplementationOnce(() => Promise.reject(new Error('System trash restricted')));
-		appMock.vault.trash.mockImplementationOnce(() => Promise.resolve());
 
 		eventBus.emit('CrdtNodeSoftDeleted', {
 			uuid: 'deleted-uuid',
@@ -129,9 +127,7 @@ describe('Reactive Event-Driven VFS Reconciler Tests', () => {
 
 		await new Promise((resolve) => setTimeout(resolve, 50));
 
-		expect(appMock.vault.trash).toHaveBeenCalledTimes(2);
-		expect(appMock.vault.trash).toHaveBeenNthCalledWith(1, fileObj, true);
-		expect(appMock.vault.trash).toHaveBeenNthCalledWith(2, fileObj, false);
+		expect(appMock.fileManager.trashFile).toHaveBeenCalledWith(fileObj);
 	});
 
 	it('PERF REGRESSION: Bulk deletions must execute O(1) cache eviction and batch WASM exports', async () => {
