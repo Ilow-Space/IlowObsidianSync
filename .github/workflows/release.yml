@@ -25,10 +25,12 @@ jobs:
         run: npm ci
 
       - name: Update manifest and package version
+        id: version
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           jq --arg v "$VERSION" '.version = $v' manifest.json > tmp.json && mv tmp.json manifest.json
           npm version "$VERSION" --no-git-tag-version
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Run unit tests
         run: npm run test:unit
@@ -49,6 +51,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.version }}
           files: |
             dist/main.js
             manifest.json
