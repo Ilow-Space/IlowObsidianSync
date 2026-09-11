@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting, Notice, SettingDefinitionItem } from 'obsidian';
+import { App, PluginSettingTab, Setting, Notice } from 'obsidian';
 import IlowSyncPlugin from './Plugin';
 import { QrDisplayModal } from './Modals/QrDisplayModal';
 import { QrScannerModal } from './Modals/QrScannerModal';
@@ -9,10 +9,6 @@ export class SettingsTab extends PluginSettingTab {
 
 	constructor(app: App, private plugin: IlowSyncPlugin) {
 		super(app, plugin);
-	}
-
-	override getSettingDefinitions(): SettingDefinitionItem[] {
-		return [];
 	}
 
 	override display(): void {
