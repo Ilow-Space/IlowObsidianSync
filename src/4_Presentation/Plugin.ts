@@ -1,4 +1,4 @@
-import { Plugin, Notice, TFile, TAbstractFile, WorkspaceLeaf, TFolder } from 'obsidian';
+import { Plugin, TFile, WorkspaceLeaf } from 'obsidian';
 import { SettingsTab } from './SettingsTab';
 import { WebCryptoService } from '@infrastructure/Crypto/WebCryptoService';
 import { PostgresRemoteStore } from '@infrastructure/Postgres/PostgresRemoteStore';
@@ -36,7 +36,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
 	syncAppearance: true
 };
 
-export default class MyPlugin extends Plugin {
+export default class IlowSyncPlugin extends Plugin {
 	public settings!: PluginSettings;
 	public cryptoService!: WebCryptoService;
 	private noteRepo!: ObsidianNoteRepository;
@@ -60,8 +60,6 @@ export default class MyPlugin extends Plugin {
 	}
 
 	async onload() {
-		console.log('Loading Ilow Sync Plugin (Loro Reactive VFS Edition)');
-
 		// 1. Perform Yjs -> Loro Migration schema check and purge on boot
 		await LoroMigrationManager.performLibraryMigrationCheck();
 
@@ -90,12 +88,12 @@ export default class MyPlugin extends Plugin {
 		this.statusBarItem.addClass('mod-clickable');
 		this.updateStatusBar('offline', 'Disconnected');
 		this.statusBarItem.onClickEvent(() => {
-			this.activateSidebar();
+			void this.activateSidebar();
 		});
 
 		// Ribbon Icon Setup
 		this.addRibbonIcon('folder-sync', 'Ilow Sync History', () => {
-			this.activateSidebar();
+			void this.activateSidebar();
 		});
 
 		// Add settings tab
@@ -112,7 +110,8 @@ export default class MyPlugin extends Plugin {
 
 		// 2. Auto-load master sync key FIRST before starting network sockets
 		try {
-			const keyData = await (this.app as any).secretStorage?.getSecret('ilow-master-key');
+			const secretStorage = (this.app as unknown as { secretStorage?: { getSecret: (key: string) => Promise<string | null> } }).secretStorage;
+			const keyData = await secretStorage?.getSecret('ilow-master-key');
 			if (keyData) {
 				this.updateStatusBar('syncing', 'Loading key...');
 				this.derivedKey = await this.cryptoService.importKey(keyData);
@@ -127,7 +126,6 @@ export default class MyPlugin extends Plugin {
 	}
 
 	onunload() {
-		console.log('Unloading Ilow Sync Plugin');
 		if (this.manifestUnsubscribe) {
 			this.manifestUnsubscribe();
 			this.manifestUnsubscribe = null;
@@ -156,13 +154,13 @@ export default class MyPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<PluginSettings>);
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
 		if (this.derivedKey) {
-			this.initializeSyncOrchestrator();
+			void this.initializeSyncOrchestrator();
 		}
 	}
 
@@ -172,6 +170,10 @@ export default class MyPlugin extends Plugin {
 
 	public getSyncOrchestrator(): NetworkOrchestrator | null {
 		return this.networkOrchestrator;
+	}
+
+	public getVfsController(): LoroVfsController | null {
+		return this.vfsController;
 	}
 
 	public updateStatusBar(status: SyncStatus, msg: string) {
@@ -199,7 +201,7 @@ export default class MyPlugin extends Plugin {
 		}
         
 		if (leaf) {
-			workspace.revealLeaf(leaf);
+			await workspace.revealLeaf(leaf);
 		}
 	}
 
@@ -208,13 +210,14 @@ export default class MyPlugin extends Plugin {
 			this.derivedKey = await this.cryptoService.deriveKey(password, this.settings.salt);
 
 			const exportedKey = await this.cryptoService.exportKey(this.derivedKey);
-			(this.app as any).secretStorage?.setSecret('ilow-master-key', exportedKey)?.catch(() => {});
+			const secretStorage = (this.app as unknown as { secretStorage?: { setSecret: (key: string, val: string) => Promise<void> } }).secretStorage;
+			void secretStorage?.setSecret('ilow-master-key', exportedKey)?.catch(() => {});
 
 			await this.initializeSyncOrchestrator();
 
 			if (this.networkOrchestrator) {
 				this.networkOrchestrator.setCryptoKey(this.derivedKey);
-				this.runBackgroundBootstrap().catch(console.error);
+				void this.runBackgroundBootstrap().catch(console.error);
 			}
 		} catch (err) {
 			console.error('Error deriving master key:', err);
@@ -239,18 +242,18 @@ export default class MyPlugin extends Plugin {
 				if (!docId) return;
 
 				if (docId === 'shard-index') {
-					this.networkOrchestrator?.pullDocument('shard-index', null, true).catch(console.error);
+					void this.networkOrchestrator?.pullDocument('shard-index', null, true).catch(() => {});
 				} else {
-					(async () => {
-						let path = this.vfsController!.getPathForUuid(docId);
+					void (async () => {
+						let path = this.vfsController?.getPathForUuid(docId);
 						if (!path) {
 							await this.networkOrchestrator?.pullDocument('shard-index', null, true);
-							path = this.vfsController!.getPathForUuid(docId);
+							path = this.vfsController?.getPathForUuid(docId);
 						}
 						if (path) {
 							await this.networkOrchestrator?.pullDocument(docId, path, true);
 						}
-					})().catch(console.error);
+					})().catch(() => {});
 				}
 			});
 
@@ -274,7 +277,10 @@ export default class MyPlugin extends Plugin {
 		this.updateStatusBar('offline', 'Disconnected');
 
 		try {
-			await (this.app as any).secretStorage.deleteSecret('ilow-master-key');
+			const secretStorage = (this.app as unknown as { secretStorage?: { deleteSecret: (key: string) => Promise<void> } }).secretStorage;
+			if (secretStorage) {
+				await secretStorage.deleteSecret('ilow-master-key');
+			}
 		} catch (err) {
 			console.error('Failed to remove master sync key:', err);
 		}
@@ -316,7 +322,7 @@ export default class MyPlugin extends Plugin {
 
 			const socketUrl = this.settings.serverUrl.replace(/^http/i, 'ws');
 
-			const configDir = (this.app.vault as any).configDir || '.obsidian';
+			const configDir = this.app.vault.configDir;
 			this.noteRepo = new ObsidianNoteRepository(this.app, this.settings);
 			this.vfsController = new LoroVfsController(this.syncEngine, this.eventBus, this.settings, configDir);
 			this.diskReconciler = new ObsidianDiskReconciler(this.app, this.syncEngine, this.eventBus);
@@ -341,7 +347,7 @@ export default class MyPlugin extends Plugin {
 
 			if (this.derivedKey) {
 				this.networkOrchestrator.setCryptoKey(this.derivedKey);
-				this.runBackgroundBootstrap().catch(console.error);
+				void this.runBackgroundBootstrap().catch(console.error);
 			}
 		}
 	}

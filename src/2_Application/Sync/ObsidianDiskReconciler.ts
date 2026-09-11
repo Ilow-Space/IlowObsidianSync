@@ -1,4 +1,4 @@
-import { App, TFile } from 'obsidian';
+import { App, TFile, TFolder } from 'obsidian';
 import { Mutex } from 'async-mutex';
 import PQueue from 'p-queue';
 import { SyncEventBus } from './SyncEventBus';
@@ -17,10 +17,10 @@ export class ObsidianDiskReconciler {
 	) {}
 
 	public initialize(): void {
-		this.eventBus.on('CrdtNodeCreated', this.handleCrdtNodeCreated.bind(this));
-		this.eventBus.on('CrdtNodeMoved', this.handleCrdtNodeMoved.bind(this));
-		this.eventBus.on('CrdtNodeSoftDeleted', this.handleCrdtNodeSoftDeleted.bind(this));
-		this.eventBus.on('CrdtTextChanged', this.handleCrdtTextChanged.bind(this));
+		this.eventBus.on('CrdtNodeCreated', (p) => { void this.handleCrdtNodeCreated(p); });
+		this.eventBus.on('CrdtNodeMoved', (p) => { void this.handleCrdtNodeMoved(p); });
+		this.eventBus.on('CrdtNodeSoftDeleted', (p) => { void this.handleCrdtNodeSoftDeleted(p); });
+		this.eventBus.on('CrdtTextChanged', (p) => { void this.handleCrdtTextChanged(p); });
 	}
 
 	public static suppressPath(path: string): void {
@@ -28,7 +28,8 @@ export class ObsidianDiskReconciler {
 	}
 
 	public static unsuppressPath(path: string, delayMs = 20): void {
-		setTimeout(() => {
+		const setTimer = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
+		setTimer(() => {
 			ObsidianDiskReconciler.suppressedPaths.delete(path);
 		}, delayMs);
 	}
@@ -60,7 +61,7 @@ export class ObsidianDiskReconciler {
 			if (!existing) {
 				try {
 					await this.app.vault.createFolder(currentPath);
-				} catch (e) {
+				} catch {
 					// Ignore if created concurrently or already exists in vault
 				}
 			}
@@ -84,8 +85,9 @@ export class ObsidianDiskReconciler {
 	private getPathsToSuppress(oldPath: string, newPath: string): string[] {
 		const paths = [oldPath, newPath];
 		const prefix = oldPath.endsWith('/') ? oldPath : oldPath + '/';
-		const allFiles = (this.app.vault as any).getAllLoadedFiles ? (this.app.vault as any).getAllLoadedFiles() : [];
-	    
+		const vaultWithFiles = this.app.vault as unknown as { getAllLoadedFiles?: () => Array<{ path?: string }> };
+		const allFiles = typeof vaultWithFiles.getAllLoadedFiles === 'function' ? vaultWithFiles.getAllLoadedFiles() : [];
+
 		for (const f of allFiles) {
 			if (f.path && f.path.startsWith(prefix)) {
 				paths.push(f.path);
@@ -97,8 +99,8 @@ export class ObsidianDiskReconciler {
 	}
 
 	private isConfigPath(path: string): boolean {
-		const configDir = this.app.vault.configDir || '.obsidian';
-		return path.startsWith(configDir);
+		const configDir = this.app.vault.configDir;
+		return !!configDir && path.startsWith(configDir);
 	}
 
 	private async readPhysicalFileContent(file: TFile): Promise<string | null> {
@@ -106,7 +108,7 @@ export class ObsidianDiskReconciler {
 			try {
 				const arrayBuffer = await this.app.vault.readBinary(file);
 				return uint8ArrayToBase64(new Uint8Array(arrayBuffer));
-			} catch (e) {
+			} catch {
 				return null;
 			}
 		}
@@ -185,7 +187,7 @@ export class ObsidianDiskReconciler {
 						if (!payload.isFolder && existing instanceof TFile) {
 							const diskContent = await this.readPhysicalFileContent(existing);
 							if (diskContent === (payload.content || '')) {
-							    this.eventBus.emit('RebalancePathUuid' as any, { remoteUuid: payload.uuid, path: targetPath });
+							    this.eventBus.emit('RebalancePathUuid', { remoteUuid: payload.uuid, path: targetPath });
 							    return;
 							}
 						}
@@ -203,7 +205,8 @@ export class ObsidianDiskReconciler {
 						}
 
 						if (isConflict) {
-							setTimeout(() => {
+							const setTimer = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
+							setTimer(() => {
 								this.eventBus.emit('LocalFileRenamed', {
 									oldPath: payload.path,
 									newPath: targetPath
@@ -274,23 +277,31 @@ export class ObsidianDiskReconciler {
 		}
 	}
 
-	private async resolveTargetConflict(payload: { uuid: string; oldPath: string; newPath: string }, targetExists: any): Promise<{ targetPath: string; rebalanced: boolean }> {
+	private async resolveTargetConflict(payload: { uuid: string; oldPath: string; newPath: string }, targetExists: unknown): Promise<{ targetPath: string; rebalanced: boolean }> {
 		let targetPath = payload.newPath;
-		if (targetExists && targetExists.path !== payload.oldPath) {
-			if ((targetExists as any).stat?.size === 0) {
-				try { await this.app.vault.trash(targetExists, true); } catch (e) {}
+		if (targetExists && (targetExists as { path?: string }).path !== payload.oldPath) {
+			if ((targetExists as { stat?: { size?: number } }).stat?.size === 0) {
+				try {
+					if (targetExists instanceof TFile || targetExists instanceof TFolder) {
+						await this.app.fileManager.trashFile(targetExists);
+					}
+				} catch (e: unknown) {
+					// Ignore trash failure
+					void e;
+				}
 			} else {
 				const doc = await this.syncEngine.getOrCreateDoc(payload.uuid);
 				const incomingContent = doc.getText('markdown').toString();
 				const diskContent = targetExists instanceof TFile ? await this.readPhysicalFileContent(targetExists) : null;
-                
+
 				if (diskContent === incomingContent) {
-					this.eventBus.emit('RebalancePathUuid' as any, { remoteUuid: payload.uuid, path: targetPath });
+					this.eventBus.emit('RebalancePathUuid', { remoteUuid: payload.uuid, path: targetPath });
 					return { targetPath, rebalanced: true };
 				}
 
 				targetPath = this.resolveConflictPath(targetPath);
-				setTimeout(() => {
+				const setTimer = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
+				setTimer(() => {
 					this.eventBus.emit('LocalFileRenamed', {
 						oldPath: payload.newPath,
 						newPath: targetPath
@@ -302,7 +313,6 @@ export class ObsidianDiskReconciler {
 	}
 
 	private async handleCrdtNodeMoved(payload: { uuid: string; oldPath: string; newPath: string }): Promise<void> {
-		console.log(`[Reconciler Inbound Move Received] UUID: ${payload.uuid} | "${payload.oldPath}" -> "${payload.newPath}"`);
 		return this.diskQueue.add(async () => {
 			const oldMutex = this.getFileMutex(payload.oldPath);
 			const newMutex = this.getFileMutex(payload.newPath);
@@ -350,7 +360,8 @@ export class ObsidianDiskReconciler {
 						} catch (e) {
 							console.error('[ObsidianDiskReconciler] Failed to rename file:', e);
 						} finally {
-							setTimeout(() => {
+							const setTimer = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
+							setTimer(() => {
 								for (const p of pathsToSuppress) ObsidianDiskReconciler.unsuppressPath(p, 20);
 							}, 20);
 						}
@@ -387,11 +398,7 @@ export class ObsidianDiskReconciler {
 
 					ObsidianDiskReconciler.suppressPath(payload.path);
 					try {
-						try {
-							await this.app.vault.trash(file, true);
-						} catch (e) {
-							await this.app.vault.trash(file, false);
-						}
+						await this.app.fileManager.trashFile(file);
 					} catch (e) {
 						console.error('[ObsidianDiskReconciler] Failed to trash file:', e);
 					} finally {
@@ -410,12 +417,12 @@ export class ObsidianDiskReconciler {
 			try {
 				await mutex.runExclusive(async () => {
 					let file = this.app.vault.getAbstractFileByPath(payload.path);
-					if (!file && typeof (this.app.vault as any).getFiles === 'function') {
-						file = this.app.vault.getFiles().find((f: any) => f.path === payload.path) || null;
+					if (!file && typeof this.app.vault.getFiles === 'function') {
+						file = this.app.vault.getFiles().find(f => f.path === payload.path) || null;
 					}
 
-					const configDir = this.app.vault.configDir || '.obsidian';
-					if (payload.path.startsWith(configDir)) {
+					const configDir = this.app.vault.configDir;
+					if (configDir && payload.path.startsWith(configDir)) {
 						try {
 							let currentDiskContent = '';
 							if (await this.app.vault.adapter.exists(payload.path)) {
@@ -465,16 +472,18 @@ export class ObsidianDiskReconciler {
 	private triggerHotReload(configFilePath: string): void {
 		try {
 			if (configFilePath.includes('/themes/') || configFilePath.endsWith('appearance.json')) {
-				if (typeof (this.app as any).customCss?.loadManifests === 'function') {
-					(this.app as any).customCss.loadManifests();
+				const customCss = (this.app as unknown as { customCss?: { loadManifests?: () => void } }).customCss;
+				if (typeof customCss?.loadManifests === 'function') {
+					customCss.loadManifests();
 				}
 			} else if (configFilePath.endsWith('data.json')) {
 				const match = configFilePath.match(/plugins\/([^/]+)\/data\.json$/);
 				if (match && match[1]) {
 					const pluginId = match[1];
-					const plugin = (this.app as any).plugins?.getPlugin(pluginId);
+					const plugins = (this.app as unknown as { plugins?: { getPlugin?: (id: string) => { loadData?: () => Promise<unknown> } | undefined } }).plugins;
+					const plugin = plugins?.getPlugin?.(pluginId);
 					if (plugin && typeof plugin.loadData === 'function') {
-						plugin.loadData().catch(console.error);
+						plugin.loadData().catch(() => {});
 					}
 				}
 			}

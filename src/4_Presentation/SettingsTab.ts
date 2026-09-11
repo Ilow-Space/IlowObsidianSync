@@ -1,27 +1,43 @@
-﻿import { App, PluginSettingTab, Setting, Notice } from 'obsidian';
-import MyPlugin from './Plugin';
+import { App, PluginSettingTab, Setting, Notice, SettingDefinitionItem } from 'obsidian';
+import IlowSyncPlugin from './Plugin';
 import { QrDisplayModal } from './Modals/QrDisplayModal';
 import { QrScannerModal } from './Modals/QrScannerModal';
+import { ConfirmationModal } from './Modals/ConfirmationModal';
 
 export class SettingsTab extends PluginSettingTab {
-	constructor(app: App, private plugin: MyPlugin) {
+	private tempPassword = '';
+
+	constructor(app: App, private plugin: IlowSyncPlugin) {
 		super(app, plugin);
 	}
 
-	display(): void {
-		const { containerEl } = this;
+	override getSettingDefinitions(): SettingDefinitionItem[] {
+		return [];
+	}
+
+	override display(): void {
+		this.render(this.containerEl);
+	}
+
+	private refreshTab(): void {
+		const tab = this as unknown as { update?: () => void };
+		if (typeof tab.update === 'function') {
+			tab.update();
+		} else {
+			this.render(this.containerEl);
+		}
+	}
+
+	render(containerEl: HTMLElement): void {
 		containerEl.empty();
 
-		containerEl.createEl('h2', { text: 'Ilow Sync Settings' });
+		new Setting(containerEl).setName('Connection & Security').setHeading();
 
-		const nativeSyncEnabled = (this.app as any).internalPlugins?.plugins?.sync?.enabled;
+		const internalPlugins = (this.app as unknown as { internalPlugins?: { plugins?: { sync?: { enabled?: boolean } } } }).internalPlugins;
+		const nativeSyncEnabled = internalPlugins?.plugins?.sync?.enabled;
 		if (nativeSyncEnabled) {
 			const warning = containerEl.createDiv({ cls: 'ilow-sync-warning' });
-			warning.style.backgroundColor = 'var(--background-modifier-error)';
-			warning.style.padding = '10px';
-			warning.style.borderRadius = '5px';
-			warning.style.marginBottom = '15px';
-			warning.createEl('h3', { text: '⚠️ Conflict Warning', cls: 'ilow-sync-warning-title' });
+			warning.createDiv({ text: '⚠️ Conflict Warning', cls: 'ilow-sync-warning-title' });
 			warning.createEl('p', { text: 'For Ilow Sync to function correctly and avoid data corruption, please disable the official Obsidian Sync plugin in your Core Plugins settings.' });
 		}
 
@@ -86,14 +102,20 @@ export class SettingsTab extends PluginSettingTab {
 			.addButton((btn) =>
 				btn
 					.setButtonText('Regenerate Salt')
-					.setWarning()
-					.onClick(async () => {
-						if (confirm('Warning: Regenerating the salt will change your encryption key. You will lose access to any previously encrypted data in the remote database unless they are re-encrypted.')) {
-							this.plugin.settings.salt = this.plugin.cryptoService.generateSalt();
-							await this.plugin.saveSettings();
-							this.display();
-							new Notice('New salt generated! Please set your Master Password to derive the new key.');
-						}
+					.setDestructive()
+					.onClick(() => {
+						new ConfirmationModal(
+							this.app,
+							'Regenerate Salt',
+							'Warning: Regenerating the salt will change your encryption key. You will lose access to any previously encrypted data in the remote database unless they are re-encrypted.',
+							'Regenerate Salt',
+							async () => {
+								this.plugin.settings.salt = this.plugin.cryptoService.generateSalt();
+								await this.plugin.saveSettings();
+								this.refreshTab();
+								new Notice('New salt generated! Please set your Master Password to derive the new key.');
+							}
+						).open();
 					})
 			);
 
@@ -105,33 +127,33 @@ export class SettingsTab extends PluginSettingTab {
 				text
 					.setPlaceholder('Enter secure password')
 					.setDisabled(this.plugin.isKeyDerived)
-					.onChange(async (value) => {
-						(this as any).tempPassword = value;
+					.onChange((value) => {
+						this.tempPassword = value;
 					})
 			)
 			.addButton((btn) => {
 				if (this.plugin.isKeyDerived) {
 					btn.setButtonText('Unload Key')
-						.setWarning()
+						.setDestructive()
 						.onClick(async () => {
 							await this.plugin.unloadKey();
-							this.display();
+							this.refreshTab();
 							new Notice('Master key unloaded from memory and disk.');
 						});
 				} else {
 					btn.setButtonText('Derive Key')
 						.setCta()
 						.onClick(async () => {
-							const pwd = (this as any).tempPassword;
+							const pwd = this.tempPassword;
 							if (!pwd) {
 								new Notice('Please enter a password first');
 								return;
 							}
 							try {
 								await this.plugin.deriveKeyFromPassword(pwd);
-								this.display();
+								this.refreshTab();
 								new Notice('Key derived successfully! Sync is now active.');
-							} catch (err: unknown) {
+							} catch {
 								new Notice('Failed to derive key. See console.');
 							}
 						});
@@ -181,7 +203,7 @@ export class SettingsTab extends PluginSettingTab {
 					})
 			);
 
-		containerEl.createEl('h3', { text: 'Extension & Theme Sync Settings' });
+		new Setting(containerEl).setName('Extension & Theme Sync').setHeading();
 
 		// Sync Plugin Settings
 		new Setting(containerEl)
@@ -190,9 +212,9 @@ export class SettingsTab extends PluginSettingTab {
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.syncPluginSettings)
-					.onChange(async (value) => {
+					.onChange((value) => {
 						this.plugin.settings.syncPluginSettings = value;
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 					})
 			);
 
@@ -209,10 +231,11 @@ export class SettingsTab extends PluginSettingTab {
 					})
 			);
 
+		const themesDir = `${this.app.vault.configDir}/themes/`;
 		// Sync Themes
 		new Setting(containerEl)
 			.setName('Sync Themes')
-			.setDesc('Synchronize custom installed themes (.obsidian/themes/).')
+			.setDesc(`Synchronize custom installed themes (${themesDir}).`)
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.syncThemes)
@@ -235,7 +258,7 @@ export class SettingsTab extends PluginSettingTab {
 					})
 			);
 
-		containerEl.createEl('h3', { text: 'Multi-Device Onboarding' });
+		new Setting(containerEl).setName('Multi-Device Onboarding').setHeading();
 
 		// Generate Setup QR Code
 		new Setting(containerEl)
@@ -265,25 +288,26 @@ export class SettingsTab extends PluginSettingTab {
 			.addButton((btn) =>
 				btn.setButtonText('Scan QR Code')
 					.onClick(() => {
-						const modal = new QrScannerModal(this.app, async (text) => {
+						const modal = new QrScannerModal(this.app, (text) => {
 							if (!text.startsWith('ilow-sync://')) {
 								new Notice('Invalid QR code format.');
 								return;
 							}
 							try {
 								const base64 = text.replace('ilow-sync://', '');
-								const parsed = JSON.parse(atob(base64));
+								const parsed = JSON.parse(atob(base64)) as { serverUrl?: string; apiKey?: string; salt?: string };
 								if (parsed.serverUrl && parsed.apiKey !== undefined && parsed.salt) {
 									this.plugin.settings.serverUrl = parsed.serverUrl;
 									this.plugin.settings.apiKey = parsed.apiKey;
 									this.plugin.settings.salt = parsed.salt;
-									await this.plugin.saveSettings();
-									this.display();
-									new Notice('Network settings loaded! Enter your Master Password to derive your key.');
+									void this.plugin.saveSettings().then(() => {
+										this.refreshTab();
+										new Notice('Network settings loaded! Enter your Master Password to derive your key.');
+									});
 								} else {
 									new Notice('QR payload is missing required configuration parameters.');
 								}
-							} catch (err: unknown) {
+							} catch {
 								new Notice('Failed to parse QR code setup configuration.');
 							}
 						});
@@ -291,7 +315,7 @@ export class SettingsTab extends PluginSettingTab {
 					})
 			);
 
-		containerEl.createEl('h3', { text: 'Maintenance & Danger Zone' });
+		new Setting(containerEl).setName('Maintenance & Danger Zone').setHeading();
 
 		// Hard Reset Local State
 		new Setting(containerEl)
@@ -300,26 +324,37 @@ export class SettingsTab extends PluginSettingTab {
 			.addButton((btn) =>
 				btn
 					.setButtonText('Hard Reset Local State')
-					.setWarning()
-					.onClick(async () => {
-						if (confirm('Are you sure you want to hard reset local state? This will wipe your local CRDT database cache and re-download all documents from the server.')) {
-							try {
-								if (this.plugin.getSyncOrchestrator()) {
-									this.plugin.getSyncOrchestrator()?.stopAll();
-								}
-								await window.indexedDB.deleteDatabase('ilow-snapshot-store-db');
-								new Notice('Local state hard reset successful! Initiating fresh re-sync...');
+					.setDestructive()
+					.onClick(() => {
+						new ConfirmationModal(
+							this.app,
+							'Hard Reset Local State',
+							'Are you sure you want to hard reset local state? This will wipe your local CRDT database cache and re-download all documents from the server.',
+							'Hard Reset Local State',
+							async () => {
+								try {
+									if (this.plugin.getSyncOrchestrator()) {
+										this.plugin.getSyncOrchestrator()?.stopAll();
+									}
+									await new Promise<void>((resolve, reject) => {
+										const req = window.indexedDB.deleteDatabase('ilow-snapshot-store-db');
+										req.onsuccess = () => resolve();
+										req.onerror = () => reject(req.error || new Error('Failed to delete database'));
+										req.onblocked = () => resolve();
+									});
+									new Notice('Local state hard reset successful! Initiating fresh re-sync...');
 
-								if (this.plugin.isKeyDerived && this.plugin.getSyncOrchestrator()) {
-									await (this.plugin as any).treeIndexManager?.initialize();
-									await this.plugin.getSyncOrchestrator()?.runFullSync();
-									new Notice('Local re-sync completed successfully!');
+									if (this.plugin.isKeyDerived && this.plugin.getSyncOrchestrator()) {
+										await this.plugin.getVfsController()?.initialize();
+										await this.plugin.getSyncOrchestrator()?.runFullSync();
+										new Notice('Local re-sync completed successfully!');
+									}
+								} catch (err: unknown) {
+									const msg = err instanceof Error ? err.message : String(err);
+									new Notice(`Hard reset failed: ${msg}`);
 								}
-							} catch (err: unknown) {
-								const msg = err instanceof Error ? err.message : String(err);
-								new Notice(`Hard reset failed: ${msg}`);
 							}
-						}
+						).open();
 					})
 			);
 
@@ -330,27 +365,33 @@ export class SettingsTab extends PluginSettingTab {
 			.addButton((btn) =>
 				btn
 					.setButtonText('Purge Server Data')
-					.setWarning()
-					.onClick(async () => {
+					.setDestructive()
+					.onClick(() => {
 						const token = this.plugin.settings.adminToken;
 						if (!token) {
 							new Notice('Please configure your Admin API Token first!');
 							return;
 						}
-						if (confirm('WARNING: Are you absolutely sure you want to purge all data on the remote server? This action will permanently delete all snapshots and updates and cannot be undone!')) {
-							try {
-								const store = this.plugin.getRemoteStore();
-								if (!store) {
-									new Notice('Connection info incomplete');
-									return;
+						new ConfirmationModal(
+							this.app,
+							'Purge Server Data',
+							'WARNING: Are you absolutely sure you want to purge all data on the remote server? This action will permanently delete all snapshots and updates and cannot be undone!',
+							'Purge Server Data',
+							async () => {
+								try {
+									const store = this.plugin.getRemoteStore();
+									if (!store) {
+										new Notice('Connection info incomplete');
+										return;
+									}
+									await store.truncateServer(token);
+									new Notice('Remote server data successfully purged! The server is now at a clean slate.');
+								} catch (err: unknown) {
+									const msg = err instanceof Error ? err.message : String(err);
+									new Notice(`Purge failed: ${msg}`);
 								}
-								await store.truncateServer(token);
-								new Notice('Remote server data successfully purged! The server is now at a clean slate.');
-							} catch (err: unknown) {
-								const msg = err instanceof Error ? err.message : String(err);
-								new Notice(`Purge failed: ${msg}`);
 							}
-						}
+						).open();
 					})
 			);
 	}

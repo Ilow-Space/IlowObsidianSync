@@ -1,5 +1,5 @@
 import { ItemView, WorkspaceLeaf, setIcon } from 'obsidian';
-import MyPlugin from '../Plugin';
+import IlowSyncPlugin from '../Plugin';
 import { ServerTelemetry } from '@domain/Interfaces/IRemoteStore';
 
 export const SYNC_SIDEBAR_VIEW_TYPE = 'ilow-sync-sidebar-view';
@@ -7,7 +7,7 @@ export const SYNC_SIDEBAR_VIEW_TYPE = 'ilow-sync-sidebar-view';
 export class SyncSidebarView extends ItemView {
 	private telemetry: ServerTelemetry | null = null;
 
-	constructor(leaf: WorkspaceLeaf, private plugin: MyPlugin) {
+	constructor(leaf: WorkspaceLeaf, private plugin: IlowSyncPlugin) {
 		super(leaf);
 	}
 
@@ -18,8 +18,8 @@ export class SyncSidebarView extends ItemView {
 	async onOpen() {
 		this.render();
 		this.registerInterval(window.setInterval(() => this.render(), 1000));
-		this.registerInterval(window.setInterval(() => this.fetchTelemetry(), 5000));
-		this.fetchTelemetry();
+		this.registerInterval(window.setInterval(() => { void this.fetchTelemetry(); }, 5000));
+		void this.fetchTelemetry();
 	}
 
 	private async fetchTelemetry() {
@@ -56,31 +56,15 @@ export class SyncSidebarView extends ItemView {
 		if (isConnected && this.telemetry) {
 			container.createEl('h4', { text: 'Server Telemetry', cls: 'nav-folder-title' });
             
-			const statsGrid = container.createDiv();
-			statsGrid.style.display = 'grid';
-			statsGrid.style.gridTemplateColumns = '1fr 1fr';
-			statsGrid.style.gap = '8px';
-			statsGrid.style.padding = '8px';
-			statsGrid.style.marginBottom = '12px';
-			statsGrid.style.border = '1px solid var(--background-modifier-border)';
-			statsGrid.style.borderRadius = 'var(--radius-s)';
-			statsGrid.style.backgroundColor = 'var(--background-secondary)';
+			const statsGrid = container.createDiv({ cls: 'ilow-sync-stats-grid' });
 
 			const createStat = (label: string, value: string, color?: string) => {
-				const statBox = statsGrid.createDiv();
-				statBox.style.display = 'flex';
-				statBox.style.flexDirection = 'column';
+				const statBox = statsGrid.createDiv({ cls: 'ilow-sync-stat-box' });
                 
-				const labelEl = statBox.createSpan({ text: label });
-				labelEl.style.fontSize = 'var(--font-ui-smaller)';
-				labelEl.style.color = 'var(--text-muted)';
-				labelEl.style.textTransform = 'uppercase';
-				labelEl.style.letterSpacing = '0.05em';
+				statBox.createSpan({ cls: 'ilow-sync-stat-label', text: label });
                 
-				const valEl = statBox.createSpan({ text: value });
-				valEl.style.fontWeight = 'var(--font-bold)';
-				valEl.style.fontSize = 'var(--font-ui-medium)';
-				if (color) valEl.style.color = color;
+				const valEl = statBox.createSpan({ cls: 'ilow-sync-stat-val', text: value });
+				if (color) valEl.setCssStyles({ color });
 			};
 
 			const healthColor = this.telemetry.systemHealth === 'healthy' ? 'var(--text-success)' :
@@ -107,18 +91,10 @@ export class SyncSidebarView extends ItemView {
             
 			if (activePaths.length === 0) {
 				const emptyEl = queueContainer.createDiv({ cls: 'nav-file' });
-				emptyEl.createDiv({ cls: 'nav-file-title', text: 'All files are up to date.' }).style.color = 'var(--text-muted)';
+				emptyEl.createDiv({ cls: 'nav-file-title ilow-sync-stat-label', text: 'All files are up to date.' });
 			} else {
 				for (const path of activePaths) {
-					const itemEl = queueContainer.createDiv({ cls: 'nav-file mod-clickable' });
-                    
-					itemEl.style.border = '1px solid var(--background-modifier-border)';
-					itemEl.style.borderRadius = 'var(--radius-s)';
-					itemEl.style.padding = '6px 8px';
-					itemEl.style.marginBottom = '6px';
-					itemEl.style.display = 'flex';
-					itemEl.style.alignItems = 'center';
-					itemEl.style.gap = '8px';
+					const itemEl = queueContainer.createDiv({ cls: 'ilow-sync-queue-item mod-clickable' });
 
 					const iconEl = itemEl.createDiv({ cls: 'nav-file-icon' });
 					setIcon(iconEl, 'document');
@@ -127,30 +103,16 @@ export class SyncSidebarView extends ItemView {
 					const fileName = pathParts.pop() || path;
 					const dirName = pathParts.join('/');
 
-					const textContainer = itemEl.createDiv();
-					textContainer.style.display = 'flex';
-					textContainer.style.flexDirection = 'column';
-					textContainer.style.overflow = 'hidden';
+					const textContainer = itemEl.createDiv({ cls: 'ilow-sync-queue-text' });
 
-					const nameEl = textContainer.createDiv({ text: fileName });
-					nameEl.style.color = 'var(--text-normal)';
-					nameEl.style.fontWeight = 'var(--font-medium)';
-					nameEl.style.whiteSpace = 'nowrap';
-					nameEl.style.textOverflow = 'ellipsis';
-					nameEl.style.overflow = 'hidden';
+					textContainer.createDiv({ cls: 'ilow-sync-queue-name', text: fileName });
 
 					if (dirName) {
-						const pathEl = textContainer.createDiv({ text: dirName });
-						pathEl.style.color = 'var(--text-muted)';
-						pathEl.style.fontSize = 'var(--font-ui-smaller)';
-						pathEl.style.fontFamily = 'var(--font-monospace)';
-						pathEl.style.whiteSpace = 'nowrap';
-						pathEl.style.textOverflow = 'ellipsis';
-						pathEl.style.overflow = 'hidden';
+						textContainer.createDiv({ cls: 'ilow-sync-queue-path', text: dirName });
 					}
-                    
+
 					itemEl.onClickEvent(() => {
-						this.app.workspace.openLinkText(path, '', false);
+						void this.app.workspace.openLinkText(path, '', false);
 					});
 				}
 			}

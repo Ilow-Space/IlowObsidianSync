@@ -13,13 +13,13 @@ export class ObsidianNoteRepository implements INoteRepository {
 	) {}
 
 	public async readNote(path: string): Promise<string | null> {
-		const configDir = this.app.vault.configDir || '.obsidian';
-		if (path.startsWith(configDir)) {
+		const configDir = this.app.vault.configDir;
+		if (configDir && path.startsWith(configDir)) {
 			try {
 				if (await this.app.vault.adapter.exists(path)) {
 					return await this.app.vault.adapter.read(path);
 				}
-			} catch (e) {
+			} catch {
 				return null;
 			}
 			return null;
@@ -32,7 +32,9 @@ export class ObsidianNoteRepository implements INoteRepository {
 					const arrayBuffer = await this.app.vault.readBinary(file);
 					const bytes = new Uint8Array(arrayBuffer);
 					return uint8ArrayToBase64(bytes);
-				} catch (e) {}
+				} catch {
+					// Suppress read binary error
+				}
 			} else {
 				return await this.app.vault.read(file);
 			}
@@ -45,7 +47,7 @@ export class ObsidianNoteRepository implements INoteRepository {
 					const bytes = new Uint8Array(arrayBuffer);
 					return uint8ArrayToBase64(bytes);
 				}
-			} catch (e) {
+			} catch {
 				return null;
 			}
 		}
@@ -54,8 +56,8 @@ export class ObsidianNoteRepository implements INoteRepository {
 	}
 
 	public async writeNote(path: string, content: string): Promise<void> {
-		const configDir = this.app.vault.configDir || '.obsidian';
-		if (path.startsWith(configDir)) {
+		const configDir = this.app.vault.configDir;
+		if (configDir && path.startsWith(configDir)) {
 			const parts = path.split('/');
 			if (parts.length > 1) {
 				const parentFolder = parts.slice(0, -1).join('/');
@@ -75,38 +77,44 @@ export class ObsidianNoteRepository implements INoteRepository {
 		}
 
 		const file = this.app.vault.getAbstractFileByPath(path);
-		// const isBinary = isBinaryPath(path);
-
 		if (file instanceof TFile) {
-			if (isBinary && binaryBuffer) {
-				await this.app.vault.modifyBinary(file, binaryBuffer);
-			} else {
-				await this.app.vault.modify(file, content);
-			}
+			await this.updateExistingFile(file, isBinary, binaryBuffer, content);
 		} else {
-			const parts = path.split('/');
-			if (parts.length > 1) {
-				const folderParts = parts.slice(0, -1);
-				let current = '';
-				for (const part of folderParts) {
-					current = current ? `${current}/${part}` : part;
-					const folder = this.app.vault.getAbstractFileByPath(current);
-					if (!folder) {
-						await this.app.vault.createFolder(current);
-					}
+			await this.createNewFileWithFolders(path, isBinary, binaryBuffer, content);
+		}
+	}
+
+	private async updateExistingFile(file: TFile, isBinary: boolean, binaryBuffer: ArrayBuffer | null, content: string): Promise<void> {
+		if (isBinary && binaryBuffer) {
+			await this.app.vault.modifyBinary(file, binaryBuffer);
+		} else {
+			await this.app.vault.modify(file, content);
+		}
+	}
+
+	private async createNewFileWithFolders(path: string, isBinary: boolean, binaryBuffer: ArrayBuffer | null, content: string): Promise<void> {
+		const parts = path.split('/');
+		if (parts.length > 1) {
+			const folderParts = parts.slice(0, -1);
+			let current = '';
+			for (const part of folderParts) {
+				current = current ? `${current}/${part}` : part;
+				const folder = this.app.vault.getAbstractFileByPath(current);
+				if (!folder) {
+					await this.app.vault.createFolder(current);
 				}
 			}
-			if (isBinary && binaryBuffer) {
-				await this.app.vault.createBinary(path, binaryBuffer);
-			} else {
-				await this.app.vault.create(path, content);
-			}
+		}
+		if (isBinary && binaryBuffer) {
+			await this.app.vault.createBinary(path, binaryBuffer);
+		} else {
+			await this.app.vault.create(path, content);
 		}
 	}
 
 	public async listAllNotes(): Promise<string[]> {
 		const allDiskFiles = new Set<string>();
-		const configDir = this.app.vault.configDir || '.obsidian';
+		const configDir = this.app.vault.configDir;
 
 		try {
 			const walkAdapter = async (dir: string) => {

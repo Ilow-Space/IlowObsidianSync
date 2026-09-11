@@ -47,7 +47,7 @@ export function base64ToUint8Array(base64: string): Uint8Array {
 			bytes[i] = binaryString.charCodeAt(i);
 		}
 		return bytes;
-	} catch (e) {
+	} catch {
 		return new TextEncoder().encode(base64);
 	}
 }

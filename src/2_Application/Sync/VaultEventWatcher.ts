@@ -8,9 +8,9 @@ import { isAllowedConfigPath } from '@domain/Utils/ConfigPathFilter';
 import { isBinaryPath, uint8ArrayToBase64 } from '@domain/Utils/BinaryUtils';
 
 export class VaultEventWatcher {
-	private activeListeners: Array<{ eventName: string; ref: any }> = [];
+	private activeListeners: Array<{ eventName: 'create' | 'rename' | 'delete' | 'modify'; ref: (...data: unknown[]) => unknown }> = [];
 	private orchestrator: NetworkOrchestrator | null = null;
-	private pollTimer: any = null;
+	private pollTimer: number | null = null;
 	private knownDiskFiles = new Map<string, string>();
 
 	constructor(
@@ -25,8 +25,8 @@ export class VaultEventWatcher {
 
 	private shouldIgnore(path: string): boolean {
 		if (ObsidianDiskReconciler.suppressedPaths.has(path)) return true;
-		if (this.orchestrator && (this.orchestrator as any).isSyncingFull) return true;
-		const configDir = this.app.vault.configDir || '.obsidian';
+		if (this.orchestrator && (this.orchestrator as unknown as { isSyncingFull?: boolean }).isSyncingFull) return true;
+		const configDir = this.app.vault.configDir;
 		if (!isAllowedConfigPath(path, configDir, this.settings)) return true;
 		return false;
 	}
@@ -38,14 +38,14 @@ export class VaultEventWatcher {
 					if (this.app.vault.adapter && await this.app.vault.adapter.exists(file.path)) {
 						let arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
 						if (arrayBuffer.byteLength === 0) {
-							await new Promise(r => setTimeout(r, 100));
+							await new Promise(r => window.setTimeout(r, 100));
 							arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
 						}
 						const bytes = new Uint8Array(arrayBuffer);
 						return uint8ArrayToBase64(bytes);
 					}
-				} catch (e) {
-					await new Promise(r => setTimeout(r, 150));
+				} catch {
+					await new Promise(r => window.setTimeout(r, 150));
 				}
 			}
 			return '';
@@ -54,13 +54,13 @@ export class VaultEventWatcher {
 	}
 
 	private async readFileContent(path: string): Promise<string | null> {
-		const configDir = this.app.vault.configDir || '.obsidian';
-		if (path.startsWith(configDir)) {
+		const configDir = this.app.vault.configDir;
+		if (configDir && path.startsWith(configDir)) {
 			try {
 				if (this.app.vault.adapter && await this.app.vault.adapter.exists(path)) {
 					return await this.app.vault.adapter.read(path);
 				}
-			} catch (e) {
+			} catch {
 				return null;
 			}
 			return null;
@@ -78,7 +78,7 @@ export class VaultEventWatcher {
 					const bytes = new Uint8Array(arrayBuffer);
 					return uint8ArrayToBase64(bytes);
 				}
-			} catch (e) {
+			} catch {
 				return null;
 			}
 		} else {
@@ -86,7 +86,7 @@ export class VaultEventWatcher {
 				if (this.app.vault.adapter && await this.app.vault.adapter.exists(path)) {
 					return await this.app.vault.adapter.read(path);
 				}
-			} catch (e) {
+			} catch {
 				return null;
 			}
 		}
@@ -96,7 +96,7 @@ export class VaultEventWatcher {
 
 	private async listAllDiskPaths(): Promise<string[]> {
 		const allDiskFiles = new Set<string>();
-		const configDir = this.app.vault.configDir || '.obsidian';
+		const configDir = this.app.vault.configDir;
 
 		try {
 			if (this.app.vault.adapter) {
@@ -117,7 +117,9 @@ export class VaultEventWatcher {
 				};
 				await walkAdapter('');
 			}
-		} catch (e) {}
+		} catch {
+			// Suppress adapter walking errors
+		}
 
 		if (typeof this.app.vault.getFiles === 'function') {
 			for (const file of this.app.vault.getFiles()) {
@@ -134,9 +136,9 @@ export class VaultEventWatcher {
 		const onCreate = this.app.vault.on('create', (file: TAbstractFile) => {
 			if (this.shouldIgnore(file.path)) return;
 
-			const isFolder = file instanceof TFolder || (file as any).children !== undefined;
+			const isFolder = file instanceof TFolder || (file as unknown as { children?: unknown }).children !== undefined;
 			if (file instanceof TFile) {
-				this.readTFileContent(file).then((content) => {
+				void this.readTFileContent(file).then((content) => {
 					if (this.shouldIgnore(file.path)) return;
 					this.knownDiskFiles.set(file.path, content);
 
@@ -186,7 +188,7 @@ export class VaultEventWatcher {
 
 			this.eventBus.emit('LocalFileDeleted', {
 				path: file.path,
-				uuid: (file as any).uuid
+				uuid: (file as unknown as { uuid?: string }).uuid
 			});
 		});
 
@@ -194,7 +196,7 @@ export class VaultEventWatcher {
 			if (this.shouldIgnore(file.path)) return;
 
 			if (file instanceof TFile) {
-				this.readTFileContent(file).then((content) => {
+				void this.readTFileContent(file).then((content) => {
 					if (this.shouldIgnore(file.path)) return;
 					this.knownDiskFiles.set(file.path, content);
 
@@ -207,22 +209,21 @@ export class VaultEventWatcher {
 		});
 
 		this.activeListeners.push(
-			{ eventName: 'create', ref: onCreate },
-			{ eventName: 'rename', ref: onRename },
-			{ eventName: 'delete', ref: onDelete },
-			{ eventName: 'modify', ref: onModify }
+			{ eventName: 'create', ref: onCreate as unknown as (...data: unknown[]) => unknown },
+			{ eventName: 'rename', ref: onRename as unknown as (...data: unknown[]) => unknown },
+			{ eventName: 'delete', ref: onDelete as unknown as (...data: unknown[]) => unknown },
+			{ eventName: 'modify', ref: onModify as unknown as (...data: unknown[]) => unknown }
 		);
 
 		this.pollVaultFiles().catch(() => {});
 
-		this.pollTimer = setInterval(() => {
+		this.pollTimer = window.setInterval(() => {
 			this.pollVaultFiles().catch(() => {});
 		}, 2000);
 	}
 
 	public async pollVaultFiles(): Promise<void> {
-		if (this.orchestrator && (this.orchestrator as any).isSyncingFull) return;
-		const configDir = this.app.vault.configDir || '.obsidian';
+		if (this.orchestrator && (this.orchestrator as unknown as { isSyncingFull?: boolean }).isSyncingFull) return;
 
 		try {
 			const diskPaths = await this.listAllDiskPaths();
@@ -261,16 +262,18 @@ export class VaultEventWatcher {
 					this.eventBus.emit('LocalFileModified', { path, content });
 				}
 			}
-		} catch (e) {}
+		} catch {
+			// Suppress polling errors
+		}
 	}
 
 	public destroy(): void {
 		if (this.pollTimer) {
-			clearInterval(this.pollTimer);
+			window.clearInterval(this.pollTimer);
 			this.pollTimer = null;
 		}
 		for (const listener of this.activeListeners) {
-			this.app.vault.off(listener.eventName as any, listener.ref);
+			this.app.vault.off(listener.eventName, listener.ref);
 		}
 		this.activeListeners = [];
 		this.knownDiskFiles.clear();

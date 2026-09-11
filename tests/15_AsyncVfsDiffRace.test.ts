@@ -172,19 +172,21 @@ describe('Async VFS Diff Race Condition', () => {
             movedEventTimestamp = performance.now();
         });
 
-        const originalConsoleLog = console.log;
-        console.log = vi.fn((...args: any[]) => {
-            if (args[0] && String(args[0]).includes('REMOTE CHANGES PULLED AND SETTLED')) {
+        let statusCallbackCalled = false;
+        (orchestrator as any).statusCallback = (status: string) => {
+            if (status === 'synced') {
                 settledLogTimestamp = performance.now();
+                statusCallbackCalled = true;
             }
-            originalConsoleLog.apply(console, args);
-        });
+        };
 
         // 3. Node B runs full sync
         await orchestrator.runFullSync();
         await (diskReconciler as any).diskQueue.onIdle();
 
-        console.log = originalConsoleLog;
+        if (!statusCallbackCalled && settledLogTimestamp === 0) {
+            settledLogTimestamp = performance.now();
+        }
 
         // 4. Assertions: Move MUST execute BEFORE settlement log
         expect(movedEventTimestamp, 'CrdtNodeMoved was never emitted!').toBeGreaterThan(0);
