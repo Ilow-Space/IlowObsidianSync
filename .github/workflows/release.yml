@@ -29,7 +29,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           jq --arg v "$VERSION" '.version = $v' manifest.json > tmp.json && mv tmp.json manifest.json
-          npm version "$VERSION" --no-git-tag-version
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Run unit tests
