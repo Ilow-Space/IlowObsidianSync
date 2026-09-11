@@ -1,6 +1,6 @@
 {
   "name": "ilow-sync",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "main": "dist/main.js",
   "scripts": {
     "dev": "vite build --watch --mode development",
