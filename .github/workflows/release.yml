@@ -48,6 +48,11 @@ jobs:
           cd backend
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ../ilow-backend
 
+      - name: Delete existing release for this version, if any
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete "${{ steps.version.outputs.version }}" --yes --cleanup-tag || true
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
