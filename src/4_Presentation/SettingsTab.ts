@@ -20,10 +20,11 @@ export class SettingsTab extends PluginSettingTab {
 	}
 
 	private refreshTab(): void {
-		if (typeof (this as unknown as { update?: () => void }).update === 'function') {
-			(this as unknown as { update: () => void }).update();
+		const tab = this as unknown as { update?: () => void };
+		if (typeof tab.update === 'function') {
+			tab.update();
 		} else {
-			this.display();
+			this.render(this.containerEl);
 		}
 	}
 
