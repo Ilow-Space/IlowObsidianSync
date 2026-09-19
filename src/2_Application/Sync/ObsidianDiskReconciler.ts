@@ -9,6 +9,7 @@ export class ObsidianDiskReconciler {
 	private fileLocks = new Map<string, Mutex>();
 	private diskQueue = new PQueue({ concurrency: 5 });
 	public static suppressedPaths = new Set<string>();
+	private static suppressionDepth = new Map<string, number>();
 
 	constructor(
 		private app: App,
@@ -24,12 +25,26 @@ export class ObsidianDiskReconciler {
 	}
 
 	public static suppressPath(path: string): void {
+		const depth = (ObsidianDiskReconciler.suppressionDepth.get(path) || 0) + 1;
+		ObsidianDiskReconciler.suppressionDepth.set(path, depth);
 		ObsidianDiskReconciler.suppressedPaths.add(path);
 	}
 
+	/**
+	 * Releases one suppression of `path`. The guard is refcounted: two writers can
+	 * hold the same path with different delays (safeWriteNote uses 1500ms, disk
+	 * reconciliation 20ms), and the short one expiring must not unguard the long
+	 * one -- that is how a remote write echoed back as a local edit.
+	 */
 	public static unsuppressPath(path: string, delayMs = 20): void {
 		const setTimer = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
 		setTimer(() => {
+			const depth = (ObsidianDiskReconciler.suppressionDepth.get(path) || 1) - 1;
+			if (depth > 0) {
+				ObsidianDiskReconciler.suppressionDepth.set(path, depth);
+				return;
+			}
+			ObsidianDiskReconciler.suppressionDepth.delete(path);
 			ObsidianDiskReconciler.suppressedPaths.delete(path);
 		}, delayMs);
 	}

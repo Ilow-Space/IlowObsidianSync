@@ -1,6 +1,8 @@
-import { IRemoteStore } from '@domain/Interfaces/IRemoteStore';
+import { IRemoteStore, SnapshotDetails } from '@domain/Interfaces/IRemoteStore';
 import { ICryptography } from '@domain/Interfaces/ICryptography';
+import { CRDTUpdate } from '@domain/Entities/Models';
 import { EncryptedBlob } from '@domain/ValueObjects/CryptoTypes';
+import { LoroDoc } from 'loro-crdt';
 import { LoroSyncEngine } from '@infrastructure/Crdt/LoroSyncEngine';
 import { INoteRepository } from '@domain/Interfaces/INoteRepository';
 import { LoroVfsController } from './LoroVfsController';
@@ -12,6 +14,15 @@ import pLimit from 'p-limit';
 import { isBinaryPath, base64ToUint8Array, uint8ArrayToBase64 } from '@domain/Utils/BinaryUtils';
 
 export type SyncStatus = 'synced' | 'syncing' | 'error' | 'offline';
+
+export type VaultIntegrityReport = {
+	/** Documents compared against the server. */
+	checked: number;
+	/** Paths whose local content does not match what the server holds. */
+	diverged: string[];
+	/** Paths the server could not be asked about. */
+	unreachable: string[];
+};
 
 export type LocalDeltaReadyForPush = {
 	documentId: string;
@@ -35,6 +46,15 @@ export class NetworkOrchestrator {
 	private hasConnectionError = false;
 	private lastErrorMessage = '';
 	private isSyncingFull = false;
+
+	/**
+	 * Documents whose last push failed. Their delta chain on the server is broken,
+	 * so the next push for them must be a full snapshot rather than a delta. Mirrors
+	 * the durable outbox table so the repair survives a restart.
+	 */
+	private unackedDocs = new Set<string>();
+	/** Documents a sweep could not fetch, so "synced" is not yet true. */
+	private pendingDocs = new Set<string>();
 
 	private activePath: string | null = null;
 	private activeDocumentId: string | null = null;
@@ -140,21 +160,31 @@ export class NetworkOrchestrator {
 	private async handleLocalDeltaReadyForPush(payload: LocalDeltaReadyForPush): Promise<void> {
 	    if (!this.activeKey) {
 	        this.pendingRetries.push(payload);
+	        await this.markUnacked(payload.documentId, payload.path ?? null);
 	        return;
 	    }
-	
+
 	    this.addActiveTask(payload.path || 'System Index');
-	
+
 	    try {
-	        const encryptedUpdate = await this.crypto.encrypt(payload.updateBinary, this.activeKey);
+	        // A document with a broken chain cannot be repaired by another delta:
+	        // the server is missing ops this delta depends on, and Loro would park
+	        // it unapplied. Send the whole state instead, which depends on nothing.
+	        let binary = payload.updateBinary;
+	        if (this.unackedDocs.has(payload.documentId)) {
+	            binary = await this.crdtEngine.exportSnapshot(payload.documentId);
+	        }
+
+	        const encryptedUpdate = await this.crypto.encrypt(binary, this.activeKey);
 	        let encryptedPath = null;
 	        if (payload.path) {
 	            const pathBytes = new TextEncoder().encode(payload.path);
 	            encryptedPath = await this.crypto.encrypt(pathBytes, this.activeKey);
 	        }
-		
+
 	        await this.remoteStore.pushUpdate(payload.documentId, encryptedUpdate, encryptedPath);
-	        this.hasConnectionError = false;
+	        await this.markAcked(payload.documentId);
+	        this.clearConnectionErrorIfSettled();
 
 	        if (payload.documentId !== 'shard-index') {
 	            const count = (this.fileUpdateCounters.get(payload.documentId) || 0) + 1;
@@ -169,9 +199,73 @@ export class NetworkOrchestrator {
 	        this.hasConnectionError = true;
 	        this.lastErrorMessage = 'Connection failed';
 	        this.pendingRetries.push(payload);
+	        await this.markUnacked(payload.documentId, payload.path ?? null);
 	    } finally {
 	        this.removeActiveTask(payload.path || 'System Index');
 	    }
+	}
+
+	private async markUnacked(documentId: string, path: string | null): Promise<void> {
+		this.unackedDocs.add(documentId);
+		try {
+			await this.crdtEngine.localStore.markUnacked(documentId, path);
+		} catch (err) {
+			console.error('[NetworkOrchestrator] Failed to persist outbox entry:', err);
+		}
+	}
+
+	private async markAcked(documentId: string): Promise<void> {
+		if (!this.unackedDocs.delete(documentId)) return;
+		try {
+			await this.crdtEngine.localStore.clearUnacked(documentId);
+		} catch (err) {
+			console.error('[NetworkOrchestrator] Failed to clear outbox entry:', err);
+		}
+	}
+
+	/**
+	 * Clears the error light only when nothing is still outstanding. A success on
+	 * one document says nothing about documents a previous sweep never fetched.
+	 */
+	private clearConnectionErrorIfSettled(): void {
+		if (this.pendingDocs.size === 0 && this.unackedDocs.size === 0) {
+			this.hasConnectionError = false;
+		}
+	}
+
+	/** Documents known to be out of sync with the server right now. */
+	public getPendingDocuments(): string[] {
+		return Array.from(new Set([...this.pendingDocs, ...this.unackedDocs]));
+	}
+
+	/** Resends full state for every document whose chain is known to be broken. */
+	private async flushOutbox(): Promise<void> {
+		let entries: Array<{ documentId: string; path: string | null }> = [];
+		try {
+			entries = await this.crdtEngine.localStore.listUnacked();
+		} catch (err) {
+			console.error('[NetworkOrchestrator] Failed to read outbox:', err);
+		}
+
+		for (const entry of entries) {
+			this.unackedDocs.add(entry.documentId);
+		}
+
+		for (const documentId of Array.from(this.unackedDocs)) {
+			if (!this.activeKey) return;
+			const stored = entries.find(e => e.documentId === documentId);
+			const path = stored?.path ?? this.vfsController.getPathForUuid(documentId) ?? null;
+			try {
+				const snapshot = await this.crdtEngine.exportSnapshot(documentId);
+				if (!snapshot || snapshot.length === 0) {
+					await this.markAcked(documentId);
+					continue;
+				}
+				await this.handleLocalDeltaReadyForPush({ documentId, updateBinary: snapshot, path });
+			} catch (err) {
+				console.error(`[NetworkOrchestrator] Failed to flush outbox entry ${documentId}:`, err);
+			}
+		}
 	}
 
 	private async safeWriteNote(path: string, content: string): Promise<void> {
@@ -333,17 +427,24 @@ export class NetworkOrchestrator {
 				}
 			}
 
-			let bulkUpdates: Record<string, number> = {};
+			// Repair any document whose chain broke, including in an earlier session.
+			await this.flushOutbox();
+
+			// A failed bulk fetch must not read as "every document is current".
+			// getBulkLatestUpdateIds returns null when the request did not succeed,
+			// and null means "unknown", which falls back to per-document checks.
+			let bulkUpdates: Record<string, number> | null = null;
 			try {
 				bulkUpdates = await this.remoteStore.getBulkLatestUpdateIds();
 			} catch (e: unknown) {
 				void e;
 				console.warn('[NetworkOrchestrator] Bulk fetch failed, falling back to sequential checks.');
 			}
+			const knownRemoteId = (documentId: string): number | undefined =>
+				bulkUpdates ? bulkUpdates[documentId] ?? 0 : undefined;
 
-			const indexLatest = bulkUpdates['shard-index'] || 0;
 			this.vfsController.prepareForRemoteVfsUpdate();
-			await this.pullDocument('shard-index', null, true, indexLatest);
+			await this.pullDocument('shard-index', null, true, knownRemoteId('shard-index'));
 
 			if (this.hasConnectionError) {
 				throw new Error(this.lastErrorMessage || 'Sync failed');
@@ -358,7 +459,7 @@ export class NetworkOrchestrator {
 				await this.diskReconciler.onIdle();
 			}
 
-			const indexRemoteLatest = bulkUpdates['shard-index'] || 0;
+			const indexRemoteLatest = knownRemoteId('shard-index') ?? 0;
 			const indexLastSync = this.fileLastSyncIds.get('shard-index') || 0;
 			if (indexLastSync === 0 && indexRemoteLatest === 0) {
 				const indexDoc = await this.crdtEngine.getOrCreateDoc('shard-index');
@@ -379,13 +480,18 @@ export class NetworkOrchestrator {
 				this.prePullBaselineContents.set(file.uuid, doc.getText('markdown').toString());
 			}
 
-			// Pull Text CRDTs
+			// Pull Text CRDTs.
+			//
+			// Every document is attempted and its outcome recorded. The previous
+			// shared abort flag meant one failure silently cancelled every document
+			// that had not started yet, leaving a partially pulled vault that
+			// nothing tracked and nothing retried.
+			this.pendingDocs.clear();
 			const limit = pLimit(20);
 			const pullPromises = textFiles.map(file =>
 				limit(async () => {
-					if (this.hasConnectionError) return;
-					const latestRemoteId = bulkUpdates[file.uuid] || 0;
-					await this.pullDocument(file.uuid, file.path, true, latestRemoteId);
+					const pulled = await this.pullDocument(file.uuid, file.path, true, knownRemoteId(file.uuid));
+					if (!pulled) this.pendingDocs.add(file.uuid);
 				})
 			);
 			await Promise.all(pullPromises);
@@ -436,22 +542,30 @@ export class NetworkOrchestrator {
 				this.prePullBaselineContents.set(file.uuid, doc.getText('markdown').toString());
 			}
 
-			await this.ingestLocalOfflineNotes(bulkUpdates);
+			await this.ingestLocalOfflineNotes(bulkUpdates ?? {});
 
 			if (this.diskReconciler) {
 				await this.diskReconciler.onIdle();
 			}
 
-			try {
-				const activeHashes = this.vfsController.getActiveBlobHashes();
-				if (typeof this.remoteStore.uploadBlobManifest === 'function') {
-					await this.remoteStore.uploadBlobManifest(activeHashes);
+			// The server treats this list as the set of blobs worth keeping, so
+			// publishing it from an incomplete view asks it to delete attachments
+			// this device simply failed to learn about. Only a clean sweep may.
+			const sweepWasComplete = this.pendingDocs.size === 0 && !this.hasConnectionError;
+			if (sweepWasComplete) {
+				try {
+					const activeHashes = this.vfsController.getActiveBlobHashes();
+					if (typeof this.remoteStore.uploadBlobManifest === 'function') {
+						await this.remoteStore.uploadBlobManifest(activeHashes);
+					}
+				} catch (manifestErr) {
+					console.warn('[NetworkOrchestrator] Failed to upload active blob manifest:', manifestErr);
 				}
-			} catch (manifestErr) {
-				console.warn('[NetworkOrchestrator] Failed to upload active blob manifest:', manifestErr);
+			} else {
+				console.warn(`[NetworkOrchestrator] Skipping blob manifest upload: ${this.pendingDocs.size} document(s) unresolved.`);
 			}
 
-			this.isInitialized = true;
+			this.isInitialized = sweepWasComplete;
 		} catch (error) {
 			console.error('[NetworkOrchestrator] Sync failed:', error);
 			this.hasConnectionError = true;
@@ -555,22 +669,31 @@ export class NetworkOrchestrator {
 		}
 	}
 
-	public async pullDocument(documentId: string, path: string | null = null, isSilent: boolean = false, knownLatestRemoteId?: number): Promise<void> {
-		if (!this.activeKey) return;
+	/**
+	 * Fetches a document. Returns false when the document could not be brought up
+	 * to date, so callers can record it as outstanding rather than assume success.
+	 */
+	public async pullDocument(documentId: string, path: string | null = null, isSilent: boolean = false, knownLatestRemoteId?: number): Promise<boolean> {
+		if (!this.activeKey) return false;
 
 		const lastId = this.fileLastSyncIds.get(documentId) || 0;
 
-		if (knownLatestRemoteId !== undefined && lastId > 0) {
-			if (knownLatestRemoteId <= lastId) return;
+		// A bulk id of 0 for a document we have already synced past is impossible:
+		// ids only grow. It means the bulk response was wrong or incomplete, so fall
+		// back to asking about this document directly instead of skipping it.
+		const bulkIdIsTrustworthy = knownLatestRemoteId !== undefined && !(knownLatestRemoteId === 0 && lastId > 0);
+
+		if (bulkIdIsTrustworthy && lastId > 0) {
+			if ((knownLatestRemoteId as number) <= lastId) return true;
 		} else if (lastId > 0) {
 			try {
 				const latestRemoteId = await this.remoteStore.getLatestUpdateId(documentId);
-				if (latestRemoteId <= lastId) return;
+				if (latestRemoteId <= lastId) return true;
 			} catch {
 				this.hasConnectionError = true;
 				this.lastErrorMessage = 'Connection failed';
 				this.triggerStatusUpdate();
-				return;
+				return false;
 			}
 		}
 
@@ -597,7 +720,14 @@ export class NetworkOrchestrator {
 			} catch (err: unknown) {
 				this.hasConnectionError = true;
 				this.lastErrorMessage = err instanceof Error ? err.message : 'Connection failed';
-				return;
+				return false;
+			}
+
+			// A tombstone still carries its pre-delete base state. Merging it back
+			// into the local CRDT is what lets a deleted note reappear later.
+			if (details?.isDeleted) {
+				this.fileLastSyncIds.delete(documentId);
+				return true;
 			}
 
 			await this.orchestratorMutex.runExclusive(async () => {
@@ -638,8 +768,11 @@ export class NetworkOrchestrator {
 				}
 
 				this.lastPingMs = Math.round(performance.now() - start);
-				this.hasConnectionError = false;
+				this.pendingDocs.delete(documentId);
+				this.clearConnectionErrorIfSettled();
 			});
+
+			return true;
 		} finally {
 			if (documentId !== this.activeDocumentId && documentId !== 'shard-index') {
 				this.crdtEngine.removeDoc(documentId);
@@ -677,6 +810,8 @@ export class NetworkOrchestrator {
 		this.fileLastSyncIds.clear();
 		this.fileUpdateCounters.clear();
 		this.pendingRetries = [];
+		// unackedDocs is deliberately NOT cleared: it mirrors the durable outbox,
+		// and dropping it here is what used to lose an in-flight edit on unload.
 
 		this.activeTasks.clear();
 		this.hasConnectionError = false;
@@ -686,7 +821,18 @@ export class NetworkOrchestrator {
 	}
 
 	public async forceSyncAndCompact(documentId: string): Promise<void> {
-	    await this.pullDocument(documentId);
+	    // Compaction replaces the server's base state and deletes the update rows it
+	    // claims to have merged. Doing that from a document we failed to refresh
+	    // destroys whatever other devices wrote that this one never saw.
+	    const refreshed = await this.pullDocument(documentId);
+	    if (!refreshed) {
+	        console.warn(`[NetworkOrchestrator] Skipping compaction of ${documentId}: refresh failed.`);
+	        return;
+	    }
+	    if (this.unackedDocs.has(documentId)) {
+	        console.warn(`[NetworkOrchestrator] Skipping compaction of ${documentId}: local changes are unacknowledged.`);
+	        return;
+	    }
 	    if (!this.activeKey) return;
 	    const doc = await this.crdtEngine.getOrCreateDoc(documentId);
 	    try {
@@ -705,6 +851,66 @@ export class NetworkOrchestrator {
 	    } finally {
 	        this.crdtEngine.removeDoc(documentId);
 	    }
+	}
+
+	/**
+	 * Rebuilds each document from exactly what the server holds and compares it to
+	 * local content, so "synced" can be answered with evidence instead of with an
+	 * empty task queue. Returns the documents that do not match.
+	 */
+	public async verifyVaultIntegrity(): Promise<VaultIntegrityReport> {
+		const report: VaultIntegrityReport = { checked: 0, diverged: [], unreachable: [] };
+		if (!this.activeKey) return report;
+
+		const files = this.vfsController.getActiveFiles().filter(f => f.type !== 'folder' && !isBinaryPath(f.path));
+		const limit = pLimit(10);
+
+		await Promise.all(files.map(file => limit(async () => {
+			let details: SnapshotDetails | null = null;
+			let updates: CRDTUpdate[] = [];
+			try {
+				[details, updates] = await Promise.all([
+					this.remoteStore.fetchSnapshotDetails(file.uuid),
+					this.remoteStore.fetchUpdatesSince(file.uuid, 0)
+				]);
+			} catch {
+				report.unreachable.push(file.path);
+				return;
+			}
+
+			report.checked += 1;
+
+			const remoteDoc = new LoroDoc();
+			remoteDoc.getText('markdown');
+			try {
+				if (details?.encryptedState && this.activeKey) {
+					remoteDoc.import(await this.crypto.decrypt(details.encryptedState, this.activeKey));
+				}
+				for (const update of updates) {
+					if (!this.activeKey) break;
+					remoteDoc.import(await this.crypto.decrypt(update.encryptedUpdate, this.activeKey));
+				}
+				remoteDoc.commit();
+			} catch {
+				report.diverged.push(file.path);
+				return;
+			}
+
+			const localContent = await this.noteRepo.readNote(file.path);
+			if (localContent === null) return;
+
+			if (remoteDoc.getText('markdown').toString() !== localContent) {
+				report.diverged.push(file.path);
+			}
+		})));
+
+		// Anything the server has not acknowledged is diverged by definition.
+		for (const documentId of this.unackedDocs) {
+			const path = this.vfsController.getPathForUuid(documentId);
+			if (path && !report.diverged.includes(path)) report.diverged.push(path);
+		}
+
+		return report;
 	}
 
 	public async deleteRemoteSnapshot(documentId: string): Promise<void> {

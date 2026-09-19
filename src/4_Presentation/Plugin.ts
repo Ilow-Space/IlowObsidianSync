@@ -270,6 +270,9 @@ export default class IlowSyncPlugin extends Plugin {
 
 	public async unloadKey(): Promise<void> {
 		this.derivedKey = null;
+		// Clearing our own reference is not enough: the service caches derived keys
+		// for the lifetime of the renderer.
+		WebCryptoService.clearCachedKeys();
 		if (this.networkOrchestrator) {
 			this.networkOrchestrator.setCryptoKey(null);
 			this.networkOrchestrator.stopAll();

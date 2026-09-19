@@ -106,8 +106,14 @@ echo "[+] Step 7: Generating secure .env file..."
 cat <<EOF > "$INSTALL_DIR/.env"
 PORT=${PORT}
 DATABASE_URL=postgres://${DB_USER}:${DB_PASS}@localhost:5432/${DB_NAME}?sslmode=disable
+# Read by the Go server itself: every REST route and the WebSocket require it.
+ACCESS_API_KEY=${ACCESS_KEY}
+# Kept for Nginx configurations that reference \$API_KEY.
 API_KEY=${ACCESS_KEY}
 ADMIN_API_KEY=${ADMIN_KEY}
+# Comma-separated browser origins allowed cross-origin access. Empty means none,
+# which is correct for the plugin: Obsidian's requestUrl is not a browser client.
+ALLOWED_ORIGINS=
 EOF
 chmod 600 "$INSTALL_DIR/.env"
 

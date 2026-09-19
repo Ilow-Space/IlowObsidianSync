@@ -45,7 +45,7 @@ export class PostgresRemoteStore implements IRemoteStore {
 		}
 	}
 
-	public async getBulkLatestUpdateIds(): Promise<Record<string, number>> {
+	public async getBulkLatestUpdateIds(): Promise<Record<string, number> | null> {
 		try {
 			const url = `${this.serverUrl}/api/vault/latest_ids`;
 			const res = await requestUrl({
@@ -58,10 +58,12 @@ export class PostgresRemoteStore implements IRemoteStore {
 			if (res.status >= 200 && res.status < 300) {
 				return (res.json as Record<string, number>) || {};
 			}
-			return {};
+			// Returning {} here made a dropped request indistinguishable from
+			// "nothing has changed", which silently skipped every pull.
+			return null;
 		} catch (e: unknown) {
 			void e;
-			return {};
+			return null;
 		}
 	}
 

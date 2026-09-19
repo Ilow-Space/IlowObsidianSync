@@ -28,21 +28,30 @@ export class WebCryptoService implements ICryptography {
 		return CryptoUtils.bufToHex(new Uint8Array(hashBuffer));
 	}
 
+	/**
+	 * Cache handle for a password/salt pair that does not contain the password.
+	 * The previous key was `${password}:${salt}` and was used verbatim as a
+	 * sessionStorage key name, putting the master password in cleartext where any
+	 * other plugin in the renderer could read it.
+	 */
+	private async cacheHandle(password: string, salt: string): Promise<string> {
+		const material = new TextEncoder().encode(`${salt}:${password}`);
+		const digest = await window.crypto.subtle.digest('SHA-256', material as BufferSource);
+		return CryptoUtils.bufToHex(new Uint8Array(digest));
+	}
+
+	/**
+	 * Drops every cached key. Call this on logout: without it, clearing the
+	 * plugin's own reference leaves a usable key in this process.
+	 */
+	public static clearCachedKeys(): void {
+		WebCryptoService.derivedKeyCache.clear();
+	}
+
 	public async deriveKey(password: string, salt: string): Promise<CryptoKey> {
-		const cacheKey = `${password}:${salt}`;
+		const cacheKey = await this.cacheHandle(password, salt);
 		if (WebCryptoService.derivedKeyCache.has(cacheKey)) {
 			return WebCryptoService.derivedKeyCache.get(cacheKey)!;
-		}
-
-		try {
-			const cachedJwk = window.sessionStorage?.getItem(`ilow-key-${cacheKey}`);
-			if (cachedJwk) {
-				const key = await this.importKey(cachedJwk);
-				WebCryptoService.derivedKeyCache.set(cacheKey, key);
-				return key;
-			}
-		} catch {
-			// Suppress sessionStorage lookup error
 		}
 
 		const enc = new TextEncoder();
@@ -65,16 +74,13 @@ export class WebCryptoService implements ICryptography {
 			},
 			keyMaterial,
 			{ name: 'AES-GCM', length: 256 },
-			true, // ⚡ CHANGED TO TRUE: Allows the key to be exported to disk
+			// Extractable so Plugin.ts can hand it to Obsidian's secretStorage, which
+			// is the one place this key is meant to be persisted. It is deliberately
+			// no longer written to sessionStorage, which is readable by every other
+			// plugin loaded in the same renderer.
+			true,
 			['encrypt', 'decrypt']
 		);
-
-		try {
-			const jwkString = await this.exportKey(derivedKey);
-			window.sessionStorage?.setItem(`ilow-key-${cacheKey}`, jwkString);
-		} catch {
-			// Suppress sessionStorage save error
-		}
 
 		WebCryptoService.derivedKeyCache.set(cacheKey, derivedKey);
 		return derivedKey;

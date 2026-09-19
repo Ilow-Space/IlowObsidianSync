@@ -354,6 +354,47 @@ export class SettingsTab extends PluginSettingTab {
 					})
 			);
 
+		// Verify Vault Integrity
+		new Setting(containerEl)
+			.setName('Verify vault integrity')
+			.setDesc('Rebuilds every note from exactly what the server holds and reports any that differ. The status light only means the local queue drained, so this is the check to run after a long offline period or a lossy connection.')
+			.addButton((button) =>
+				button
+					.setButtonText('Verify')
+					.onClick(async () => {
+						const orchestrator = this.plugin.getSyncOrchestrator();
+						if (!orchestrator || !this.plugin.isKeyDerived) {
+							new Notice('Connect and unlock the vault before verifying.');
+							return;
+						}
+
+						button.setDisabled(true);
+						button.setButtonText('Verifying...');
+						try {
+							const report = await orchestrator.verifyVaultIntegrity();
+							if (report.diverged.length === 0 && report.unreachable.length === 0) {
+								new Notice(`All ${report.checked} document(s) match the server.`);
+							} else {
+								const preview = report.diverged.slice(0, 5).join('\n');
+								console.warn('[Ilow Sync] Documents out of sync:', report);
+								new Notice(
+									`${report.diverged.length} document(s) differ from the server` +
+									(report.unreachable.length > 0 ? `, ${report.unreachable.length} unreachable` : '') +
+									(preview ? `:\n${preview}` : '') +
+									'\nSee the developer console for the full list.',
+									10000
+								);
+							}
+						} catch (err: unknown) {
+							const msg = err instanceof Error ? err.message : String(err);
+							new Notice(`Verification failed: ${msg}`);
+						} finally {
+							button.setDisabled(false);
+							button.setButtonText('Verify');
+						}
+					})
+			);
+
 		// Purge Server Data
 		new Setting(containerEl)
 			.setName('Purge Server Data')

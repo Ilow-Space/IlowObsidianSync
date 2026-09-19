@@ -28,7 +28,11 @@ export interface SnapshotDetails {
 
 export interface IRemoteStore {
     getLatestUpdateId(documentId: string): Promise<number>;
-    getBulkLatestUpdateIds(): Promise<Record<string, number>>; // NEW BULK METHOD
+    /**
+     * Highest update id per document, or null when the request did not succeed.
+     * Null means "unknown" and must not be read as "no document has updates".
+     */
+    getBulkLatestUpdateIds(): Promise<Record<string, number> | null>;
     fetchSnapshot(documentId: string): Promise<EncryptedBlob | null>;
     fetchSnapshotDetails(documentId: string): Promise<SnapshotDetails | null>;
     fetchUpdatesSince(documentId: string, lastId: number): Promise<CRDTUpdate[]>;

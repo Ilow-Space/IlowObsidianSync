@@ -94,7 +94,9 @@ Instead of copying the Base URL, API Key and Salt by hand:
 ## Troubleshooting
 
 - **Disable Obsidian's built-in Sync core plugin** before using Ilow Sync on the same vault — running both at once on the same files can corrupt state. The settings tab shows a warning if it detects the core plugin is active.
-- **"Connection failed"** — check that Base URL is reachable from the device (no trailing slash, correct scheme) and that the API Key matches the server's `API_KEY`.
+- **"Connection failed"** — check that Base URL is reachable from the device (no trailing slash, correct scheme) and that the API Key matches the server's `ACCESS_API_KEY`.
+- **Server exits at startup with a message about `ACCESS_API_KEY`** — the backend now authenticates every route itself rather than relying on an optional Nginx rule. Put the Access API Key from `setup_back.sh` in `ACCESS_API_KEY` in `backend/.env`, or set `ALLOW_UNAUTHENTICATED=true` if something in front of it already authenticates. Servers set up before this change have the key under `API_KEY` only; copy it across.
+- **Unsure whether everything actually reached the server?** The status light only reports that the local queue drained. Use **Verify vault integrity** (Settings → Maintenance) to rebuild each note from exactly what the server holds and list any that differ. After a long offline period or a lossy connection this is the check worth running.
 - **Lost your Master Password or regenerated the Salt?** You will not be able to decrypt previously synced data — this is expected under a true E2EE design. There is no recovery path other than re-encrypting from a device that still has the working key.
 - **Hard Reset Local State** (Settings → Danger Zone) wipes the local IndexedDB cache and re-downloads everything from the server — useful if the local cache seems out of sync.
 

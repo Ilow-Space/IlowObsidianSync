@@ -102,7 +102,21 @@ An automated database trigger publishes payload JSON objects to the `vault_updat
 | --- | --- | --- |
 | `PORT` | `3001` | Server port for HTTP & WebSocket connections|
 | `DATABASE_URL` | `postgres://postgres:your_password@localhost:5432/your_db?sslmode=disable` | PostgreSQL connection string|
-| `ADMIN_API_KEY` | `super-secret-admin-token` | Bearer token required for `/api/admin/truncate`<br> |
+| `ACCESS_API_KEY` | _(none)_ | **Required.** Access API Key from `setup_back.sh`. Checked on every REST route and on the WebSocket handshake, via the `X-API-Key` header or the `api_key` query parameter. The server refuses to start without it unless `ALLOW_UNAUTHENTICATED=true` is set. |
+| `ALLOW_UNAUTHENTICATED` | `false` | Set to `true` only when something in front of the process already authenticates (e.g. Nginx). |
+| `ADMIN_API_KEY` | `super-secret-admin-token` | Bearer token required for `/api/admin/truncate`. While it is the shipped default the endpoint returns 403. |
+| `ALLOWED_ORIGINS` | _(empty)_ | Comma-separated browser origins granted cross-origin access. Empty means none, which is correct for the plugin: Obsidian's `requestUrl` is not a browser client. |
+| `MAX_BODY_BYTES` | `67108864` | Per-request body cap for updates, compactions, manifests and blob uploads. |
+| `BLOB_GC_GRACE_HOURS` | `72` | Blob GC window. A blob is deleted only if no manifest inside this window claims it **and** the file itself is older than it. |
+| `BLOB_STORAGE_DIR` | `./data/blobs` | On-disk root for content-addressed blobs. |
+
+### Integrity notes
+
+- **Authentication.** Every route except `/api/admin/truncate` is gated by `ACCESS_API_KEY`; truncate additionally needs the admin bearer token, compared in constant time.
+- **Blob GC unions manifests.** `POST /api/blobs/manifest` appends to `vault_blob_manifest_history` and collection unions every manifest in the window. One device with an incomplete index can no longer delete another device's attachments.
+- **Deletes are final.** `DELETE /api/snapshots/{id}` clears `encrypted_state` and resets `max_compacted_id`, and `POST /api/updates` refuses writes to a deleted document with `409` instead of clearing `is_deleted`. A straggler push can no longer resurrect a note.
+- **Compaction only moves forwards.** `POST /api/snapshots/{id}/compact` returns `409` when `p_max_id` is below the row's current `max_compacted_id`, so a client whose own refresh failed cannot overwrite a base snapshot holding work it never saw.
+- **Path segments are validated.** The vault alias and blob hash must match `[A-Za-z0-9_-]{1,128}` before they are joined into a filesystem path.
 ---
 ## Development & Build Commands
 Client scripts are managed using `npm` commands:

@@ -152,7 +152,9 @@ describe('Critical Architectural Audits Suite (17 Audits)', () => {
 	// Audit 5
 	it('5. Storage Compaction: forceSyncAndCompact calls compactSnapshot with latest state vector', async () => {
 		orchestrator.setCryptoKey({} as any);
-		vi.spyOn(orchestrator, 'pullDocument').mockResolvedValue(undefined);
+		// pullDocument reports whether the refresh succeeded; compaction is only
+		// allowed to proceed on a true, since it deletes the update rows it merges.
+		vi.spyOn(orchestrator, 'pullDocument').mockResolvedValue(true);
 
 		await orchestrator.forceSyncAndCompact('doc-compact');
 

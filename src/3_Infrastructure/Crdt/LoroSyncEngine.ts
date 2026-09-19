@@ -146,6 +146,20 @@ export class LoroSyncEngine {
 		}
 	}
 
+	/**
+	 * Exports the document's complete state. Importing a snapshot carries no
+	 * dependency on deltas the peer may have missed, so this is the one payload
+	 * that repairs a broken delta chain.
+	 */
+	public async exportSnapshot(documentId: string): Promise<Uint8Array> {
+		const doc = await this.getOrCreateDoc(documentId);
+		try {
+			return new Uint8Array(doc.export({ mode: 'snapshot' }));
+		} finally {
+			this.removeDoc(documentId);
+		}
+	}
+
 	public removeDoc(documentId: string) {
 		if (!this.activeDocs.has(documentId)) return;
 
