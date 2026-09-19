@@ -1,10 +1,23 @@
 ﻿import { defineConfig } from 'vite';
 import path from 'path';
+import { readFileSync } from 'fs';
 
 export default defineConfig(({ mode }) => {
   const isDev = mode === 'development';
 
+  // Baked in at build time from the manifest the release workflow has already
+  // stamped with the tag version. Beyond being useful in logs, it guarantees each
+  // release's main.js has its own digest: attestations are keyed by digest, and
+  // two releases sharing one means they share whatever attestations it carries.
+  const manifestVersion = JSON.parse(
+    readFileSync(path.resolve(__dirname, 'manifest.json'), 'utf8')
+  ).version as string;
+
   return {
+    define: {
+      __PLUGIN_VERSION__: JSON.stringify(manifestVersion),
+    },
+
     css: {
       postcss: {
         plugins: [],
