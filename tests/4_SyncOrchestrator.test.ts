@@ -87,8 +87,12 @@ describe('NetworkOrchestrator & Sync Tests', () => {
 		await orchestrator.runFullSync();
 		const duration = performance.now() - start;
 
-		// 50 files * 10ms sequentially = ~500ms. With concurrency 20, it should take ~30ms.
-		expect(duration).toBeLessThan(100);
+		// 50 files * 10ms sequentially = ~500ms. With concurrency 20 the pulls cost
+		// ~30ms, plus runFullSync's fixed setup (outbox read, index pull, disk
+		// reconcile). The bound is what separates concurrent from sequential, not a
+		// tight budget: at 100ms this failed intermittently under parallel-worker
+		// contention while still being nowhere near sequential.
+		expect(duration).toBeLessThan(250);
 	});
 
 	it('PERF REGRESSION: pullDocument must garbage collect LoroDocs when finished if not actively open', async () => {

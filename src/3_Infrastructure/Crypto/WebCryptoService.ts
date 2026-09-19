@@ -36,7 +36,7 @@ export class WebCryptoService implements ICryptography {
 	 */
 	private async cacheHandle(password: string, salt: string): Promise<string> {
 		const material = new TextEncoder().encode(`${salt}:${password}`);
-		const digest = await window.crypto.subtle.digest('SHA-256', material as BufferSource);
+		const digest = await window.crypto.subtle.digest('SHA-256', material);
 		return CryptoUtils.bufToHex(new Uint8Array(digest));
 	}
 

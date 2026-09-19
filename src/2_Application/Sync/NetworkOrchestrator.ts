@@ -684,7 +684,7 @@ export class NetworkOrchestrator {
 		const bulkIdIsTrustworthy = knownLatestRemoteId !== undefined && !(knownLatestRemoteId === 0 && lastId > 0);
 
 		if (bulkIdIsTrustworthy && lastId > 0) {
-			if ((knownLatestRemoteId as number) <= lastId) return true;
+			if (knownLatestRemoteId <= lastId) return true;
 		} else if (lastId > 0) {
 			try {
 				const latestRemoteId = await this.remoteStore.getLatestUpdateId(documentId);

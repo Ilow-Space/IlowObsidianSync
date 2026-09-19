@@ -11,6 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Required to mint a build-provenance attestation for the release assets.
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -37,6 +40,19 @@ jobs:
 
       - name: Build extension
         run: npm run build
+
+      # Attest the exact bytes that are uploaded below. Attestations are bound to
+      # a file digest, so this must run after the build and after the version
+      # rewrite of manifest.json, and the paths must be the same files the release
+      # step publishes. Without this the workflow published assets carrying no
+      # provenance of its own, and verification against this repository failed.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/main.js
+            dist/styles.css
+            manifest.json
 
       - name: Delete existing release for this version, if any
         env:
