@@ -59,7 +59,7 @@ export class SettingsTab extends PluginSettingTab {
 		];
 	}
 
-	override display(): void {
+	public display(): void {
 		this.render(this.containerEl);
 	}
 
