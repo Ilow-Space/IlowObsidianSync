@@ -59,10 +59,6 @@ export class SettingsTab extends PluginSettingTab {
 		];
 	}
 
-	public display(): void {
-		this.render(this.containerEl);
-	}
-
 	private refreshTab(): void {
 		const tab = this as unknown as { update?: () => void };
 		if (typeof tab.update === 'function') {
