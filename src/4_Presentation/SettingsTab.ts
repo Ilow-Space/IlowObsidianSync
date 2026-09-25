@@ -4,11 +4,59 @@ import { QrDisplayModal } from './Modals/QrDisplayModal';
 import { QrScannerModal } from './Modals/QrScannerModal';
 import { ConfirmationModal } from './Modals/ConfirmationModal';
 
+import { SettingDefinitionItem } from 'obsidian';
+
 export class SettingsTab extends PluginSettingTab {
 	private tempPassword = '';
 
 	constructor(app: App, private plugin: IlowSyncPlugin) {
 		super(app, plugin);
+	}
+
+	public getSettingDefinitions(): SettingDefinitionItem[] {
+		const themesDir = `${this.app.vault.configDir}/themes/`;
+		return [
+			{
+				type: 'group',
+				name: 'Connection & Security',
+				items: [
+					{ name: 'Base URL', description: 'Enter your backend HTTP endpoint (e.g., https://api.my-domain.com).' },
+					{ name: 'API Key', description: 'Enter the API Key used to authenticate REST and WebSocket connections.' },
+					{ name: 'Admin API Token', description: 'Enter your secure Admin API Token configured on your unified Go backend server to enable database purge/maintenance operations.' },
+					{ name: 'Cryptography Salt', description: 'The cryptographic salt used for key derivation (Hex representation). This is automatically generated or loaded via QR.' },
+					{ name: 'Master Password', description: 'Derive the 256-bit AES-GCM Key. This is never stored on disk or shared.' },
+					{ name: 'Test Connection', description: 'Verify that the backend server is reachable and configured correctly.' },
+					{ name: 'Force Sync & Compact', description: 'Manually trigger an absolute sync, and compact database history to save database storage space.' }
+				]
+			},
+			{
+				type: 'group',
+				name: 'Extension & Theme Sync',
+				items: [
+					{ name: 'Sync Plugin Settings', description: 'Synchronize plugin settings (data.json files).' },
+					{ name: 'Sync Plugin Binaries', description: 'Synchronize plugin main.js, manifest.json, and styles.css files.' },
+					{ name: 'Sync Themes', description: `Synchronize custom installed themes (${themesDir}).` },
+					{ name: 'Sync Appearance & Core Settings', description: 'Synchronize appearance.json, community-plugins.json, and hotkeys.json.' }
+				]
+			},
+			{
+				type: 'group',
+				name: 'Multi-Device Onboarding',
+				items: [
+					{ name: 'Generate Network QR Code', description: 'Display a secure QR code containing Server URL, API Key, and Salt to easily onboard another device.' },
+					{ name: 'Scan Network QR Code', description: 'Scan a setup QR code from your other device to instantly configure database and E2EE parameters.' }
+				]
+			},
+			{
+				type: 'group',
+				name: 'Maintenance & Danger Zone',
+				items: [
+					{ name: 'Hard Reset Local State', description: 'Wipe local IndexedDB database entirely and trigger a clean re-download of all file snapshots and updates from the remote server.' },
+					{ name: 'Verify vault integrity', description: 'Rebuilds every note from exactly what the server holds and reports any that differ. The status light only means the local queue drained, so this is the check to run after a long offline period or a lossy connection.' },
+					{ name: 'Purge Server Data', description: 'Securely calls the unified Go backend to run a full TRUNCATE on the remote database. (Requires Admin API Token).' }
+				]
+			}
+		];
 	}
 
 	override display(): void {
