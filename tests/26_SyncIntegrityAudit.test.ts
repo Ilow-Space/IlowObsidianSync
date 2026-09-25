@@ -281,6 +281,20 @@ describe('Sync Integrity Audit: ghost files after packet loss', () => {
 		// was tracking that they were outstanding.
 		expect((orchestrator as any).hasConnectionError).toBe(true);
 	});
+
+	it('AUTO REPAIR: pushDivergedFiles and verifyVaultIntegrity(true) push unsynced files to server store', async () => {
+		const docId = 'diverged-repair-doc';
+		const content = 'Locally edited unsynced content';
+
+		disk.set('notes/diverged.md', content);
+		vfsController.getActiveFiles = vi.fn(() => [{ uuid: docId, path: 'notes/diverged.md', type: 'file' }]) as any;
+
+		// The file differs from what server holds
+		const report = await orchestrator.verifyVaultIntegrity(true);
+
+		expect(report.diverged).toContain('notes/diverged.md');
+		expect(remoteStoreMock.pushUpdate).toHaveBeenCalled();
+	});
 });
 
 describe('Sync Integrity Audit: verification capability', () => {

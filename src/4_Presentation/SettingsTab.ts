@@ -393,6 +393,35 @@ export class SettingsTab extends PluginSettingTab {
 							button.setButtonText('Verify');
 						}
 					})
+			)
+			.addButton((button) =>
+				button
+					.setButtonText('Push Diverged Files')
+					.setCta()
+					.onClick(async () => {
+						const orchestrator = this.plugin.getSyncOrchestrator();
+						if (!orchestrator || !this.plugin.isKeyDerived) {
+							new Notice('Connect and unlock the vault before repairing.');
+							return;
+						}
+
+						button.setDisabled(true);
+						button.setButtonText('Pushing...');
+						try {
+							const report = await orchestrator.verifyVaultIntegrity(true);
+							if (report.diverged.length === 0) {
+								new Notice('No diverged files found. Vault is completely up to date!');
+							} else {
+								new Notice(`Successfully pushed ${report.diverged.length} diverged file(s) to the server!`);
+							}
+						} catch (err: unknown) {
+							const msg = err instanceof Error ? err.message : String(err);
+							new Notice(`Pushing diverged files failed: ${msg}`);
+						} finally {
+							button.setDisabled(false);
+							button.setButtonText('Push Diverged Files');
+						}
+					})
 			);
 
 		// Purge Server Data
