@@ -10,6 +10,7 @@ import { SyncEventBus } from '../src/2_Application/Sync/SyncEventBus';
 import { LoroVfsController } from '../src/2_Application/Sync/LoroVfsController';
 import { NetworkOrchestrator } from '../src/2_Application/Sync/NetworkOrchestrator';
 import { LoroSyncEngine } from '../src/3_Infrastructure/Crdt/LoroSyncEngine';
+import { isAllowedConfigPath } from '../src/1_Domain/Utils/ConfigPathFilter';
 
 /**
  * Exposing suite for "ghost unsynced files" after offline periods or lossy links.
@@ -318,5 +319,12 @@ describe('Sync Integrity Audit: verification capability', () => {
 		// the local queue drained -- not that the server holds the same content.
 		// Every failure above was invisible precisely because this check was missing.
 		expect(exposed).toHaveLength(2);
+	});
+
+
+	it('SELF PLUGIN FILTER: isAllowedConfigPath ignores plugins/ilow-crdt', () => {
+		const configDir = '.obsidian';
+		expect(isAllowedConfigPath('.obsidian/plugins/ilow-crdt/data.json', configDir)).toBe(false);
+		expect(isAllowedConfigPath('.obsidian/plugins/ilow-crdt/main.js', configDir)).toBe(false);
 	});
 });

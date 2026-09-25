@@ -374,8 +374,10 @@ export class NetworkOrchestrator {
 
 		const doc = await this.crdtEngine.getOrCreateDoc(documentId);
 		const crdtContent = doc.getText('markdown').toString();
+		const normLocal = localContent.replace(/\r\n/g, '\n');
+		const normCrdt = crdtContent.replace(/\r\n/g, '\n');
     
-		if (localContent === crdtContent) {
+		if (normLocal === normCrdt) {
 			const lastSyncId = this.fileLastSyncIds.get(documentId) || 0;
 			const remoteLatestId = bulkUpdates[documentId] || 0;
 			if (lastSyncId === 0 && remoteLatestId === 0) {
@@ -388,18 +390,19 @@ export class NetworkOrchestrator {
 		}
 
 		const baselineContent = this.prePullBaselineContents.get(documentId);
-		if (baselineContent !== undefined && localContent.trim() === baselineContent.trim()) {
+		const normBaseline = baselineContent !== undefined ? baselineContent.replace(/\r\n/g, '\n').trim() : undefined;
+		if (normBaseline !== undefined && normLocal.trim() === normBaseline) {
 			await this.safeWriteNote(path, crdtContent);
 			return;
 		}
 
-		if (crdtContent.length > 0 && crdtContent.includes(localContent.trim())) {
+		if (normCrdt.length > 0 && normCrdt.includes(normLocal.trim())) {
 			await this.safeWriteNote(path, crdtContent);
 			return;
 		}
 
 		let contentToApply = localContent;
-		if (crdtContent.length > 0 && !localContent.includes(crdtContent.trim())) {
+		if (normCrdt.length > 0 && !normLocal.includes(normCrdt.trim())) {
 			if (path.endsWith('.json')) {
 				contentToApply = localContent;
 			} else {
@@ -899,7 +902,9 @@ export class NetworkOrchestrator {
 			const localContent = await this.noteRepo.readNote(file.path);
 			if (localContent === null) return;
 
-			if (remoteDoc.getText('markdown').toString() !== localContent) {
+			const normRemote = remoteDoc.getText('markdown').toString().replace(/\r\n/g, '\n');
+			const normLocal = localContent.replace(/\r\n/g, '\n');
+			if (normRemote !== normLocal) {
 				report.diverged.push(file.path);
 			}
 		})));
