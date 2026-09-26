@@ -163,34 +163,51 @@ export class ObsidianDiskReconciler {
 		}
 	}
 
+	/**
+	 * Config files are singletons Obsidian itself writes on first launch, on every
+	 * device, before that device has ever synced -- unlike regular notes (whose
+	 * non-config path in handleCrdtNodeCreated checks for this and rebalances), so
+	 * two devices routinely end up with two different uuids both claiming the same
+	 * config path. Without the rebalance emit below, neither uuid's local node is
+	 * ever cleaned up: the path shows as diverged forever, because pushing fixes
+	 * whichever uuid getUuidForPath happens to resolve while the other's node just
+	 * sits there.
+	 */
+	private async createConfigNode(payload: { uuid: string; path: string; isFolder: boolean; content?: string }): Promise<void> {
+		if (await this.app.vault.adapter.exists(payload.path)) {
+			this.eventBus.emit('RebalancePathUuid', { remoteUuid: payload.uuid, path: payload.path });
+		}
+		ObsidianDiskReconciler.suppressPath(payload.path);
+		try {
+			if (payload.isFolder) {
+				if (!(await this.app.vault.adapter.exists(payload.path))) {
+					await this.app.vault.adapter.mkdir(payload.path);
+				}
+			} else {
+				const parts = payload.path.split('/');
+				if (parts.length > 1) {
+					const parentFolder = parts.slice(0, -1).join('/');
+					if (!(await this.app.vault.adapter.exists(parentFolder))) {
+						await this.app.vault.adapter.mkdir(parentFolder);
+					}
+				}
+				await this.app.vault.adapter.write(payload.path, payload.content || '');
+				this.triggerHotReload(payload.path);
+			}
+		} catch (e) {
+			console.error('[ObsidianDiskReconciler] Failed to create config file/folder:', e);
+		} finally {
+			ObsidianDiskReconciler.unsuppressPath(payload.path, 20);
+		}
+	}
+
 	private async handleCrdtNodeCreated(payload: { uuid: string; path: string; isFolder: boolean; content?: string }): Promise<void> {
 		return this.diskQueue.add(async () => {
 			const mutex = this.getFileMutex(payload.path);
 			try {
 				await mutex.runExclusive(async () => {
 					if (this.isConfigPath(payload.path)) {
-						ObsidianDiskReconciler.suppressPath(payload.path);
-						try {
-							if (payload.isFolder) {
-								if (!(await this.app.vault.adapter.exists(payload.path))) {
-									await this.app.vault.adapter.mkdir(payload.path);
-								}
-							} else {
-								const parts = payload.path.split('/');
-								if (parts.length > 1) {
-									const parentFolder = parts.slice(0, -1).join('/');
-									if (!(await this.app.vault.adapter.exists(parentFolder))) {
-										await this.app.vault.adapter.mkdir(parentFolder);
-									}
-								}
-								await this.app.vault.adapter.write(payload.path, payload.content || '');
-								this.triggerHotReload(payload.path);
-							}
-						} catch (e) {
-							console.error('[ObsidianDiskReconciler] Failed to create config file/folder:', e);
-						} finally {
-							ObsidianDiskReconciler.unsuppressPath(payload.path, 20);
-						}
+						await this.createConfigNode(payload);
 						return;
 					}
 

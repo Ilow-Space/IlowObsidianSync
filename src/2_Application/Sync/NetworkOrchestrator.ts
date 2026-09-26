@@ -43,6 +43,8 @@ export class NetworkOrchestrator {
 
 	private activeTasks = new Set<string>();
 	private statusIdleTimer: ReturnType<typeof setTimeout> | null = null;
+	private integritySweepTimer: ReturnType<typeof setInterval> | null = null;
+	private static readonly INTEGRITY_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 	private lastPingMs: number | null = null;
 
 	private hasConnectionError = false;
@@ -97,6 +99,32 @@ export class NetworkOrchestrator {
 				this.fileUpdateCounters.delete(documentId);
 			}
 		});
+
+		// The self-heal loop: nobody should need to press Verify or Push Diverged
+		// Files by hand. runIntegritySweep no-ops while locked/offline, so this can
+		// just run unconditionally on a timer rather than being wired to connect/
+		// reconnect events -- catches drift that never went through a reconnect at all.
+		this.integritySweepTimer = window.setInterval(() => {
+			void this.runIntegritySweep().catch((err) =>
+				console.error('[NetworkOrchestrator] Periodic integrity sweep failed:', err)
+			);
+		}, NetworkOrchestrator.INTEGRITY_SWEEP_INTERVAL_MS) as unknown as ReturnType<typeof setInterval>;
+	}
+
+	private async runIntegritySweep(): Promise<void> {
+		if (!this.activeKey) return;
+		this.addActiveTask('Integrity Sweep');
+		try {
+			const report = await this.verifyVaultIntegrity(true);
+			if (report.unreachable.length > 0) {
+				console.warn(`[NetworkOrchestrator] Integrity sweep: ${report.unreachable.length} document(s) unreachable.`);
+			}
+			if (report.diverged.length > 0) {
+				console.log(`[NetworkOrchestrator] Integrity sweep repaired ${report.pushed?.length ?? 0} of ${report.diverged.length} diverged document(s).`);
+			}
+		} finally {
+			this.removeActiveTask('Integrity Sweep');
+		}
 	}
 	private async handleRemoteNodeDiscovered(payload: { uuid: string; path: string; isFolder: boolean }): Promise<void> {
 		if (payload.isFolder || !this.activeKey || !this.isInitialized) return;
@@ -810,6 +838,10 @@ export class NetworkOrchestrator {
 		if (this.statusIdleTimer) {
 			window.clearTimeout(this.statusIdleTimer);
 			this.statusIdleTimer = null;
+		}
+		if (this.integritySweepTimer) {
+			window.clearInterval(this.integritySweepTimer);
+			this.integritySweepTimer = null;
 		}
 
 		this.fileLastSyncIds.clear();
