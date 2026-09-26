@@ -11,6 +11,7 @@ export class PostgresRemoteStore implements IRemoteStore {
 	private vaultAliasId: string = '';
 	private socket: WebSocket | null = null;
 	private subscriptions = new Map<string, Array<(docId?: string, action?: string) => void>>();
+	public onServerVersion?: (latestId: number) => void;
 
 	constructor(serverUrl: string, apiKey: string, customHeaders: Record<string, string> = {}) {
 		this.serverUrl = serverUrl.replace(/\/$/, '');
@@ -101,7 +102,11 @@ export class PostgresRemoteStore implements IRemoteStore {
 
 			this.socket.onmessage = (event) => {
 				try {
-					const payload = JSON.parse(event.data as string) as { type?: string; table?: string; record?: { vault_alias_id?: string; document_id?: string } };
+					const payload = JSON.parse(event.data as string) as { type?: string; table?: string; record?: { vault_alias_id?: string; document_id?: string }; latest_id?: number };
+					if (payload.type === 'server_version') {
+						if (typeof payload.latest_id === 'number') this.onServerVersion?.(payload.latest_id);
+						return;
+					}
 					if (payload.record && payload.record.vault_alias_id && payload.record.vault_alias_id !== this.vaultAliasId) {
 						return; // Discard misrouted cross-tenant updates
 					}

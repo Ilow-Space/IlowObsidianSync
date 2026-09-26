@@ -243,7 +243,8 @@ export default class IlowSyncPlugin extends Plugin {
 				if (!docId) return;
 
 				if (docId === 'shard-index') {
-					void this.networkOrchestrator?.pullDocument('shard-index', null, true).catch(() => {});
+					void this.networkOrchestrator?.pullDocument('shard-index', null, true)
+						.catch((err) => console.error('[Ilow Sync] Failed to pull shard-index update:', err));
 				} else {
 					void (async () => {
 						let path = this.vfsController?.getPathForUuid(docId);
@@ -253,8 +254,10 @@ export default class IlowSyncPlugin extends Plugin {
 						}
 						if (path) {
 							await this.networkOrchestrator?.pullDocument(docId, path, true);
+						} else {
+							console.warn('[Ilow Sync] Received update for unknown document, could not resolve path:', docId);
 						}
-					})().catch(() => {});
+					})().catch((err) => console.error('[Ilow Sync] Failed to handle manifest update for', docId, err));
 				}
 			});
 
@@ -323,6 +326,16 @@ export default class IlowSyncPlugin extends Plugin {
 				const vaultAliasId = await this.cryptoService.getVaultAliasId(this.derivedKey);
 				this.remoteStore.setVaultAliasId(vaultAliasId);
 			}
+
+			// The socket has no periodic re-sync of its own: a message missed while
+			// disconnected is gone. This fires on every (re)connect as the one chance
+			// to notice "something changed while I was away" and reconcile everything,
+			// rather than trusting the live NOTIFY stream to have delivered everything.
+			this.remoteStore.onServerVersion = () => {
+				void this.networkOrchestrator?.runFullSync().catch((err) =>
+					console.error('[Ilow Sync] Reconnect reconciliation sync failed:', err)
+				);
+			};
 
 			const socketUrl = this.settings.serverUrl.replace(/^http/i, 'ws');
 

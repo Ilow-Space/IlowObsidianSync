@@ -402,10 +402,17 @@ export class SettingsTab extends PluginSettingTab {
 											button.setButtonText('Pushing...');
 											try {
 												const report = await orchestrator.verifyVaultIntegrity(true);
+												const pushedCount = report.pushed?.length ?? 0;
 												if (report.diverged.length === 0) {
 													new Notice('No diverged files found. Vault is completely up to date!');
+												} else if (pushedCount === report.diverged.length) {
+													new Notice(`Successfully pushed ${pushedCount} diverged file(s) to the server!`);
 												} else {
-													new Notice(`Successfully pushed ${report.diverged.length} diverged file(s) to the server!`);
+													new Notice(
+														`Pushed ${pushedCount} of ${report.diverged.length} diverged file(s). ` +
+														`${report.diverged.length - pushedCount} failed and were queued for retry -- see the developer console.`,
+														10000
+													);
 												}
 											} catch (err: unknown) {
 												const msg = err instanceof Error ? err.message : String(err);
