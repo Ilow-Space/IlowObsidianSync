@@ -369,23 +369,9 @@ export class NetworkOrchestrator {
 
 		// --- NEW DECOUPLED BINARY UPLOAD LOGIC ---
 		if (isBinaryPath(payload.path)) {
-			const rawBytes = base64ToUint8Array(payload.content);
-			const hash = await this.crypto.hashData(rawBytes);
-
-			// Check if the current VFS node already has this hash to prevent redundant uploads
-			const currentHash = this.vfsController.getBlobHashForUuid(documentId);
-			if (currentHash === hash) return;
-
 			this.addActiveTask(payload.path);
 			try {
-				if (this.activeKey) {
-					const encrypted = await this.crypto.encrypt(rawBytes, this.activeKey);
-					const payloadBytes = new TextEncoder().encode(JSON.stringify(encrypted));
-					await this.remoteStore.uploadBlob(hash, payloadBytes);
-
-					// Link the newly uploaded blob to the VFS tree
-					this.vfsController.setBlobHashForUuid(documentId, hash);
-				}
+				await this.uploadBinaryIfChanged(documentId, payload.path, base64ToUint8Array(payload.content));
 			} catch (err) {
 				console.error('[NetworkOrchestrator] Failed to upload binary blob:', err);
 				this.hasConnectionError = true;
@@ -405,20 +391,9 @@ export class NetworkOrchestrator {
 	private async reconcileExistingLocalFile(documentId: string, path: string, localContent: string, bulkUpdates: Record<string, number> = {}): Promise<void> {
 		// --- NEW DECOUPLED BINARY OFFLINE INGESTION ---
 		if (isBinaryPath(path)) {
-			const rawBytes = base64ToUint8Array(localContent);
-			const localHash = await this.crypto.hashData(rawBytes);
-			const currentHash = this.vfsController.getBlobHashForUuid(documentId);
-
-			if (currentHash === localHash) return;
-
 			this.addActiveTask(path);
 			try {
-				if (this.activeKey) {
-					const encrypted = await this.crypto.encrypt(rawBytes, this.activeKey);
-					const payloadBytes = new TextEncoder().encode(JSON.stringify(encrypted));
-					await this.remoteStore.uploadBlob(localHash, payloadBytes);
-					this.vfsController.setBlobHashForUuid(documentId, localHash);
-				}
+				await this.uploadBinaryIfChanged(documentId, path, base64ToUint8Array(localContent));
 			} catch (err) {
 				console.error('[NetworkOrchestrator] Failed to upload offline binary blob:', err);
 			} finally {
@@ -989,19 +964,39 @@ export class NetworkOrchestrator {
 	}
 
 	private async pushDivergedBlob(path: string, documentId: string, localContent: string): Promise<boolean> {
-		if (!this.activeKey) return false;
 		try {
-			const rawBytes = base64ToUint8Array(localContent);
-			const hash = await this.crypto.hashData(rawBytes);
-			const encrypted = await this.crypto.encrypt(rawBytes, this.activeKey);
-			const payloadBytes = new TextEncoder().encode(JSON.stringify(encrypted));
-			await this.remoteStore.uploadBlob(hash, payloadBytes);
-			this.vfsController.setBlobHashForUuid(documentId, hash);
-			return true;
+			return await this.uploadBinaryIfChanged(documentId, path, base64ToUint8Array(localContent));
 		} catch (err) {
 			console.error('[NetworkOrchestrator] Failed to push diverged blob:', path, err);
 			return false;
 		}
+	}
+
+	/**
+	 * Uploads rawBytes as documentId's blob unless it is empty or already
+	 * matches the recorded hash. The empty guard exists because a "successful"
+	 * local read can still be empty -- VaultEventWatcher.readTFileContent now
+	 * retries a genuinely empty binary read instead of accepting it after one
+	 * attempt, but this is the second line of defense for any other cause of a
+	 * truncated read: a live incident showed an image permanently synced with
+	 * zero content once its hash (of nothing) was uploaded and recorded as if
+	 * it were real, with nothing anywhere checking that the upload was non-empty.
+	 */
+	private async uploadBinaryIfChanged(documentId: string, path: string, rawBytes: Uint8Array): Promise<boolean> {
+		if (rawBytes.length === 0) {
+			console.warn(`[NetworkOrchestrator] Refusing to sync zero-byte content for ${path} -- treating as an incomplete read, not a real change.`);
+			return false;
+		}
+		if (!this.activeKey) return false;
+
+		const hash = await this.crypto.hashData(rawBytes);
+		if (this.vfsController.getBlobHashForUuid(documentId) === hash) return false;
+
+		const encrypted = await this.crypto.encrypt(rawBytes, this.activeKey);
+		const payloadBytes = new TextEncoder().encode(JSON.stringify(encrypted));
+		await this.remoteStore.uploadBlob(hash, payloadBytes);
+		this.vfsController.setBlobHashForUuid(documentId, hash);
+		return true;
 	}
 
 	private async pushDivergedText(path: string, documentId: string, localContent: string): Promise<boolean> {

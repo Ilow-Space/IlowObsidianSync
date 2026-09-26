@@ -12,6 +12,8 @@ export class VaultEventWatcher {
 	private orchestrator: NetworkOrchestrator | null = null;
 	private pollTimer: number | null = null;
 	private knownDiskFiles = new Map<string, string>();
+	/** Paths already warned about for reading empty -- avoids re-warning on every poll cycle for a file that is genuinely, persistently empty on disk. */
+	private warnedEmptyPaths = new Set<string>();
 
 	constructor(
 		private app: App,
@@ -38,6 +40,7 @@ export class VaultEventWatcher {
 					if (this.app.vault.adapter && await this.app.vault.adapter.exists(file.path)) {
 						const arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
 						if (arrayBuffer.byteLength > 0) {
+							this.warnedEmptyPaths.delete(file.path);
 							return uint8ArrayToBase64(new Uint8Array(arrayBuffer));
 						}
 						// A create event can fire before a large paste has finished
@@ -52,7 +55,10 @@ export class VaultEventWatcher {
 				}
 				await new Promise(r => window.setTimeout(r, 150));
 			}
-			console.warn(`[VaultEventWatcher] Gave up reading ${file.path} after 3 attempts -- read 0 bytes every time.`);
+			if (!this.warnedEmptyPaths.has(file.path)) {
+				this.warnedEmptyPaths.add(file.path);
+				console.warn(`[VaultEventWatcher] Gave up reading ${file.path} after 3 attempts -- read 0 bytes every time.`);
+			}
 			return '';
 		}
 		return await this.app.vault.read(file);
