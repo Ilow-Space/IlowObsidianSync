@@ -1,7 +1,7 @@
 {
   "id": "ilow-sync",
   "name": "Ilow Sync",
-  "version": "1.6.5",
+  "version": "1.6.6",
   "minAppVersion": "1.13.0",
   "description": "Sync notes, files, settings and themes across devices in real time, end-to-end encrypted, via your own self-hosted server.",
   "author": "Ilow",
