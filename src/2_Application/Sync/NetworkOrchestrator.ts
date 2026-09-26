@@ -374,8 +374,10 @@ export class NetworkOrchestrator {
 
 		const doc = await this.crdtEngine.getOrCreateDoc(documentId);
 		const crdtContent = doc.getText('markdown').toString();
+		const normLocal = localContent.replace(/\r\n/g, '\n');
+		const normCrdt = crdtContent.replace(/\r\n/g, '\n');
     
-		if (localContent === crdtContent) {
+		if (normLocal === normCrdt) {
 			const lastSyncId = this.fileLastSyncIds.get(documentId) || 0;
 			const remoteLatestId = bulkUpdates[documentId] || 0;
 			if (lastSyncId === 0 && remoteLatestId === 0) {
@@ -388,18 +390,19 @@ export class NetworkOrchestrator {
 		}
 
 		const baselineContent = this.prePullBaselineContents.get(documentId);
-		if (baselineContent !== undefined && localContent.trim() === baselineContent.trim()) {
+		const normBaseline = baselineContent !== undefined ? baselineContent.replace(/\r\n/g, '\n').trim() : undefined;
+		if (normBaseline !== undefined && normLocal.trim() === normBaseline) {
 			await this.safeWriteNote(path, crdtContent);
 			return;
 		}
 
-		if (crdtContent.length > 0 && crdtContent.includes(localContent.trim())) {
+		if (normCrdt.length > 0 && normCrdt.includes(normLocal.trim())) {
 			await this.safeWriteNote(path, crdtContent);
 			return;
 		}
 
 		let contentToApply = localContent;
-		if (crdtContent.length > 0 && !localContent.includes(crdtContent.trim())) {
+		if (normCrdt.length > 0 && !normLocal.includes(normCrdt.trim())) {
 			if (path.endsWith('.json')) {
 				contentToApply = localContent;
 			} else {
@@ -854,11 +857,61 @@ export class NetworkOrchestrator {
 	}
 
 	/**
+	 * Forcefully pushes local content for a list of paths/documentIds to the server store
+	 * to repair diverged or unsynced files.
+	 */
+	public async pushDivergedFiles(paths: string[]): Promise<number> {
+		if (!this.activeKey || paths.length === 0) return 0;
+		let count = 0;
+		for (const path of paths) {
+			const localContent = await this.noteRepo.readNote(path);
+			if (localContent === null) continue;
+
+			let documentId = this.vfsController.getUuidForPath(path);
+			if (!documentId) {
+				this.eventBus.emit('LocalFileCreated', {
+					path,
+					isFolder: false,
+					content: localContent
+				});
+				this.vfsController.flushPendingPush();
+				documentId = this.vfsController.getUuidForPath(path);
+			}
+
+			if (!documentId) continue;
+
+			if (isBinaryPath(path)) {
+				const rawBytes = base64ToUint8Array(localContent);
+				const hash = await this.crypto.hashData(rawBytes);
+				const encrypted = await this.crypto.encrypt(rawBytes, this.activeKey);
+				const payloadBytes = new TextEncoder().encode(JSON.stringify(encrypted));
+				await this.remoteStore.uploadBlob(hash, payloadBytes);
+				this.vfsController.setBlobHashForUuid(documentId, hash);
+				count++;
+			} else {
+				const updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent, false);
+				if (updateBinary) {
+					await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
+					count++;
+				} else {
+					const snapshot = await this.crdtEngine.exportSnapshot(documentId);
+					if (snapshot && snapshot.length > 0) {
+						await this.handleLocalDeltaReadyForPush({ documentId, updateBinary: snapshot, path });
+						count++;
+					}
+				}
+			}
+		}
+		return count;
+	}
+
+	/**
 	 * Rebuilds each document from exactly what the server holds and compares it to
 	 * local content, so "synced" can be answered with evidence instead of with an
 	 * empty task queue. Returns the documents that do not match.
+	 * If autoRepair is true, automatically pushes local versions of diverged files to the server.
 	 */
-	public async verifyVaultIntegrity(): Promise<VaultIntegrityReport> {
+	public async verifyVaultIntegrity(autoRepair = false): Promise<VaultIntegrityReport> {
 		const report: VaultIntegrityReport = { checked: 0, diverged: [], unreachable: [] };
 		if (!this.activeKey) return report;
 
@@ -899,7 +952,9 @@ export class NetworkOrchestrator {
 			const localContent = await this.noteRepo.readNote(file.path);
 			if (localContent === null) return;
 
-			if (remoteDoc.getText('markdown').toString() !== localContent) {
+			const normRemote = remoteDoc.getText('markdown').toString().replace(/\r\n/g, '\n');
+			const normLocal = localContent.replace(/\r\n/g, '\n');
+			if (normRemote !== normLocal) {
 				report.diverged.push(file.path);
 			}
 		})));
@@ -908,6 +963,10 @@ export class NetworkOrchestrator {
 		for (const documentId of this.unackedDocs) {
 			const path = this.vfsController.getPathForUuid(documentId);
 			if (path && !report.diverged.includes(path)) report.diverged.push(path);
+		}
+
+		if (autoRepair && report.diverged.length > 0) {
+			await this.pushDivergedFiles(report.diverged);
 		}
 
 		return report;

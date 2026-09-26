@@ -4,6 +4,8 @@ function isSelfPluginPath(relPath: string): boolean {
 	return (
 		relPath.startsWith('plugins/ilow-sync/') ||
 		relPath === 'plugins/ilow-sync' ||
+		relPath.startsWith('plugins/ilow-crdt/') ||
+		relPath === 'plugins/ilow-crdt' ||
 		relPath.startsWith('plugins/obsidian-ilow-')
 	);
 }

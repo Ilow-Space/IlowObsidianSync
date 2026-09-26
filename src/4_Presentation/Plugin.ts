@@ -60,10 +60,6 @@ export default class IlowSyncPlugin extends Plugin {
 	}
 
 	async onload() {
-		// Build-time version, so a console log from a user report identifies the
-		// exact bundle they are running rather than whatever manifest.json they
-		// happen to have on disk.
-		console.log(`[Ilow Sync] Loading build ${__PLUGIN_VERSION__}`);
 
 		// 1. Perform Yjs -> Loro Migration schema check and purge on boot
 		await LoroMigrationManager.performLibraryMigrationCheck();

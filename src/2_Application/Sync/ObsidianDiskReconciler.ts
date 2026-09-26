@@ -462,15 +462,7 @@ export class ObsidianDiskReconciler {
 						}
 					} else {
 						try {
-							const currentDiskContent = file && file instanceof TFile ? await this.readPhysicalFileContent(file) : null;
-							if (currentDiskContent !== payload.content) {
-								ObsidianDiskReconciler.suppressPath(payload.path);
-								if (file && file instanceof TFile) {
-									await this.modifyPhysicalFile(file, payload.content);
-								} else {
-									await this.createPhysicalFile(payload.path, payload.content);
-								}
-							}
+							await this.writeNonConfigFile(file, payload);
 						} catch (e) {
 							console.error('[ObsidianDiskReconciler] Failed to write binary/text content:', e);
 						} finally {
@@ -482,6 +474,21 @@ export class ObsidianDiskReconciler {
 				this.releaseFileMutex(payload.path);
 			}
 		});
+	}
+
+	private async writeNonConfigFile(file: TFile | null, payload: { path: string; content: string }): Promise<void> {
+		const currentDiskContent = file && file instanceof TFile ? await this.readPhysicalFileContent(file) : null;
+		const normDisk = isBinaryPath(payload.path) ? currentDiskContent : currentDiskContent?.replace(/\r\n/g, '\n');
+		const normPayload = isBinaryPath(payload.path) ? payload.content : payload.content.replace(/\r\n/g, '\n');
+
+		if (normDisk !== normPayload) {
+			ObsidianDiskReconciler.suppressPath(payload.path);
+			if (file && file instanceof TFile) {
+				await this.modifyPhysicalFile(file, payload.content);
+			} else {
+				await this.createPhysicalFile(payload.path, payload.content);
+			}
+		}
 	}
 
 	private triggerHotReload(configFilePath: string): void {
