@@ -14,3 +14,5 @@ input.txt
 backend/crdt-ws-bridge
 backend/crdt-ws-bridge.exe
 backend/data/
+
+graphify-out/
