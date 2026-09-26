@@ -59,6 +59,14 @@ export class NetworkOrchestrator {
 	private unackedDocs = new Set<string>();
 	/** Documents a sweep could not fetch, so "synced" is not yet true. */
 	private pendingDocs = new Set<string>();
+	/**
+	 * Documents where at least one pulled delta failed to import (corrupted,
+	 * truncated, or otherwise unparseable). Loro logs and skips a bad delta
+	 * rather than aborting the batch, which is right for availability but wrong
+	 * for visibility: without tracking this separately, fileLastSyncIds still
+	 * advances past the loss and nothing about the sync ever looks wrong again.
+	 */
+	private corruptedDocs = new Set<string>();
 
 	private activePath: string | null = null;
 	private activeDocumentId: string | null = null;
@@ -115,6 +123,11 @@ export class NetworkOrchestrator {
 		if (!this.activeKey) return;
 		this.addActiveTask('Integrity Sweep');
 		try {
+			// runFullSync re-pulls shard-index first, which is what discovers a
+			// document this instance has never heard of at all (a missed manifest
+			// notification, a dropped WS message) -- verifyVaultIntegrity alone only
+			// re-checks documents already in getActiveFiles, so it can never catch that.
+			await this.runFullSync();
 			const report = await this.verifyVaultIntegrity(true);
 			if (report.unreachable.length > 0) {
 				console.warn(`[NetworkOrchestrator] Integrity sweep: ${report.unreachable.length} document(s) unreachable.`);
@@ -258,9 +271,21 @@ export class NetworkOrchestrator {
 	 * one document says nothing about documents a previous sweep never fetched.
 	 */
 	private clearConnectionErrorIfSettled(): void {
-		if (this.pendingDocs.size === 0 && this.unackedDocs.size === 0) {
+		if (this.pendingDocs.size === 0 && this.unackedDocs.size === 0 && this.corruptedDocs.size === 0) {
 			this.hasConnectionError = false;
 		}
+	}
+
+	private reportImportFailure(documentId: string): void {
+		this.corruptedDocs.add(documentId);
+		this.hasConnectionError = true;
+		this.lastErrorMessage = `Data corruption detected while syncing ${documentId} -- some content may be missing. See the developer console.`;
+		this.triggerStatusUpdate();
+	}
+
+	/** Documents where a pulled delta failed to import at least once. Cleared once a later pull for that document applies cleanly. */
+	public getCorruptedDocuments(): string[] {
+		return Array.from(this.corruptedDocs);
 	}
 
 	/** Documents known to be out of sync with the server right now. */
@@ -706,7 +731,7 @@ export class NetworkOrchestrator {
 	 * Fetches a document. Returns false when the document could not be brought up
 	 * to date, so callers can record it as outstanding rather than assume success.
 	 */
-	public async pullDocument(documentId: string, path: string | null = null, isSilent: boolean = false, knownLatestRemoteId?: number): Promise<boolean> {
+	public async pullDocument(documentId: string, path: string | null = null, isSilent: boolean = false, knownLatestRemoteId?: number, force = false): Promise<boolean> {
 		if (!this.activeKey) return false;
 
 		const lastId = this.fileLastSyncIds.get(documentId) || 0;
@@ -716,17 +741,27 @@ export class NetworkOrchestrator {
 		// back to asking about this document directly instead of skipping it.
 		const bulkIdIsTrustworthy = knownLatestRemoteId !== undefined && !(knownLatestRemoteId === 0 && lastId > 0);
 
-		if (bulkIdIsTrustworthy && lastId > 0) {
-			if (knownLatestRemoteId <= lastId) return true;
-		} else if (lastId > 0) {
-			try {
-				const latestRemoteId = await this.remoteStore.getLatestUpdateId(documentId);
-				if (latestRemoteId <= lastId) return true;
-			} catch {
-				this.hasConnectionError = true;
-				this.lastErrorMessage = 'Connection failed';
-				this.triggerStatusUpdate();
-				return false;
+		// `force` skips this whole short-circuit. It exists because the watermark
+		// this compares against is not proof of correct content, only of having
+		// once reached this id -- an earlier silently-dropped or parked delta (see
+		// LoroSyncEngine.applyUpdates) can leave fileLastSyncIds pointing at an id
+		// whose content this device never actually got. A same-id compaction from a
+		// device that DOES have everything reports that identical id right back,
+		// and this check would treat it as nothing new. Ordinary syncing must stay
+		// cheap, so this is opt-in for a deliberate repair rather than the default.
+		if (!force) {
+			if (bulkIdIsTrustworthy && lastId > 0) {
+				if (knownLatestRemoteId <= lastId) return true;
+			} else if (lastId > 0) {
+				try {
+					const latestRemoteId = await this.remoteStore.getLatestUpdateId(documentId);
+					if (latestRemoteId <= lastId) return true;
+				} catch {
+					this.hasConnectionError = true;
+					this.lastErrorMessage = 'Connection failed';
+					this.triggerStatusUpdate();
+					return false;
+				}
 			}
 		}
 
@@ -765,16 +800,31 @@ export class NetworkOrchestrator {
 
 			await this.orchestratorMutex.runExclusive(async () => {
 				const currentLastId = this.fileLastSyncIds.get(documentId) || 0;
+				let imported = false;
+				let failedCount = 0;
 
-				if (details && currentLastId < details.maxCompactedId) {
+				// currentLastId can equal maxCompactedId while still being wrong: if an
+				// earlier pull silently dropped a delta (Loro logs and skips a delta
+				// that fails to import, or parks one whose causal dependency is
+				// missing -- see LoroSyncEngine.applyUpdates), the watermark still
+				// advances to the batch's max id as if everything had applied. A
+				// later compaction built from a device that DOES have everything can
+				// end up reporting that exact same id, and a strict `<` would treat
+				// this device as already caught up and skip the one payload that
+				// would actually fix it. Requiring encryptedState keeps this from
+				// firing on the ordinary first-pull case, where maxCompactedId is 0
+				// and no snapshot exists yet.
+				if (details?.encryptedState && currentLastId <= details.maxCompactedId) {
 					let offlineContent: string | null = null;
 					if (path) {
 						offlineContent = await this.noteRepo.readNote(path);
 					}
 
-					if (details.encryptedState && this.activeKey) {
+					if (this.activeKey) {
 						const decryptedBytes = await this.crypto.decrypt(details.encryptedState, this.activeKey);
-						await this.crdtEngine.applyUpdates(documentId, [decryptedBytes]);
+						const result = await this.crdtEngine.applyUpdates(documentId, [decryptedBytes]);
+						failedCount += result.failedCount;
+						imported = true;
 					}
 
 					this.fileLastSyncIds.set(documentId, details.maxCompactedId);
@@ -785,18 +835,33 @@ export class NetworkOrchestrator {
 				}
 
 				if (decryptedUpdates.length > 0) {
-					const doc = await this.crdtEngine.applyUpdates(documentId, decryptedUpdates);
+					const result = await this.crdtEngine.applyUpdates(documentId, decryptedUpdates);
+					failedCount += result.failedCount;
 					const maxId = Math.max(...updates.map(u => u.id));
 					this.fileLastSyncIds.set(documentId, maxId);
+					imported = true;
+				}
 
+				if (failedCount > 0) {
+					this.reportImportFailure(documentId);
+				} else if (imported) {
+					this.corruptedDocs.delete(documentId);
+				}
+
+				// Whichever path actually imported something -- the compaction catch-up
+				// above, the incremental batch below, or both -- downstream consumers
+				// need to hear about it exactly once. The compaction branch used to
+				// import straight into the CRDT doc and stop there: correct at the
+				// data layer, but invisible to LoroVfsController's own cache (what
+				// getActiveFiles() reads), which only refreshes when told to.
+				if (imported) {
 					if (documentId === 'shard-index') {
 						this.vfsController.processRemoteVfsUpdates();
 					} else if (path) {
-						this.eventBus.emit('CrdtTextChanged', {
-							uuid: documentId,
-							path,
-							content: doc.getText('markdown').toString()
-						});
+						const doc = await this.crdtEngine.getOrCreateDoc(documentId);
+						const content = doc.getText('markdown').toString();
+						this.crdtEngine.removeDoc(documentId);
+						this.eventBus.emit('CrdtTextChanged', { uuid: documentId, path, content });
 					}
 				}
 

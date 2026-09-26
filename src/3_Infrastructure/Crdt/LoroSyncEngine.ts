@@ -69,14 +69,23 @@ export class LoroSyncEngine {
 		return await loadPromise;
 	}
 
-	public async applyUpdates(documentId: string, updates: Uint8Array[]): Promise<LoroDoc> {
+	/**
+	 * failedCount lets a caller distinguish "everything applied" from "some of
+	 * this batch was corrupted or unparseable and got silently skipped" -- the
+	 * import loop below deliberately keeps going past a bad delta rather than
+	 * aborting the whole batch, so that fact would otherwise never leave this
+	 * function.
+	 */
+	public async applyUpdates(documentId: string, updates: Uint8Array[]): Promise<{ doc: LoroDoc; failedCount: number }> {
 		const doc = await this.getOrCreateDoc(documentId);
+		let failedCount = 0;
 
 		try {
 			for (const update of updates) {
 				try {
 					doc.import(update);
 				} catch (err) {
+					failedCount++;
 					console.error(`LoroSyncEngine error applying update for ${documentId}:`, err);
 				}
 			}
@@ -87,7 +96,7 @@ export class LoroSyncEngine {
 			const snapshot = doc.export({ mode: 'snapshot' });
 			await this.localStore.saveDocumentState(documentId, snapshot);
 
-			return doc;
+			return { doc, failedCount };
 		} finally {
 			this.removeDoc(documentId);
 		}
