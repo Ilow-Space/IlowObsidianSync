@@ -16,6 +16,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # A tag pushed with the default GITHUB_TOKEN does not trigger other
+          # workflows (GitHub's anti-recursion rule), so release.yml's
+          # `push: tags: v*` never fires. RELEASE_PAT (repo secret, a PAT with
+          # Contents: write) makes the push look like a normal user push.
+          token: ${{ secrets.RELEASE_PAT }}
 
       - name: Tag new version
         run: |
