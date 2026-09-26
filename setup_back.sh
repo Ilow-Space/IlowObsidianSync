@@ -22,10 +22,27 @@ apt-get install -y postgresql postgresql-contrib curl jq git
 systemctl enable postgresql
 systemctl start postgresql
 
-echo "[+] Step 2: Generating database credentials, API keys, and admin secrets..."
-DB_PASS=$(openssl rand -hex 16)
-ACCESS_KEY=$(openssl rand -hex 32)
-ADMIN_KEY=$(openssl rand -hex 32)
+echo "[+] Step 2: Generating or reusing database credentials, API keys, and admin secrets..."
+# A re-run (redeploy/update) must not silently rotate secrets a client already has
+# configured: nginx's auth block below is only injected once (Step 10 skips it when
+# markers already exist), so a script that regenerates ACCESS_KEY on every run makes
+# nginx and the backend's own .env drift apart -- two different keys, both "current"
+# depending on which layer you ask, with no error until a client using the frozen
+# nginx key gets rejected by the backend's rotated one (or vice versa).
+EXISTING_ENV="$INSTALL_DIR/.env"
+if [ -f "$EXISTING_ENV" ]; then
+    echo "[*] Existing .env found at $EXISTING_ENV -- reusing its secrets instead of rotating them."
+    EXISTING_DB_URL=$(grep -m1 '^DATABASE_URL=' "$EXISTING_ENV" | cut -d= -f2- || true)
+    if [ -n "$EXISTING_DB_URL" ]; then
+        DB_PASS="${EXISTING_DB_URL#*://*:}"
+        DB_PASS="${DB_PASS%%@*}"
+    fi
+    ACCESS_KEY=$(grep -m1 '^ACCESS_API_KEY=' "$EXISTING_ENV" | cut -d= -f2- || true)
+    ADMIN_KEY=$(grep -m1 '^ADMIN_API_KEY=' "$EXISTING_ENV" | cut -d= -f2- || true)
+fi
+DB_PASS="${DB_PASS:-$(openssl rand -hex 16)}"
+ACCESS_KEY="${ACCESS_KEY:-$(openssl rand -hex 32)}"
+ADMIN_KEY="${ADMIN_KEY:-$(openssl rand -hex 32)}"
 
 echo "[+] Step 3: Provisioning PostgreSQL database..."
 USER_EXISTS=$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'")
@@ -108,12 +125,15 @@ PORT=${PORT}
 DATABASE_URL=postgres://${DB_USER}:${DB_PASS}@localhost:5432/${DB_NAME}?sslmode=disable
 # Read by the Go server itself: every REST route and the WebSocket require it.
 ACCESS_API_KEY=${ACCESS_KEY}
-# Kept for Nginx configurations that reference \$API_KEY.
-API_KEY=${ACCESS_KEY}
 ADMIN_API_KEY=${ADMIN_KEY}
-# Comma-separated browser origins allowed cross-origin access. Empty means none,
-# which is correct for the plugin: Obsidian's requestUrl is not a browser client.
-ALLOWED_ORIGINS=
+# Comma-separated origins allowed through the WebSocket upgrade's CheckOrigin gate.
+# The plugin's REST calls go through Obsidian's requestUrl, which sends no Origin
+# and is unaffected either way -- but its realtime WebSocket is a real browser-style
+# WebSocket from Obsidian's Electron renderer, which DOES send one (app://obsidian.md).
+# Leaving this empty rejects that handshake outright: REST sync silently keeps
+# working while every realtime update is dropped, which looks like nothing is wrong
+# until you check the server log for "CheckOrigin" rejections.
+ALLOWED_ORIGINS=app://obsidian.md
 EOF
 chmod 600 "$INSTALL_DIR/.env"
 
