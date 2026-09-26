@@ -176,11 +176,28 @@ export class SettingsTab extends PluginSettingTab {
 											new Notice('Connection info incomplete');
 											return;
 										}
-										const ok = await store.testConnection();
-										if (ok) {
-											new Notice('Connection test successful!');
-										} else {
-											new Notice('Connection failed. Please check your URL and API Key.');
+										btn.setDisabled(true);
+										btn.setButtonText('Testing...');
+										try {
+											const restOk = await store.testConnection();
+											if (!restOk) {
+												new Notice('Connection failed. Please check your URL and API Key.');
+												return;
+											}
+											const wsOk = await store.testWebSocketConnection();
+											if (wsOk) {
+												new Notice('Connection test successful! REST and realtime WebSocket both reachable.');
+											} else {
+												new Notice(
+													'REST API is reachable, but the realtime WebSocket upgrade failed -- ' +
+													'live sync will not work even though pushes/pulls do. ' +
+													'Check the server\'s ALLOWED_ORIGINS setting and the developer console.',
+													10000
+												);
+											}
+										} finally {
+											btn.setDisabled(false);
+											btn.setButtonText('Test');
 										}
 									})
 							);

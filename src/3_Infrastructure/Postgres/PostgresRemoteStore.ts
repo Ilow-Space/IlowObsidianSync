@@ -12,6 +12,7 @@ export class PostgresRemoteStore implements IRemoteStore {
 	private socket: WebSocket | null = null;
 	private subscriptions = new Map<string, Array<(docId?: string, action?: string) => void>>();
 	public onServerVersion?: (latestId: number) => void;
+	private lastKnownVersion: number | null = null;
 
 	constructor(serverUrl: string, apiKey: string, customHeaders: Record<string, string> = {}) {
 		this.serverUrl = serverUrl.replace(/\/$/, '');
@@ -104,7 +105,10 @@ export class PostgresRemoteStore implements IRemoteStore {
 				try {
 					const payload = JSON.parse(event.data as string) as { type?: string; table?: string; record?: { vault_alias_id?: string; document_id?: string }; latest_id?: number };
 					if (payload.type === 'server_version') {
-						if (typeof payload.latest_id === 'number') this.onServerVersion?.(payload.latest_id);
+						if (typeof payload.latest_id === 'number') {
+							this.lastKnownVersion = payload.latest_id;
+							this.onServerVersion?.(payload.latest_id);
+						}
 						return;
 					}
 					if (payload.record && payload.record.vault_alias_id && payload.record.vault_alias_id !== this.vaultAliasId) {
@@ -195,6 +199,10 @@ export class PostgresRemoteStore implements IRemoteStore {
 		}
 	}
 
+	public getLastKnownVersion(): number | null {
+		return this.lastKnownVersion;
+	}
+
 	public async testConnection(): Promise<boolean> {
 		try {
 			const res = await requestUrl({
@@ -208,6 +216,46 @@ export class PostgresRemoteStore implements IRemoteStore {
 			void e;
 			return false;
 		}
+	}
+
+	/**
+	 * requestUrl (used by testConnection) is Obsidian's own HTTP client and sends
+	 * no Origin header, so it never exercises the server's CheckOrigin gate on the
+	 * WebSocket upgrade -- a REST pass here says nothing about whether realtime
+	 * sync can actually connect. This opens a real socket to prove the upgrade
+	 * itself succeeds.
+	 */
+	public testWebSocketConnection(): Promise<boolean> {
+		return new Promise((resolve) => {
+			if (!this.vaultAliasId) {
+				resolve(false);
+				return;
+			}
+
+			let settled = false;
+			const settle = (ok: boolean) => {
+				if (settled) return;
+				settled = true;
+				window.clearTimeout(timer);
+				testSocket.close();
+				resolve(ok);
+			};
+
+			let testSocket: WebSocket;
+			try {
+				const socketUrl = new URL(this.serverUrl.replace(/^http/i, 'ws'));
+				if (this.apiKey) socketUrl.searchParams.set('api_key', this.apiKey);
+				socketUrl.searchParams.set('vault_alias_id', this.vaultAliasId);
+				testSocket = new WebSocket(socketUrl.toString());
+			} catch {
+				resolve(false);
+				return;
+			}
+
+			const timer = window.setTimeout(() => settle(false), 8000);
+			testSocket.onopen = () => settle(true);
+			testSocket.onerror = () => settle(false);
+		});
 	}
 
 	public async fetchTelemetry(): Promise<ServerTelemetry | null> {
