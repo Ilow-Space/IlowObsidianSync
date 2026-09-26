@@ -22,6 +22,8 @@ export type VaultIntegrityReport = {
 	diverged: string[];
 	/** Paths the server could not be asked about. */
 	unreachable: string[];
+	/** Of `diverged`, the paths autoRepair actually confirmed pushed (only set when autoRepair=true). */
+	pushed?: string[];
 };
 
 export type LocalDeltaReadyForPush = {
@@ -858,51 +860,60 @@ export class NetworkOrchestrator {
 
 	/**
 	 * Forcefully pushes local content for a list of paths/documentIds to the server store
-	 * to repair diverged or unsynced files.
+	 * to repair diverged or unsynced files. Returns only the paths actually confirmed
+	 * pushed -- handleLocalDeltaReadyForPush swallows network failures into a background
+	 * retry (unackedDocs) instead of throwing, so "we called it" is not "it landed".
 	 */
-	public async pushDivergedFiles(paths: string[]): Promise<number> {
-		if (!this.activeKey || paths.length === 0) return 0;
-		let count = 0;
+	public async pushDivergedFiles(paths: string[]): Promise<string[]> {
+		if (!this.activeKey || paths.length === 0) return [];
+		const pushed: string[] = [];
 		for (const path of paths) {
 			const localContent = await this.noteRepo.readNote(path);
 			if (localContent === null) continue;
 
-			let documentId = this.vfsController.getUuidForPath(path);
-			if (!documentId) {
-				this.eventBus.emit('LocalFileCreated', {
-					path,
-					isFolder: false,
-					content: localContent
-				});
-				this.vfsController.flushPendingPush();
-				documentId = this.vfsController.getUuidForPath(path);
-			}
-
+			const documentId = await this.resolveOrCreateDocumentId(path, localContent);
 			if (!documentId) continue;
 
-			if (isBinaryPath(path)) {
-				const rawBytes = base64ToUint8Array(localContent);
-				const hash = await this.crypto.hashData(rawBytes);
-				const encrypted = await this.crypto.encrypt(rawBytes, this.activeKey);
-				const payloadBytes = new TextEncoder().encode(JSON.stringify(encrypted));
-				await this.remoteStore.uploadBlob(hash, payloadBytes);
-				this.vfsController.setBlobHashForUuid(documentId, hash);
-				count++;
-			} else {
-				const updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent, false);
-				if (updateBinary) {
-					await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
-					count++;
-				} else {
-					const snapshot = await this.crdtEngine.exportSnapshot(documentId);
-					if (snapshot && snapshot.length > 0) {
-						await this.handleLocalDeltaReadyForPush({ documentId, updateBinary: snapshot, path });
-						count++;
-					}
-				}
-			}
+			const ok = isBinaryPath(path)
+				? await this.pushDivergedBlob(path, documentId, localContent)
+				: await this.pushDivergedText(path, documentId, localContent);
+			if (ok) pushed.push(path);
 		}
-		return count;
+		return pushed;
+	}
+
+	private async resolveOrCreateDocumentId(path: string, localContent: string): Promise<string | null> {
+		const existing = this.vfsController.getUuidForPath(path);
+		if (existing) return existing;
+
+		this.eventBus.emit('LocalFileCreated', { path, isFolder: false, content: localContent });
+		this.vfsController.flushPendingPush();
+		return this.vfsController.getUuidForPath(path);
+	}
+
+	private async pushDivergedBlob(path: string, documentId: string, localContent: string): Promise<boolean> {
+		if (!this.activeKey) return false;
+		try {
+			const rawBytes = base64ToUint8Array(localContent);
+			const hash = await this.crypto.hashData(rawBytes);
+			const encrypted = await this.crypto.encrypt(rawBytes, this.activeKey);
+			const payloadBytes = new TextEncoder().encode(JSON.stringify(encrypted));
+			await this.remoteStore.uploadBlob(hash, payloadBytes);
+			this.vfsController.setBlobHashForUuid(documentId, hash);
+			return true;
+		} catch (err) {
+			console.error('[NetworkOrchestrator] Failed to push diverged blob:', path, err);
+			return false;
+		}
+	}
+
+	private async pushDivergedText(path: string, documentId: string, localContent: string): Promise<boolean> {
+		const updateBinary = await this.crdtEngine.handleLocalChange(documentId, localContent, false)
+			?? await this.crdtEngine.exportSnapshot(documentId);
+		if (!updateBinary || updateBinary.length === 0) return false;
+
+		await this.handleLocalDeltaReadyForPush({ documentId, updateBinary, path });
+		return !this.unackedDocs.has(documentId);
 	}
 
 	/**
@@ -966,7 +977,7 @@ export class NetworkOrchestrator {
 		}
 
 		if (autoRepair && report.diverged.length > 0) {
-			await this.pushDivergedFiles(report.diverged);
+			report.pushed = await this.pushDivergedFiles(report.diverged);
 		}
 
 		return report;

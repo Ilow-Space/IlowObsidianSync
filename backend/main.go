@@ -1365,6 +1365,27 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	atomic.AddInt64(&activeWebSockets, 1)
 
+	// Tell the client the server's current version the moment it connects. A
+	// client that missed a NOTIFY while disconnected has no other way to learn
+	// it is behind: there is no periodic re-sync, only this one-shot signal on
+	// every (re)connect, which the client treats as "diff me against this and
+	// catch up whatever's stale" rather than trusting the live stream alone.
+	var latestID int
+	if err := db.QueryRow(
+		"SELECT COALESCE(MAX(id), 0) FROM vault_updates WHERE vault_alias_id = $1",
+		vaultAliasID,
+	).Scan(&latestID); err == nil {
+		versionMsg, _ := json.Marshal(map[string]any{
+			"type":      "server_version",
+			"latest_id": latestID,
+		})
+		if err := client.notify(versionMsg); err != nil {
+			log.Printf("[WebSocket] Failed to send server_version to new client: %v\n", err)
+		}
+	} else {
+		log.Printf("[WebSocket] Failed to fetch latest_id for server_version: %v\n", err)
+	}
+
 	defer func() {
 		globalHub.mu.Lock()
 		delete(globalHub.clients, client)

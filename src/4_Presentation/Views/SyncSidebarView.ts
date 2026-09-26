@@ -67,10 +67,8 @@ export class SyncSidebarView extends ItemView {
 				if (color) valEl.setCssStyles({ color });
 			};
 
-			const healthColor = this.telemetry.systemHealth === 'healthy' ? 'var(--text-success)' :
-				this.telemetry.systemHealth === 'degraded' ? 'var(--text-warning)' : 'var(--text-error)';
-
-			createStat('Health', this.telemetry.systemHealth.toUpperCase(), healthColor);
+			const serverVersion = this.plugin.getRemoteStore()?.getLastKnownVersion();
+			createStat('Server Version', serverVersion !== null && serverVersion !== undefined ? `#${serverVersion}` : 'Unknown');
 			createStat('Uptime', this.formatUptime(this.telemetry.uptimeSeconds));
 			createStat('RPS (Live)', `${this.telemetry.rps}/s`);
 			createStat('RPM (Avg/Hr)', `${this.telemetry.rpmAvgHour.toFixed(1)}/m`);
