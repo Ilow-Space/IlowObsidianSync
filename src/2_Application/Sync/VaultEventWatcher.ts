@@ -36,18 +36,23 @@ export class VaultEventWatcher {
 			for (let i = 0; i < 3; i++) {
 				try {
 					if (this.app.vault.adapter && await this.app.vault.adapter.exists(file.path)) {
-						let arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
-						if (arrayBuffer.byteLength === 0) {
-							await new Promise(r => window.setTimeout(r, 100));
-							arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
+						const arrayBuffer = await this.app.vault.adapter.readBinary(file.path);
+						if (arrayBuffer.byteLength > 0) {
+							return uint8ArrayToBase64(new Uint8Array(arrayBuffer));
 						}
-						const bytes = new Uint8Array(arrayBuffer);
-						return uint8ArrayToBase64(bytes);
+						// A create event can fire before a large paste has finished
+						// flushing to disk. That is not an exception -- adapter.exists
+						// and readBinary both succeed, just with 0 bytes -- so it must
+						// feed back into this loop's own retries rather than returning
+						// immediately, or a slow disk turns into a permanently empty
+						// upload with no error anywhere.
 					}
 				} catch {
-					await new Promise(r => window.setTimeout(r, 150));
+					// fall through to the shared backoff below
 				}
+				await new Promise(r => window.setTimeout(r, 150));
 			}
+			console.warn(`[VaultEventWatcher] Gave up reading ${file.path} after 3 attempts -- read 0 bytes every time.`);
 			return '';
 		}
 		return await this.app.vault.read(file);
