@@ -8,6 +8,7 @@ import { isBinaryPath, base64ToUint8Array, uint8ArrayToBase64 } from '@domain/Ut
 export class ObsidianDiskReconciler {
 	private fileLocks = new Map<string, Mutex>();
 	private diskQueue = new PQueue({ concurrency: 5 });
+	private serverWins = false;
 	public static suppressedPaths = new Set<string>();
 	private static suppressionDepth = new Map<string, number>();
 
@@ -16,6 +17,9 @@ export class ObsidianDiskReconciler {
 		private syncEngine: LoroSyncEngine,
 		private eventBus: SyncEventBus
 	) {}
+
+	/** While true, a server node landing on an existing local file adopts it instead of spawning a conflict copy. */
+	public setServerWins(value: boolean): void { this.serverWins = value; }
 
 	public initialize(): void {
 		this.eventBus.on('CrdtNodeCreated', (p) => { void this.handleCrdtNodeCreated(p); });
@@ -216,9 +220,10 @@ export class ObsidianDiskReconciler {
 					let isConflict = false;
 
 					if (existing) {
+						if (payload.isFolder && existing instanceof TFolder) return;
 						if (!payload.isFolder && existing instanceof TFile) {
 							const diskContent = await this.readPhysicalFileContent(existing);
-							if (diskContent === (payload.content || '')) {
+							if (this.serverWins || diskContent === (payload.content || '')) {
 							    this.eventBus.emit('RebalancePathUuid', { remoteUuid: payload.uuid, path: targetPath });
 							    return;
 							}

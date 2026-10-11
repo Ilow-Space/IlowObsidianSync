@@ -555,6 +555,13 @@ export class LoroVfsController {
 		}
 	}
 
+	/** Re-binds to a freshly loaded index doc, discarding any unpushed local index changes. */
+	public async reinitialize(): Promise<void> {
+		this.pendingFrontier = null;
+		this.destroy();
+		await this.initialize();
+	}
+
 	public destroy(): void {
 		this.flushPendingPush();
 		this.eventBus.off('LocalFileCreated', this.boundCreated);

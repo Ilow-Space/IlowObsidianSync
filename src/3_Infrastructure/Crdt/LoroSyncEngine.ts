@@ -190,6 +190,15 @@ export class LoroSyncEngine {
 		this.loadingDocs.delete(documentId);
 	}
 
+	/** Drops every in-memory doc and the persisted cache, so the next load starts from nothing. */
+	public async resetAll(): Promise<void> {
+		this.activeDocs.clear();
+		this.refCounts.clear();
+		this.fallbackCache.clear();
+		this.loadingDocs.clear();
+		await this.localStore.clearAll();
+	}
+
 	public destroy(): void {
 		this.activeDocs.clear();
 		this.refCounts.clear();

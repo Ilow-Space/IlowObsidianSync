@@ -64,5 +64,6 @@ export class LoroSnapshotStore extends Dexie {
 
 	public async clearAll(): Promise<void> {
 		await this.snapshots.clear();
+		await this.outbox.clear();
 	}
 }

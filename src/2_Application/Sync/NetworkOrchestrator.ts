@@ -57,6 +57,8 @@ export class NetworkOrchestrator {
 	 * the durable outbox table so the repair survives a restart.
 	 */
 	private unackedDocs = new Set<string>();
+	/** True only inside forcePullServerState: the server is the truth, local disk content is never merged back. */
+	private serverWins = false;
 	/** Documents a sweep could not fetch, so "synced" is not yet true. */
 	private pendingDocs = new Set<string>();
 	/**
@@ -494,7 +496,7 @@ export class NetworkOrchestrator {
 
 			const indexRemoteLatest = knownRemoteId('shard-index') ?? 0;
 			const indexLastSync = this.fileLastSyncIds.get('shard-index') || 0;
-			if (indexLastSync === 0 && indexRemoteLatest === 0) {
+			if (indexLastSync === 0 && indexRemoteLatest === 0 && !this.serverWins) {
 				const indexDoc = await this.crdtEngine.getOrCreateDoc('shard-index');
 				const indexSnapshot = indexDoc.export({ mode: 'snapshot' });
 				if (indexSnapshot && indexSnapshot.length > 0) {
@@ -561,7 +563,7 @@ export class NetworkOrchestrator {
 				this.prePullBaselineContents.set(file.uuid, doc.getText('markdown').toString());
 			}
 
-			await this.ingestLocalOfflineNotes(bulkUpdates ?? {});
+			if (!this.serverWins) await this.ingestLocalOfflineNotes(bulkUpdates ?? {});
 
 			if (this.diskReconciler) {
 				await this.diskReconciler.onIdle();
@@ -795,7 +797,7 @@ export class NetworkOrchestrator {
 				// and no snapshot exists yet.
 				if (details?.encryptedState && currentLastId <= details.maxCompactedId) {
 					let offlineContent: string | null = null;
-					if (path) {
+					if (path && !this.serverWins) {
 						offlineContent = await this.noteRepo.readNote(path);
 					}
 
@@ -1109,6 +1111,41 @@ export class NetworkOrchestrator {
 		}
 
 		return report;
+	}
+
+	/**
+	 * Makes this device's vault match the server: local CRDT cache and outbox are discarded, every
+	 * document is re-pulled, and server content overwrites whatever is on disk at the same path.
+	 * Nothing is pushed. Files that exist only locally are left untouched and returned, because the
+	 * next ordinary sync would upload them as new notes.
+	 */
+	public async forcePullServerState(): Promise<{ localOnly: string[] }> {
+		if (!this.activeKey) throw new Error('Unlock the vault first.');
+		if (this.isSyncingFull) throw new Error('A sync is already running; try again in a moment.');
+
+		this.serverWins = true;
+		this.diskReconciler?.setServerWins(true);
+		try {
+			this.fileLastSyncIds.clear();
+			this.fileUpdateCounters.clear();
+			this.pendingRetries = [];
+			this.unackedDocs.clear();
+			this.pendingDocs.clear();
+			this.corruptedDocs.clear();
+			await this.crdtEngine.resetAll();
+			await this.vfsController.reinitialize();
+
+			this.hasConnectionError = false;
+			await this.runFullSync();
+			if (this.hasConnectionError) throw new Error(this.lastErrorMessage || 'Force pull failed');
+			await this.diskReconciler?.onIdle();
+
+			const local = typeof this.noteRepo.listAllNotes === 'function' ? await this.noteRepo.listAllNotes() : [];
+			return { localOnly: local.filter(p => !this.vfsController.getUuidForPath(p)) };
+		} finally {
+			this.serverWins = false;
+			this.diskReconciler?.setServerWins(false);
+		}
 	}
 
 	public async deleteRemoteSnapshot(documentId: string): Promise<void> {

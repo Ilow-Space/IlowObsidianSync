@@ -364,6 +364,39 @@ export class SettingsTab extends PluginSettingTab {
 						}
 					},
 					{
+						name: 'Force pull from server',
+						desc: 'Makes this vault match the server: discards the local sync cache and overwrites local notes and attachments with the server version. Nothing is uploaded. Notes that exist only on this device are kept. Copy your vault first if it holds edits you care about.',
+						render: (setting) => {
+							setting.addButton((btn) =>
+								btn
+									.setButtonText('Force pull')
+									.setDestructive()
+									.onClick(() => {
+										new ConfirmationModal(
+											this.app,
+											'Force pull from server',
+											'Local versions of every note and attachment that exists on the server will be overwritten with the server version. Notes that exist only on this device are kept. Continue?',
+											'Force pull',
+											async () => {
+												const orchestrator = this.plugin.getSyncOrchestrator();
+												if (!orchestrator || !this.plugin.isKeyDerived) {
+													new Notice('Unlock the vault first.');
+													return;
+												}
+												try {
+													new Notice('Force pull started...');
+													const { localOnly } = await orchestrator.forcePullServerState();
+													new Notice(`Force pull complete.${localOnly.length ? ` ${localOnly.length} local-only note(s) kept; the next sync will upload them.` : ''}`);
+												} catch (err: unknown) {
+													new Notice(`Force pull failed: ${err instanceof Error ? err.message : String(err)}`);
+												}
+											}
+										).open();
+									})
+							);
+						}
+					},
+					{
 						name: 'Verify vault integrity',
 						desc: 'Rebuilds every note from exactly what the server holds and reports any that differ. The status light only means the local queue drained, so this is the check to run after a long offline period or a lossy connection.',
 						render: (setting) => {

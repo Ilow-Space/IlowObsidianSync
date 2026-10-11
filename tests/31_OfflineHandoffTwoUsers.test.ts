@@ -36,6 +36,7 @@ class Device {
 	bus = new SyncEventBus();
 	vfs!: LoroVfsController;
 	orch!: NetworkOrchestrator;
+	seedLocal!: (path: string, content: string) => void;
 	reconciler!: ObsidianDiskReconciler;
 
 	constructor(private server: FakeVaultServer) {}
@@ -47,6 +48,7 @@ class Device {
 
 		const files = new Map<string, TFile>();
 		const mk = (p: string) => { const f = new TFile(); (f as any).path = p; (f as any).name = p.split('/').pop(); files.set(p, f); return f; };
+		this.seedLocal = (p: string, c: string) => { mk(p); this.disk.set(p, c); };
 		const app: any = {
 			vault: {
 				configDir: '.obsidian',
@@ -202,5 +204,68 @@ describe('E2E: offline hand-off between two users', () => {
 
 		b.disk.set('img/pic.png', Buffer.from([9, 9, 9]).toString('base64'));
 		expect((await b.orch.verifyVaultIntegrity()).diverged).toContain('img/pic.png');
+	});
+
+	let serverUpdatesAtStart = 0;
+	describe('stale local copy of a server file', () => {
+		beforeEach(async () => {
+			await a.goOnline();
+			await a.createFile('notes/a.md', 'server truth');
+			await a.createFile('notes/b.md', 'server b');
+			a.goOffline();
+			b.seedLocal('notes/a.md', 'stale local edit that must lose');
+			b.seedLocal('notes/b.md', 'server b');
+			b.seedLocal('notes/local-only.md', 'never uploaded');
+			serverUpdatesAtStart = server.updates.length;
+		});
+
+		it('plain sync (diagnostic): what happens to a stale same-path file', async () => {
+			await b.goOnline();
+			await settle(150);
+			console.log('PLAIN SYNC B DISK:', JSON.stringify(Object.fromEntries(b.disk)), 'ERR', errors.length);
+		});
+
+		it('forcePullServerState: server content overwrites local, no conflict copies, local-only file kept & reported', async () => {
+			b.online = true;
+			const res = await b.orch.forcePullServerState();
+			await settle(150);
+
+			expect(b.disk.get('notes/a.md')).toBe('server truth');
+			expect(b.disk.get('notes/b.md')).toBe('server b');
+			expect([...b.disk.keys()].filter(k => k.includes('Conflict'))).toEqual([]);
+			expect(res.localOnly).toEqual(['notes/local-only.md']);
+			expect(b.disk.get('notes/local-only.md')).toBe('never uploaded');
+			expect((await b.orch.verifyVaultIntegrity()).diverged).toEqual([]);
+			// the server was not modified by the force pull
+			expect(server.updates.length).toBe(serverUpdatesAtStart);
+			expect(errors).toEqual([]);
+		});
+	});
+
+	describe('long nested paths', () => {
+		const deep = Array.from({ length: 12 }, (_, i) => `level${i}-${'x'.repeat(20)}`).join('/') + '/deep note.md';
+		beforeEach(async () => {
+			await a.goOnline();
+			await a.createFile(deep, 'deep truth');
+			await a.createFile('top.md', 'top');
+			a.goOffline();
+		});
+
+		it('normal pull delivers it', async () => {
+			await b.goOnline();
+			await settle(150);
+			expect(b.disk.get(deep)).toBe('deep truth');
+			expect([...b.disk.keys()].filter(k => k.includes('Conflict'))).toEqual([]);
+			expect((await b.orch.verifyVaultIntegrity()).diverged).toEqual([]);
+		});
+
+		it('force pull delivers it and overwrites a stale copy, with existing parent folders', async () => {
+			b.seedLocal(deep, 'stale');
+			b.online = true;
+			await b.orch.forcePullServerState();
+			await settle(150);
+			expect(b.disk.get(deep)).toBe('deep truth');
+			expect([...b.disk.keys()].filter(k => k.includes('Conflict'))).toEqual([]);
+		});
 	});
 });
