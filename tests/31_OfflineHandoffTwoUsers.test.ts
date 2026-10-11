@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TFile } from 'obsidian';
 import { createHash } from 'node:crypto';
+import { LoroDoc } from 'loro-crdt';
+import { PeerTreeCheck } from '../src/2_Application/Sync/PeerTreeCheck';
 import { FakeVaultServer, materializeRemote } from './helpers/FakeVaultServer';
 import { SyncEventBus } from '../src/2_Application/Sync/SyncEventBus';
 import { LoroVfsController } from '../src/2_Application/Sync/LoroVfsController';
@@ -37,9 +39,12 @@ class Device {
 	vfs!: LoroVfsController;
 	orch!: NetworkOrchestrator;
 	seedLocal!: (path: string, content: string) => void;
+	peer!: PeerTreeCheck;
 	reconciler!: ObsidianDiskReconciler;
 
-	constructor(private server: FakeVaultServer) {}
+	constructor(private server: FakeVaultServer) {
+		((server as any).devices ??= []).push(this);
+	}
 
 	async start() {
 		(this.engine as any).localStore = new MemStore();
@@ -75,7 +80,13 @@ class Device {
 			getLatestUpdateId: async (id: string) => { net(); return this.server.latestIds()[id] ?? 0; },
 			fetchSnapshotDetails: async (id: string) => { net(); return this.server.snapshots.get(id) ?? null; },
 			fetchUpdatesSince: async (id: string, since: number) => { net(); return this.server.updatesSince(id, since); },
-			pushUpdate: async (id: string, u: Uint8Array) => { net(); this.server.push(id, u); },
+			pushUpdate: async (id: string, u: Uint8Array) => {
+				net(); this.server.push(id, u);
+				// the realtime socket: every other online device hears about the update
+				for (const d of (this.server as any).devices as Device[]) {
+					if (d !== this && d.online && d.peer) setTimeout(() => void d.peer.onNotification(id), 0);
+				}
+			},
 			compactSnapshot: async () => {}, deleteSnapshot: async () => {},
 			fetchManifest: async () => [], uploadBlobManifest: async () => {},
 			uploadBlob: async (h: string, b: Uint8Array) => { net(); this.server.blobs.set(h, b); },
@@ -94,6 +105,7 @@ class Device {
 		this.orch = new NetworkOrchestrator(remote, crypto, this.engine, repo, this.vfs, this.bus, () => {}, 1000, this.reconciler);
 		this.orch.initialize();
 		this.orch.setCryptoKey({} as any);
+		this.peer = new PeerTreeCheck(remote, crypto, repo, () => ({} as any), () => this.orch.runIntegritySweep());
 	}
 
 	async createFile(path: string, content: string) {
@@ -266,6 +278,62 @@ describe('E2E: offline hand-off between two users', () => {
 			await settle(150);
 			expect(b.disk.get(deep)).toBe('deep truth');
 			expect([...b.disk.keys()].filter(k => k.includes('Conflict'))).toEqual([]);
+		});
+	});
+
+	describe('peer tree check', () => {
+		const fast = { waitMs: 2500, settleMs: 150 };
+
+		it('reports no-peers when nobody else is online', async () => {
+			await a.goOnline();
+			await a.createFile('only.md', 'x');
+			expect((await a.peer.check({ waitMs: 800, settleMs: 50 })).status).toBe('no-peers');
+		});
+
+		it('matches 1:1 when both online devices hold the same physical files', async () => {
+			await a.goOnline();
+			await a.createFile('n/one.md', 'one');
+			await a.createFile('pic.png', Buffer.from([1, 2, 3, 4]).toString('base64'));
+			await b.goOnline();
+			await settle(150);
+			const r = await a.peer.check(fast);
+			expect(r).toEqual({ status: 'match', rounds: 1, peers: [] });
+			expect(errors).toEqual([]);
+		});
+
+		it('on a mismatch both sides heal and a later round matches', async () => {
+			await a.goOnline();
+			await a.createFile('shared.md', 'v1');
+			await b.goOnline();
+			await settle(150);
+			expect(b.disk.get('shared.md')).toBe('v1');
+
+			b.disk.set('shared.md', 'drifted on B only');   // physical drift the sync never saw
+			b.disk.delete('missing-soon.md');
+			const r = await a.peer.check({ ...fast, rounds: 4 });
+			await settle(150);
+
+			expect(r.status).toBe('match');
+			expect(r.rounds).toBeGreaterThan(1);
+			expect(a.disk.get('shared.md')).toBe(b.disk.get('shared.md'));
+			expect(errors).toEqual([]);
+		});
+	});
+
+	describe('unknown server documents', () => {
+		it('are downloaded, classified once, warned once, and listed by verify', async () => {
+			await a.goOnline();
+			const ghost = new LoroDoc();
+			ghost.getText('markdown').insert(0, 'who am i');
+			ghost.commit();
+			server.push('ghost-doc', ghost.export({ mode: 'snapshot' }));
+
+			await a.orch.handleUnknownDocument('ghost-doc');
+			await a.orch.handleUnknownDocument('ghost-doc');
+
+			expect(a.orch.getOrphanDocs()).toEqual([{ documentId: 'ghost-doc', kind: 'text' }]);
+			expect(warns.filter(w => String(w[0]).includes('ghost-doc')).length).toBe(1);
+			expect((await a.orch.verifyVaultIntegrity()).orphans).toEqual([{ documentId: 'ghost-doc', kind: 'text' }]);
 		});
 	});
 });

@@ -397,6 +397,35 @@ export class SettingsTab extends PluginSettingTab {
 						}
 					},
 					{
+						name: 'Check against other devices',
+						desc: 'Asks every other online device for the files that are really on its disk (hashes, not names) and compares them one-to-one with this device. On a mismatch both sides re-sync toward the server and the check repeats, up to 3 rounds. Hidden and config files are ignored.',
+						render: (setting) => {
+							setting.addButton((btn) =>
+								btn.setButtonText('Check now').onClick(async () => {
+									const peerCheck = this.plugin.getPeerTreeCheck();
+									if (!peerCheck || !this.plugin.isKeyDerived) {
+										new Notice('Unlock the vault first.');
+										return;
+									}
+									btn.setDisabled(true).setButtonText('Checking...');
+									try {
+										const r = await peerCheck.check();
+										if (r.status === 'no-peers') new Notice('No other online device answered.');
+										else if (r.status === 'match') new Notice(`Trees match 1:1 on every online device (round ${r.rounds}).`);
+										else {
+											const sample = r.peers.flatMap(p => [...p.onlyHere, ...p.onlyThere, ...p.differ]).slice(0, 5).join(', ');
+											new Notice(`Still different after ${r.rounds} rounds on ${r.peers.length} device(s): ${sample}. Run Force pull on the wrong device.`, 15000);
+										}
+									} catch (err: unknown) {
+										new Notice(`Peer check failed: ${err instanceof Error ? err.message : String(err)}`);
+									} finally {
+										btn.setDisabled(false).setButtonText('Check now');
+									}
+								})
+							);
+						}
+					},
+					{
 						name: 'Verify vault integrity',
 						desc: 'Rebuilds every note from exactly what the server holds and reports any that differ. The status light only means the local queue drained, so this is the check to run after a long offline period or a lossy connection.',
 						render: (setting) => {

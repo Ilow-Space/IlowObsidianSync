@@ -8,6 +8,7 @@ import { LoroMigrationManager } from '@infrastructure/Crdt/LoroMigrationManager'
 import { NetworkOrchestrator, SyncStatus } from '@application/Sync/NetworkOrchestrator';
 import { SyncEventBus } from '@application/Sync/SyncEventBus';
 import { VaultEventWatcher } from '@application/Sync/VaultEventWatcher';
+import { PeerTreeCheck } from '@application/Sync/PeerTreeCheck';
 import { LoroVfsController } from '@application/Sync/LoroVfsController';
 import { ObsidianDiskReconciler } from '@application/Sync/ObsidianDiskReconciler';
 import { SyncSidebarView, SYNC_SIDEBAR_VIEW_TYPE } from './Views/SyncSidebarView';
@@ -54,6 +55,7 @@ export default class IlowSyncPlugin extends Plugin {
 	private statusBarItem!: HTMLElement;
 	private isBootstrapping = false;
 	private manifestUnsubscribe: (() => void) | null = null;
+	private peerTreeCheck: PeerTreeCheck | null = null;
 
 	get isKeyDerived(): boolean {
 		return this.derivedKey !== null;
@@ -173,6 +175,10 @@ export default class IlowSyncPlugin extends Plugin {
 		return this.networkOrchestrator;
 	}
 
+	public getPeerTreeCheck(): PeerTreeCheck | null {
+		return this.peerTreeCheck;
+	}
+
 	public getVfsController(): LoroVfsController | null {
 		return this.vfsController;
 	}
@@ -242,21 +248,19 @@ export default class IlowSyncPlugin extends Plugin {
 			this.manifestUnsubscribe = this.remoteStore.subscribeToUpdates('manifest', (docId, action) => {
 				if (!docId) return;
 
+				if (PeerTreeCheck.isPeerDoc(docId)) {
+					void this.peerTreeCheck?.onNotification(docId);
+					return;
+				}
+
 				if (docId === 'shard-index') {
 					void this.networkOrchestrator?.pullDocument('shard-index', null, true)
 						.catch((err) => console.error('[Ilow Sync] Failed to pull shard-index update:', err));
 				} else {
 					void (async () => {
-						let path = this.vfsController?.getPathForUuid(docId);
-						if (!path) {
-							await this.networkOrchestrator?.pullDocument('shard-index', null, true);
-							path = this.vfsController?.getPathForUuid(docId);
-						}
-						if (path) {
-							await this.networkOrchestrator?.pullDocument(docId, path, true);
-						} else {
-							console.warn('[Ilow Sync] Received update for unknown document, could not resolve path:', docId);
-						}
+						const path = this.vfsController?.getPathForUuid(docId);
+						if (path) await this.networkOrchestrator?.pullDocument(docId, path, true);
+						else await this.networkOrchestrator?.handleUnknownDocument(docId);
 					})().catch((err) => console.error('[Ilow Sync] Failed to handle manifest update for', docId, err));
 				}
 			});
@@ -354,6 +358,12 @@ export default class IlowSyncPlugin extends Plugin {
 				(status, msg) => this.updateStatusBar(status, msg),
 				this.settings.syncDebounceMs,
 				this.diskReconciler
+			);
+
+			const orchestrator = this.networkOrchestrator;
+			this.peerTreeCheck = new PeerTreeCheck(
+				this.remoteStore, this.cryptoService, this.noteRepo,
+				() => this.derivedKey, () => orchestrator.runIntegritySweep()
 			);
 
 			await this.vfsController.initialize();

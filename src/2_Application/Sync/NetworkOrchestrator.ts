@@ -15,6 +15,8 @@ import { isBinaryPath, base64ToUint8Array, uint8ArrayToBase64 } from '@domain/Ut
 
 export type SyncStatus = 'synced' | 'syncing' | 'error' | 'offline';
 
+export type OrphanKind = 'text' | 'tree' | 'empty' | 'undecodable' | 'unreachable';
+
 export type VaultIntegrityReport = {
 	/** Documents compared against the server. */
 	checked: number;
@@ -22,6 +24,8 @@ export type VaultIntegrityReport = {
 	diverged: string[];
 	/** Paths the server could not be asked about. */
 	unreachable: string[];
+	/** Documents the server holds that no index entry points to, with what they turned out to be. */
+	orphans?: Array<{ documentId: string; kind: OrphanKind }>;
 	/** Of `diverged`, the paths autoRepair actually confirmed pushed (only set when autoRepair=true). */
 	pushed?: string[];
 };
@@ -59,6 +63,8 @@ export class NetworkOrchestrator {
 	private unackedDocs = new Set<string>();
 	/** True only inside forcePullServerState: the server is the truth, local disk content is never merged back. */
 	private serverWins = false;
+	/** Server documents no index entry resolves, classified by downloading them. */
+	private orphanDocs = new Map<string, OrphanKind>();
 	/** Documents a sweep could not fetch, so "synced" is not yet true. */
 	private pendingDocs = new Set<string>();
 	/**
@@ -121,7 +127,8 @@ export class NetworkOrchestrator {
 		}, NetworkOrchestrator.INTEGRITY_SWEEP_INTERVAL_MS) as unknown as ReturnType<typeof setInterval>;
 	}
 
-	private async runIntegritySweep(): Promise<void> {
+	/** Full sync + verify with auto-repair; also what a peer-tree mismatch heals with. */
+	public async runIntegritySweep(): Promise<void> {
 		if (!this.activeKey) return;
 		this.addActiveTask('Integrity Sweep');
 		try {
@@ -144,6 +151,51 @@ export class NetworkOrchestrator {
 	private async handleRemoteNodeDiscovered(payload: { uuid: string; path: string; isFolder: boolean }): Promise<void> {
 		if (payload.isFolder || !this.activeKey || !this.isInitialized) return;
 		await this.pullDocument(payload.uuid, payload.path, true);
+	}
+
+	/**
+	 * A realtime update arrived for a document the index does not know. First re-read the index
+	 * (the notification may simply have outrun it); if it still resolves nowhere, download the
+	 * document and record what it is, so the anomaly is visible instead of a one-line warning.
+	 */
+	public async handleUnknownDocument(documentId: string): Promise<void> {
+		if (!this.activeKey) return;
+		await this.pullDocument('shard-index', null, true, undefined, true);
+		const path = this.vfsController.getPathForUuid(documentId);
+		if (path) {
+			await this.pullDocument(documentId, path, true);
+			return;
+		}
+		if (this.orphanDocs.has(documentId)) return;
+
+		const kind = await this.classifyDocument(documentId);
+		this.orphanDocs.set(documentId, kind);
+		console.warn(`[NetworkOrchestrator] Server document ${documentId} is not in the index (${kind}). Listed under orphans in Verify.`);
+	}
+
+	private async classifyDocument(documentId: string): Promise<OrphanKind> {
+		if (!this.activeKey) return 'unreachable';
+		try {
+			const [details, updates] = await Promise.all([
+				this.remoteStore.fetchSnapshotDetails(documentId),
+				this.remoteStore.fetchUpdatesSince(documentId, 0)
+			]);
+			if (!details?.encryptedState && updates.length === 0) return 'empty';
+			const doc = new LoroDoc();
+			try {
+				if (details?.encryptedState) doc.import(await this.crypto.decrypt(details.encryptedState, this.activeKey));
+				for (const u of updates) doc.import(await this.crypto.decrypt(u.encryptedUpdate, this.activeKey));
+			} catch {
+				return 'undecodable';
+			}
+			return doc.getTree('vault-tree').getNodes().length > 0 ? 'tree' : 'text';
+		} catch {
+			return 'unreachable';
+		}
+	}
+
+	public getOrphanDocs(): Array<{ documentId: string; kind: OrphanKind }> {
+		return Array.from(this.orphanDocs, ([documentId, kind]) => ({ documentId, kind }));
 	}
 
 	public getRemoteStore(): IRemoteStore { return this.remoteStore; }
@@ -1091,6 +1143,8 @@ export class NetworkOrchestrator {
 				report.diverged.push(file.path);
 			}
 		})));
+
+		report.orphans = this.getOrphanDocs();
 
 		// Anything the server has not acknowledged is diverged by definition.
 		for (const documentId of this.unackedDocs) {
