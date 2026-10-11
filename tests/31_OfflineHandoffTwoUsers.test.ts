@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TFile } from 'obsidian';
 import { createHash } from 'node:crypto';
 import { LoroDoc } from 'loro-crdt';
+import { CryptoUtils } from '../src/3_Infrastructure/Crypto/CryptoUtils';
 import { PeerTreeCheck } from '../src/2_Application/Sync/PeerTreeCheck';
 import { FakeVaultServer, materializeRemote } from './helpers/FakeVaultServer';
 import { SyncEventBus } from '../src/2_Application/Sync/SyncEventBus';
@@ -39,6 +40,8 @@ class Device {
 	vfs!: LoroVfsController;
 	orch!: NetworkOrchestrator;
 	seedLocal!: (path: string, content: string) => void;
+	/** Every adapter-level (config) write, so a test can see if a file was ever blanked. */
+	writes: Array<[string, string]> = [];
 	peer!: PeerTreeCheck;
 	reconciler!: ObsidianDiskReconciler;
 
@@ -48,7 +51,7 @@ class Device {
 
 	async start() {
 		(this.engine as any).localStore = new MemStore();
-		this.vfs = new LoroVfsController(this.engine, this.bus);
+		this.vfs = new LoroVfsController(this.engine, this.bus, undefined, '.obsidian');
 		await this.vfs.initialize();
 
 		const files = new Map<string, TFile>();
@@ -69,7 +72,12 @@ class Device {
 				modify: async (f: any, c: string) => { this.disk.set(f.path, c); },
 				read: async (f: any) => this.disk.get(f.path) ?? '',
 				trash: async (f: any) => { files.delete(f.path); this.disk.delete(f.path); },
-				adapter: { exists: async (p: string) => this.disk.has(p) || files.has(p) }
+				adapter: {
+					exists: async (p: string) => this.disk.has(p) || files.has(p),
+					read: async (p: string) => this.disk.get(p) ?? '',
+					write: async (p: string, c: string) => { this.writes.push([p, c]); this.disk.set(p, c); },
+					mkdir: async () => {}
+				}
 			},
 			fileManager: {
 				renameFile: async (f: any, newPath: string) => {
@@ -87,15 +95,25 @@ class Device {
 			getLatestUpdateId: async (id: string) => { net(); return this.server.latestIds()[id] ?? 0; },
 			fetchSnapshotDetails: async (id: string) => { net(); return this.server.snapshots.get(id) ?? null; },
 			fetchUpdatesSince: async (id: string, since: number) => { net(); return this.server.updatesSince(id, since); },
-			pushUpdate: async (id: string, u: Uint8Array) => {
+			pushUpdate: async (id: string, u: Uint8Array, encPath?: unknown) => {
 				net(); this.server.push(id, u);
+				if (encPath) ((this.server as any).paths ??= new Map()).set(id, encPath);
 				// the realtime socket: every other online device hears about the update
 				for (const d of (this.server as any).devices as Device[]) {
 					if (d !== this && d.online && d.peer) setTimeout(() => void d.peer.onNotification(id), 0);
 				}
 			},
 			compactSnapshot: async () => {}, deleteSnapshot: async () => {},
-			fetchManifest: async () => [], uploadBlobManifest: async () => {},
+			fetchManifest: async () => {
+				net();
+				const paths: Map<string, unknown> = (this.server as any).paths ?? new Map();
+				return Object.keys(this.server.latestIds()).filter(id => id !== 'shard-index').map(id => ({
+					document_id: id,
+					encrypted_path: paths.has(id) ? CryptoUtils.stringToHex(JSON.stringify(paths.get(id))) : undefined,
+					is_deleted: this.server.snapshots.get(id)?.isDeleted ?? false,
+					updated_at: ''
+				}));
+			}, uploadBlobManifest: async () => {},
 			uploadBlob: async (h: string, b: Uint8Array) => { net(); this.server.blobs.set(h, b); },
 			downloadBlob: async (h: string) => { net(); return this.server.blobs.get(h) ?? null; }
 		};
@@ -411,6 +429,66 @@ describe('E2E: offline hand-off between two users', () => {
 			expect(Object.fromEntries(a.disk)).toEqual({ 'dir/from-a.md': 'a', 'dir/from-b.md': 'b' });
 			expect(Object.fromEntries(b.disk)).toEqual({ 'dir/from-a.md': 'a', 'dir/from-b.md': 'b' });
 			expect(unexpected()).toEqual([]);
+		});
+	});
+
+	describe('documents the index lost', () => {
+		const live = (d: Device) => d.vfs.getActiveFiles().map(f => `${f.type}:${f.path}=${f.uuid}`).sort();
+
+		it('are re-indexed at their original path with the same uuid, and every device converges', async () => {
+			await a.goOnline();
+			await a.createFile('lost/note.md', 'precious');
+			await a.createFile('plain.md', 'p');
+			const uuids = { note: a.vfs.getUuidForPath('lost/note.md'), plain: a.vfs.getUuidForPath('plain.md') };
+			a.goOffline();
+			// every index delta the server ever received is gone: a dropped / parked index update
+			server.updates = server.updates.filter(u => u.documentId !== 'shard-index');
+
+			await b.goOnline();
+			await settle(400);
+			expect(b.disk.get('lost/note.md')).toBe('precious');
+			expect(b.disk.get('plain.md')).toBe('p');
+			expect(b.vfs.getUuidForPath('lost/note.md')).toBe(uuids.note);
+			expect(b.vfs.getUuidForPath('plain.md')).toBe(uuids.plain);
+			expect(server.updates.some(u => u.documentId === 'shard-index')).toBe(true);   // the repair was pushed
+
+			await a.goOnline();
+			for (let i = 0; i < 2; i++) { await a.orch.runIntegritySweep(); await b.orch.runIntegritySweep(); await settle(300); }
+			expect(live(a)).toEqual(live(b));
+			expect(a.vfs.getActiveFiles().filter(f => f.type === 'folder').map(f => f.path)).toEqual(['lost']);
+			expect(errors.filter(e => !String(e[0]).includes('Failed to push local delta'))).toEqual([]);
+		});
+
+		it('a file deleted on purpose is not resurrected, and is reported as deleted', async () => {
+			await a.goOnline();
+			await a.createFile('gone.md', 'bye');
+			await a.createFile('stay.md', 'here');
+			a.bus.emit('LocalFileDeleted', { path: 'gone.md' });
+			a.vfs.flushPendingPush();
+			await settle(150);
+			a.goOffline();
+
+			await b.goOnline();
+			await settle(400);
+			expect(b.disk.has('gone.md')).toBe(false);
+			expect(b.disk.get('stay.md')).toBe('here');
+			expect(b.orch.getOrphanDocs().map(o => o.kind)).toEqual(['deleted']);
+			expect(warns).toEqual([]);
+		});
+	});
+
+	describe('config files', () => {
+		it('a remote config node never blanks the local config file', async () => {
+			await a.goOnline();
+			await a.createFile('.obsidian/appearance.json', '{"from":"A"}');
+			a.goOffline();
+			b.seedLocal('.obsidian/appearance.json', '{"from":"B"}');
+
+			await b.goOnline();
+			await settle(400);
+			expect(b.writes.filter(([p, c]) => p.endsWith('appearance.json') && c === '')).toEqual([]);
+			expect(b.disk.get('.obsidian/appearance.json')).not.toBe('');
+			expect(JSON.parse(b.disk.get('.obsidian/appearance.json') as string)).toBeTruthy();
 		});
 	});
 });

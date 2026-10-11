@@ -199,8 +199,12 @@ export class ObsidianDiskReconciler {
 						await this.app.vault.adapter.mkdir(parentFolder);
 					}
 				}
-				await this.app.vault.adapter.write(payload.path, payload.content || '');
-				this.triggerHotReload(payload.path);
+				// Remote nodes carry no content yet; the CrdtTextChanged that follows writes the real text.
+				// Writing '' here blanked the user's config (e.g. appearance.json -> "Unexpected end of JSON input").
+				if (payload.content !== undefined) {
+					await this.app.vault.adapter.write(payload.path, payload.content);
+					this.triggerHotReload(payload.path);
+				}
 			}
 		} catch (e) {
 			console.error('[ObsidianDiskReconciler] Failed to create config file/folder:', e);
@@ -487,7 +491,8 @@ export class ObsidianDiskReconciler {
 							if (await this.app.vault.adapter.exists(payload.path)) {
 								currentDiskContent = await this.app.vault.adapter.read(payload.path);
 							}
-							if (currentDiskContent.replace(/\r\n/g, '\n') !== payload.content.replace(/\r\n/g, '\n')) {
+							const wouldBlank = payload.content === '' && currentDiskContent !== '' && payload.path.endsWith('.json');
+							if (!wouldBlank && currentDiskContent.replace(/\r\n/g, '\n') !== payload.content.replace(/\r\n/g, '\n')) {
 								ObsidianDiskReconciler.suppressPath(payload.path);
 								const parts = payload.path.split('/');
 								if (parts.length > 1) {

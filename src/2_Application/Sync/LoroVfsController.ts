@@ -229,12 +229,17 @@ export class LoroVfsController {
 		const filename = payload.path.substring(payload.path.lastIndexOf('/') + 1);
 		if (this.findMovedFileMatch(filename, payload.path)) return;
 
+		this.insertNode(window.crypto.randomUUID() as string, payload.path, payload.isFolder);
+		this.scheduleLocalPush();
+	}
+
+	/** Creates the index node for `path` with the given uuid (and its folder chain). */
+	private insertNode(nodeUuid: string, path: string, isFolder: boolean): void {
 		this.captureFrontierIfNeeded();
 
-		const { dirPath, name } = this.splitPath(payload.path);
+		const { dirPath, name } = this.splitPath(path);
 		const parentUuid = this.getOrCreateFolderChainUuid(dirPath);
 
-		const nodeUuid = window.crypto.randomUUID() as string;
 		const childNode = this.loroTree.createNode();
 
 		if (parentUuid) {
@@ -246,17 +251,42 @@ export class LoroVfsController {
 
 		childNode.data.set('uuid', nodeUuid);
 		childNode.data.set('filename', name);
-		childNode.data.set('type', payload.isFolder ? 'folder' : 'file');
+		childNode.data.set('type', isFolder ? 'folder' : 'file');
 		childNode.data.set('isDeleted', false);
 
 		this.treeDoc.commit();
 
-		this.pathToUuid.set(payload.path, nodeUuid);
-		this.uuidToLastKnownPath.set(nodeUuid, payload.path);
+		this.pathToUuid.set(path, nodeUuid);
+		this.uuidToLastKnownPath.set(nodeUuid, path);
 		this.uuidToNodeId.set(nodeUuid, childNode.id);
 		this.nodeIdToUuid.set(this.getNodeIdStr(childNode.id), nodeUuid);
+	}
 
+	/** True when the index holds a deleted node for this uuid: the file was removed on purpose. */
+	public isTombstoned(uuid: string): boolean {
+		let deleted = false;
+		for (const node of this.loroTree.getNodes({ withDeleted: true })) {
+			try {
+				if (node.data.get('uuid') !== uuid) continue;
+				if (node.isDeleted() || node.data.get('isDeleted') === true) deleted = true;
+				else return false;
+			} catch (e: unknown) { void e; }
+		}
+		return deleted;
+	}
+
+	/**
+	 * Puts a document the server holds but the index lost back into the index at `path`, keeping its
+	 * uuid so every device ends up pointing at the same document. Refuses tombstoned or already
+	 * indexed uuids, so a deleted file is never resurrected.
+	 */
+	public adoptNode(uuid: string, path: string): boolean {
+		if (this.uuidToNodeId.has(uuid) || this.isTombstoned(uuid)) return false;
+		if (!isAllowedConfigPath(path, this.configDir, this.settings)) return false;
+		this.insertNode(uuid, path, false);
+		this.resolvePathCollisions();
 		this.scheduleLocalPush();
+		return true;
 	}
 
 	private handleLocalFileRenamed(payload: { oldPath: string; newPath: string }): void {
@@ -577,7 +607,8 @@ export class LoroVfsController {
 			const collisions = this.findPathCollisions();
 			if (collisions.length === 0) break;
 			if (!mutated) this.captureFrontierIfNeeded();
-			for (const [winner, ...losers] of collisions) {
+			for (const group of collisions) {
+				const [winner, ...losers] = this.mergeSameDocumentNodes(group);
 				for (const loser of losers) this.demoteLoser(winner, loser);
 			}
 			mutated = true;
@@ -604,7 +635,34 @@ export class LoroVfsController {
 		const rank = (n: LoroTreeNode) => `${n.data.get('type') === 'folder' ? '0' : '1'}${String(n.data.get('uuid'))}`;
 		return Array.from(byPath.values())
 			.filter(group => group.length > 1)
-			.map(group => group.sort((a, b) => (rank(a) < rank(b) ? -1 : 1)));
+			.map(group => group.sort((a, b) => {
+				const ra = rank(a), rb = rank(b);
+				if (ra !== rb) return ra < rb ? -1 : 1;
+				return this.getNodeIdStr(a.id) < this.getNodeIdStr(b.id) ? -1 : 1;
+			}));
+	}
+
+	/**
+	 * Two index nodes carrying the same uuid are one document that two devices each put in the index
+	 * (for example one re-indexed what the other still had). Keep the first, remove the rest, and hand
+	 * a duplicate folder's children to the survivor. Never treated as a conflict between two files.
+	 */
+	private mergeSameDocumentNodes(group: LoroTreeNode[]): LoroTreeNode[] {
+		const kept = new Map<string, LoroTreeNode>();
+		for (const node of group) {
+			const uuid = String(node.data.get('uuid'));
+			const first = kept.get(uuid);
+			if (!first) {
+				kept.set(uuid, node);
+				continue;
+			}
+			try {
+				for (const child of node.children() ?? []) this.loroTree.move(child.id, first.id);
+				node.data.set('isDeleted', true);
+				this.loroTree.delete(node.id);
+			} catch (e: unknown) { void e; }
+		}
+		return Array.from(kept.values());
 	}
 
 	private livePathOf(node: LoroTreeNode, nodeMap: Map<string, LoroTreeNode>): string | null {
@@ -646,7 +704,7 @@ export class LoroVfsController {
 				if (node.isDeleted() || node.data.get('isDeleted') === true) continue;
 				const uuid = node.data.get('uuid');
 				const winnerUuid = node.data.get('conflictOf');
-				if (typeof uuid !== 'string' || typeof winnerUuid !== 'string') continue;
+				if (typeof uuid !== 'string' || typeof winnerUuid !== 'string' || uuid === winnerUuid) continue;
 				const path = this.uuidToLastKnownPath.get(uuid);
 				if (path) out.push({ uuid, path, winnerUuid });
 			} catch (e: unknown) { void e; }

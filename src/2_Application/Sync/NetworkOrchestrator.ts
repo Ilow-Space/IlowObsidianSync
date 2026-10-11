@@ -8,6 +8,8 @@ import { INoteRepository } from '@domain/Interfaces/INoteRepository';
 import { LoroVfsController } from './LoroVfsController';
 import { SyncEventBus } from './SyncEventBus';
 import { ObsidianDiskReconciler } from './ObsidianDiskReconciler';
+import { PeerTreeCheck } from './PeerTreeCheck';
+import { CryptoUtils } from '@infrastructure/Crypto/CryptoUtils';
 import { Mutex } from 'async-mutex';
 import { backOff } from 'exponential-backoff';
 import pLimit from 'p-limit';
@@ -15,7 +17,7 @@ import { isBinaryPath, base64ToUint8Array, uint8ArrayToBase64 } from '@domain/Ut
 
 export type SyncStatus = 'synced' | 'syncing' | 'error' | 'offline';
 
-export type OrphanKind = 'text' | 'tree' | 'empty' | 'undecodable' | 'unreachable';
+export type OrphanKind = 'text' | 'tree' | 'empty' | 'undecodable' | 'unreachable' | 'deleted';
 
 export type VaultIntegrityReport = {
 	/** Documents compared against the server. */
@@ -127,6 +129,38 @@ export class NetworkOrchestrator {
 		}, NetworkOrchestrator.INTEGRITY_SWEEP_INTERVAL_MS) as unknown as ReturnType<typeof setInterval>;
 	}
 
+	/**
+	 * Index anti-entropy. An index change is a delta that depends on every earlier one, so if the server
+	 * ever lost (or never got) part of this device's index history, later deltas sit parked on every
+	 * other device and its files never show up there -- with no push error to notice. Compare what the
+	 * server can rebuild with what this device holds and, if the server is behind, resend the whole
+	 * index; the parked deltas then apply on their own.
+	 */
+	private async healIndex(): Promise<void> {
+		const key = this.activeKey;
+		if (!key) return;
+		try {
+			const [details, updates] = await Promise.all([
+				this.remoteStore.fetchSnapshotDetails('shard-index'),
+				this.remoteStore.fetchUpdatesSince('shard-index', 0)
+			]);
+			const remote = new LoroDoc();
+			remote.getTree('vault-tree');
+			if (details?.encryptedState) remote.import(await this.crypto.decrypt(details.encryptedState, key));
+			for (const u of updates) remote.import(await this.crypto.decrypt(u.encryptedUpdate, key));
+			remote.commit();
+
+			const local = await this.crdtEngine.getOrCreateDoc('shard-index');
+			const order = local.version().compare(remote.version());
+			if (order === 0 || order === -1) return;   // server has everything this device has
+			const snapshot = local.export({ mode: 'snapshot' });
+			await this.handleLocalDeltaReadyForPush({ documentId: 'shard-index', updateBinary: snapshot, path: null });
+			console.info('[NetworkOrchestrator] Server index was behind this device; resent the full index.');
+		} catch (err) {
+			console.error('[NetworkOrchestrator] Index anti-entropy check failed:', err);
+		}
+	}
+
 	/** Full sync + verify with auto-repair; also what a peer-tree mismatch heals with. */
 	public async runIntegritySweep(): Promise<void> {
 		if (!this.activeKey) return;
@@ -137,6 +171,7 @@ export class NetworkOrchestrator {
 			// notification, a dropped WS message) -- verifyVaultIntegrity alone only
 			// re-checks documents already in getActiveFiles, so it can never catch that.
 			await this.runFullSync();
+			await this.healIndex();
 			const report = await this.verifyVaultIntegrity(true);
 			if (report.unreachable.length > 0) {
 				console.warn(`[NetworkOrchestrator] Integrity sweep: ${report.unreachable.length} document(s) unreachable.`);
@@ -168,9 +203,47 @@ export class NetworkOrchestrator {
 		}
 		if (this.orphanDocs.has(documentId)) return;
 
+		if (this.vfsController.isTombstoned(documentId)) {
+			this.orphanDocs.set(documentId, 'deleted');
+			return;
+		}
+		if (await this.adoptFromManifest(documentId)) return;
+
 		const kind = await this.classifyDocument(documentId);
 		this.orphanDocs.set(documentId, kind);
-		console.warn(`[NetworkOrchestrator] Server document ${documentId} is not in the index (${kind}). Listed under orphans in Verify.`);
+		console.warn(`[NetworkOrchestrator] Server document ${documentId} is not in the index (${kind}) and its path is unknown. Listed under orphans in Verify.`);
+	}
+
+	/**
+	 * The server keeps every document's encrypted path next to its updates. If the index lost the node
+	 * (a dropped or parked index delta), put it back at that path with the same uuid and pull its content.
+	 */
+	private async adoptFromManifest(documentId: string): Promise<boolean> {
+		const key = this.activeKey;
+		if (!key) return false;
+		try {
+			const item = (await this.remoteStore.fetchManifest()).find(i => i.document_id === documentId);
+			if (!item?.encrypted_path || item.is_deleted) return false;
+			const blob = JSON.parse(CryptoUtils.hexToString(item.encrypted_path)) as EncryptedBlob;
+			const path = new TextDecoder().decode(await this.crypto.decrypt(blob, key));
+			if (!path || !this.vfsController.adoptNode(documentId, path)) return false;
+			await this.pullDocument(documentId, path, true, undefined, true);
+			console.info(`[NetworkOrchestrator] Re-indexed document ${documentId} at ${path}.`);
+			return true;
+		} catch (err) {
+			console.error(`[NetworkOrchestrator] Failed to re-index document ${documentId}:`, err);
+			return false;
+		}
+	}
+
+	/** Server documents no index node points to (a missed index update) get re-indexed or classified. */
+	private async adoptUnindexedDocuments(remoteIds: Record<string, number> | null): Promise<void> {
+		if (!remoteIds) return;
+		for (const documentId of Object.keys(remoteIds)) {
+			if (documentId === 'shard-index' || PeerTreeCheck.isPeerDoc(documentId)) continue;
+			if (this.vfsController.getPathForUuid(documentId) || this.orphanDocs.has(documentId)) continue;
+			await this.handleUnknownDocument(documentId);
+		}
 	}
 
 	private async classifyDocument(documentId: string): Promise<OrphanKind> {
@@ -541,6 +614,7 @@ export class NetworkOrchestrator {
 			this.vfsController.processRemoteVfsUpdates();
 
 			this.reconcileVfsDiskPaths();
+			await this.adoptUnindexedDocuments(bulkUpdates);
 
 			if (this.diskReconciler) {
 				await this.diskReconciler.onIdle();
