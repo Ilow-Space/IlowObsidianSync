@@ -107,7 +107,7 @@ async function ensurePluginUnlocked(pwd = MASTER_PASSWORD, wipeDb = false) {
     await browser.waitUntil(async () => {
         return await browser.execute(() => {
             const logs = (window as any).__obsidianLogs || [];
-            return logs.some((l: string) => l.includes('[NetworkOrchestrator] Full Sync Complete.'));
+            return (window as any).app.plugins.plugins['ilow-sync']?.getSyncOrchestrator?.()?.isSyncInitialized?.() === true;
         });
     }, { timeout: 15000, timeoutMsg: 'Plugin failed to complete initial background sync.' });
 }

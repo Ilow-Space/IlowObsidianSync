@@ -547,21 +547,7 @@ export class NetworkOrchestrator {
 						if (localHash && localHash === expectedHash) return;
 					}
 
-					this.addActiveTask(file.path);
-					try {
-						const encryptedBytes = await this.remoteStore.downloadBlob(expectedHash);
-						if (encryptedBytes && this.activeKey) {
-							const payloadJson = new TextDecoder().decode(encryptedBytes);
-							const encryptedBlob = JSON.parse(payloadJson) as EncryptedBlob;
-							const decryptedBytes = await this.crypto.decrypt(encryptedBlob, this.activeKey);
-							const base64ToWrite = uint8ArrayToBase64(decryptedBytes);
-							await this.safeWriteNote(file.path, base64ToWrite);
-						}
-					} catch (err) {
-						console.error(`[NetworkOrchestrator] Failed to download blob for ${file.path}:`, err);
-					} finally {
-						this.removeActiveTask(file.path);
-					}
+					await this.downloadBlobToDisk(file.path, expectedHash);
 				}));
 				await Promise.all(blobPromises);
 			}
@@ -606,6 +592,24 @@ export class NetworkOrchestrator {
 		} finally {
 			this.removeActiveTask('System Index');
 			this.isSyncingFull = false;
+		}
+	}
+
+	/** Fetches blob `hash`, decrypts it and writes it to `path`. Returns false if it could not be restored. */
+	private async downloadBlobToDisk(path: string, hash: string): Promise<boolean> {
+		this.addActiveTask(path);
+		try {
+			const encryptedBytes = await this.remoteStore.downloadBlob(hash);
+			if (!encryptedBytes || !this.activeKey) return false;
+			const encryptedBlob = JSON.parse(new TextDecoder().decode(encryptedBytes)) as EncryptedBlob;
+			const decryptedBytes = await this.crypto.decrypt(encryptedBlob, this.activeKey);
+			await this.safeWriteNote(path, uint8ArrayToBase64(decryptedBytes));
+			return true;
+		} catch (err) {
+			console.error(`[NetworkOrchestrator] Failed to download blob for ${path}:`, err);
+			return false;
+		} finally {
+			this.removeActiveTask(path);
 		}
 	}
 
@@ -1018,8 +1022,12 @@ export class NetworkOrchestrator {
 		const report: VaultIntegrityReport = { checked: 0, diverged: [], unreachable: [] };
 		if (!this.activeKey) return report;
 
-		const files = this.vfsController.getActiveFiles().filter(f => f.type !== 'folder' && !isBinaryPath(f.path));
+		const allFiles = this.vfsController.getActiveFiles().filter(f => f.type !== 'folder');
+		const files = allFiles.filter(f => !isBinaryPath(f.path));
+		const binaries = allFiles.filter(f => isBinaryPath(f.path));
 		const limit = pLimit(10);
+		const missingBinaries = new Map<string, string>();
+		const missingOnDisk = new Map<string, { uuid: string; content: string }>();
 
 		await Promise.all(files.map(file => limit(async () => {
 			let details: SnapshotDetails | null = null;
@@ -1053,11 +1061,31 @@ export class NetworkOrchestrator {
 			}
 
 			const localContent = await this.noteRepo.readNote(file.path);
-			if (localContent === null) return;
+			if (localContent === null) {
+				// Known to the index but absent on disk: not "in sync". Restoring the
+				// server's content is the repair -- pushing would have nothing to push.
+				missingOnDisk.set(file.path, { uuid: file.uuid, content: remoteDoc.getText('markdown').toString() });
+				report.diverged.push(file.path);
+				return;
+			}
 
 			const normRemote = remoteDoc.getText('markdown').toString().replace(/\r\n/g, '\n');
 			const normLocal = localContent.replace(/\r\n/g, '\n');
 			if (normRemote !== normLocal) {
+				report.diverged.push(file.path);
+			}
+		})));
+
+		// Binaries have no CRDT text: compare the local bytes' hash with the hash the index records.
+		await Promise.all(binaries.map(file => limit(async () => {
+			const expectedHash = this.vfsController.getBlobHashForUuid(file.uuid);
+			if (!expectedHash || typeof this.crypto.hashData !== 'function') return;
+			report.checked += 1;
+			const local = await this.noteRepo.readNote(file.path);
+			if (local === null) {
+				missingBinaries.set(file.path, expectedHash);
+				report.diverged.push(file.path);
+			} else if (await this.crypto.hashData(base64ToUint8Array(local)) !== expectedHash) {
 				report.diverged.push(file.path);
 			}
 		})));
@@ -1069,7 +1097,15 @@ export class NetworkOrchestrator {
 		}
 
 		if (autoRepair && report.diverged.length > 0) {
-			report.pushed = await this.pushDivergedFiles(report.diverged);
+			report.pushed = await this.pushDivergedFiles(report.diverged.filter(p => !missingOnDisk.has(p) && !missingBinaries.has(p)));
+			for (const [path, { uuid, content }] of missingOnDisk) {
+				this.eventBus.emit('CrdtTextChanged', { uuid, path, content });
+				report.pushed.push(path);
+			}
+			for (const [path, hash] of missingBinaries) {
+				if (await this.downloadBlobToDisk(path, hash)) report.pushed.push(path);
+			}
+			await this.diskReconciler?.onIdle();
 		}
 
 		return report;
