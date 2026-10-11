@@ -615,6 +615,8 @@ export class NetworkOrchestrator {
 				this.prePullBaselineContents.set(file.uuid, doc.getText('markdown').toString());
 			}
 
+			await this.dropIdenticalConflictCopies();
+
 			if (!this.serverWins) await this.ingestLocalOfflineNotes(bulkUpdates ?? {});
 
 			if (this.diskReconciler) {
@@ -664,6 +666,37 @@ export class NetworkOrchestrator {
 			return false;
 		} finally {
 			this.removeActiveTask(path);
+		}
+	}
+
+	/**
+	 * Conflict copies that carry nothing new are deleted: one identical to the document it lost to,
+	 * and all but the lowest uuid among copies of the same document with identical content. Only
+	 * decided once every document involved has really been pulled, so "not fetched yet" (empty) is
+	 * never mistaken for "identical".
+	 */
+	private async dropIdenticalConflictCopies(): Promise<void> {
+		const textOf = async (uuid: string): Promise<string> => {
+			const doc = await this.crdtEngine.getOrCreateDoc(uuid);
+			const text = doc.getText('markdown').toString().replace(/\r\n/g, '\n');
+			this.crdtEngine.removeDoc(uuid);
+			return text;
+		};
+		const contentKey = async (uuid: string, path: string): Promise<string> =>
+			isBinaryPath(path) ? `blob:${this.vfsController.getBlobHashForUuid(uuid) ?? uuid}` : `text:${await textOf(uuid)}`;
+		const pulled = (uuid: string) => (this.fileLastSyncIds.get(uuid) || 0) > 0;
+
+		const keep = new Map<string, string>();
+		const copies = this.vfsController.getConflictCopies()
+			.filter(c => pulled(c.uuid) && pulled(c.winnerUuid))
+			.sort((x, y) => (x.uuid < y.uuid ? -1 : 1));
+		for (const copy of copies) {
+			const key = await contentKey(copy.uuid, copy.path);
+			const winnerPath = this.vfsController.getPathForUuid(copy.winnerUuid) ?? copy.path;
+			const sameAsWinner = key === await contentKey(copy.winnerUuid, winnerPath);
+			const twinKey = `${copy.winnerUuid}\u0000${key}`;
+			if (sameAsWinner || keep.has(twinKey)) this.vfsController.dropConflictCopy(copy.uuid);
+			else keep.set(twinKey, copy.uuid);
 		}
 	}
 

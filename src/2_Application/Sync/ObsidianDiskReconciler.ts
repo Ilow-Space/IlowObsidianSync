@@ -5,10 +5,14 @@ import { SyncEventBus } from './SyncEventBus';
 import { LoroSyncEngine } from '@infrastructure/Crdt/LoroSyncEngine';
 import { isBinaryPath, base64ToUint8Array, uint8ArrayToBase64 } from '@domain/Utils/BinaryUtils';
 
+const normalizeEol = (text: string | null): string => (text ?? '').replace(/\r\n/g, '\n');
+
 export class ObsidianDiskReconciler {
 	private fileLocks = new Map<string, Mutex>();
 	private diskQueue = new PQueue({ concurrency: 5 });
 	private serverWins = false;
+	/** Moves still leaving a path, so a create landing on that path can wait for it to be vacated. */
+	private movesInFlight = new Map<string, Promise<void>>();
 	public static suppressedPaths = new Set<string>();
 	private static suppressionDepth = new Map<string, number>();
 
@@ -23,7 +27,7 @@ export class ObsidianDiskReconciler {
 
 	public initialize(): void {
 		this.eventBus.on('CrdtNodeCreated', (p) => { void this.handleCrdtNodeCreated(p); });
-		this.eventBus.on('CrdtNodeMoved', (p) => { void this.handleCrdtNodeMoved(p); });
+		this.eventBus.on('CrdtNodeMoved', (p) => { this.trackMove(p.oldPath, this.handleCrdtNodeMoved(p)); });
 		this.eventBus.on('CrdtNodeSoftDeleted', (p) => { void this.handleCrdtNodeSoftDeleted(p); });
 		this.eventBus.on('CrdtTextChanged', (p) => { void this.handleCrdtTextChanged(p); });
 	}
@@ -205,8 +209,23 @@ export class ObsidianDiskReconciler {
 		}
 	}
 
+	private async crdtTextOf(uuid: string): Promise<string> {
+		const doc = await this.syncEngine.getOrCreateDoc(uuid);
+		const text = doc.getText('markdown').toString();
+		this.syncEngine.removeDoc(uuid);
+		return text;
+	}
+
+	private trackMove(oldPath: string, move: Promise<void>): void {
+		const tracked = move.catch(() => undefined).finally(() => {
+			if (this.movesInFlight.get(oldPath) === tracked) this.movesInFlight.delete(oldPath);
+		});
+		this.movesInFlight.set(oldPath, tracked);
+	}
+
 	private async handleCrdtNodeCreated(payload: { uuid: string; path: string; isFolder: boolean; content?: string }): Promise<void> {
 		return this.diskQueue.add(async () => {
+			await this.movesInFlight.get(payload.path);
 			const mutex = this.getFileMutex(payload.path);
 			try {
 				await mutex.runExclusive(async () => {
@@ -223,7 +242,9 @@ export class ObsidianDiskReconciler {
 						if (payload.isFolder && existing instanceof TFolder) return;
 						if (!payload.isFolder && existing instanceof TFile) {
 							const diskContent = await this.readPhysicalFileContent(existing);
-							if (this.serverWins || diskContent === (payload.content || '')) {
+							// payload.content is never populated for remote nodes; the document itself is the truth.
+							const expected = payload.content ?? await this.crdtTextOf(payload.uuid);
+							if (this.serverWins || normalizeEol(diskContent) === normalizeEol(expected)) {
 							    this.eventBus.emit('RebalancePathUuid', { remoteUuid: payload.uuid, path: targetPath });
 							    return;
 							}
@@ -437,7 +458,8 @@ export class ObsidianDiskReconciler {
 					try {
 						await this.app.fileManager.trashFile(file);
 					} catch (e) {
-						console.error('[ObsidianDiskReconciler] Failed to trash file:', e);
+						// Already gone from disk is the outcome we wanted; Obsidian's cache just lagged.
+						if ((e as { code?: string })?.code !== 'ENOENT') console.error('[ObsidianDiskReconciler] Failed to trash file:', e);
 					} finally {
 						ObsidianDiskReconciler.unsuppressPath(payload.path, 20);
 					}

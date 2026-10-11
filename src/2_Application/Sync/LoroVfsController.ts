@@ -60,6 +60,7 @@ export class LoroVfsController {
 		this.loroTree = this.treeDoc.getTree('vault-tree');
 
 		this.rebuildCache();
+		this.resolvePathCollisions();
 
 		this.eventBus.on('LocalFileCreated', this.boundCreated);
 		this.eventBus.on('LocalFileRenamed', this.boundRenamed);
@@ -466,11 +467,14 @@ export class LoroVfsController {
 		this.snapshotBeforeRemoteUpdate = null;
 
 		this.rebuildCache();
+		this.resolvePathCollisions();
 
 		const nodes = this.loroTree.getNodes();
 		const nodeMap = new Map<string, LoroTreeNode>();
 		for (const n of nodes) nodeMap.set(this.getNodeIdStr(n.id), n);
 
+		// Moves go out before creations: a file displaced by a collision must leave its path before the winner lands on it.
+		const created: Array<{ uuid: string; path: string; isFolder: boolean }> = [];
 		for (const [uuid, newPath] of this.uuidToLastKnownPath.entries()) {
 			const oldPath = oldUuidToLastKnown.get(uuid);
 			const nodeId = this.uuidToNodeId.get(uuid);
@@ -479,7 +483,7 @@ export class LoroVfsController {
 				const isFolder = node ? node.data.get('type') === 'folder' : false;
 
 				if (!oldPath) {
-					this.eventBus.emit('CrdtNodeCreated', { uuid, path: newPath, isFolder });
+					created.push({ uuid, path: newPath, isFolder });
 				} else if (oldPath !== newPath) {
 					this.eventBus.emit('CrdtNodeMoved', { uuid, oldPath, newPath });
 				}
@@ -488,6 +492,8 @@ export class LoroVfsController {
 				void e;
 			}
 		}
+
+		for (const c of created) this.eventBus.emit('CrdtNodeCreated', c);
 
 		for (const [uuid, oldPath] of oldUuidToLastKnown.entries()) {
 			if (!this.uuidToLastKnownPath.has(uuid)) {
@@ -553,6 +559,107 @@ export class LoroVfsController {
 			this.treeDoc.commit();
 			this.scheduleLocalPush();
 		}
+	}
+
+	/**
+	 * One path must be one live document. Two devices that independently create the same path
+	 * produce two valid tree nodes; this resolves them by a rule every device computes alike, so
+	 * the merged index converges without any device-local decision:
+	 *  - a folder beats a file, otherwise the lowest uuid wins;
+	 *  - a losing folder hands its children to the winner and is deleted;
+	 *  - a losing file is renamed `name (conflict <uuid6>).ext` (same name on every device) and
+	 *    tagged `conflictOf`, so no content is lost. Identical copies are dropped later by the
+	 *    orchestrator once the content of both documents is known.
+	 */
+	private resolvePathCollisions(): void {
+		let mutated = false;
+		for (let pass = 0; pass < 3; pass++) {
+			const collisions = this.findPathCollisions();
+			if (collisions.length === 0) break;
+			if (!mutated) this.captureFrontierIfNeeded();
+			for (const [winner, ...losers] of collisions) {
+				for (const loser of losers) this.demoteLoser(winner, loser);
+			}
+			mutated = true;
+			this.treeDoc.commit();
+			this.rebuildCache();
+		}
+		if (mutated) this.scheduleLocalPush();
+	}
+
+	/** Groups of live nodes that resolve to one path, each ordered winner-first. */
+	private findPathCollisions(): LoroTreeNode[][] {
+		const nodes = this.loroTree.getNodes();
+		const nodeMap = new Map<string, LoroTreeNode>();
+		for (const n of nodes) nodeMap.set(this.getNodeIdStr(n.id), n);
+
+		const byPath = new Map<string, LoroTreeNode[]>();
+		for (const node of nodes) {
+			const path = this.livePathOf(node, nodeMap);
+			// Config files are singletons per device and are reconciled by RebalancePathUuid, never renamed.
+			if (!path || (this.configDir && (path === this.configDir || path.startsWith(this.configDir + '/')))) continue;
+			const group = byPath.get(path);
+			if (group) group.push(node); else byPath.set(path, [node]);
+		}
+		const rank = (n: LoroTreeNode) => `${n.data.get('type') === 'folder' ? '0' : '1'}${String(n.data.get('uuid'))}`;
+		return Array.from(byPath.values())
+			.filter(group => group.length > 1)
+			.map(group => group.sort((a, b) => (rank(a) < rank(b) ? -1 : 1)));
+	}
+
+	private livePathOf(node: LoroTreeNode, nodeMap: Map<string, LoroTreeNode>): string | null {
+		try {
+			if (node.isDeleted() || node.data.get('isDeleted') === true) return null;
+			const uuid = node.data.get('uuid');
+			if (typeof uuid !== 'string' || !uuid) return null;
+			return this.resolvePathForNode(node, nodeMap) || null;
+		} catch (e: unknown) {
+			void e;
+			return null;
+		}
+	}
+
+	private demoteLoser(winner: LoroTreeNode, loser: LoroTreeNode): void {
+		try {
+			if (loser.data.get('type') === 'folder' && winner.data.get('type') === 'folder') {
+				for (const child of loser.children() ?? []) this.loroTree.move(child.id, winner.id);
+				loser.data.set('isDeleted', true);
+				this.loroTree.delete(loser.id);
+				return;
+			}
+			const name = String(loser.data.get('filename'));
+			const dot = name.lastIndexOf('.');
+			const base = dot > 0 ? name.substring(0, dot) : name;
+			const ext = dot > 0 ? name.substring(dot) : '';
+			loser.data.set('filename', `${base} (conflict ${String(loser.data.get('uuid')).substring(0, 6)})${ext}`);
+			loser.data.set('conflictOf', String(winner.data.get('uuid')));
+		} catch (e: unknown) {
+			void e;
+		}
+	}
+
+	/** Live conflict copies and the document each one lost to. */
+	public getConflictCopies(): Array<{ uuid: string; path: string; winnerUuid: string }> {
+		const out: Array<{ uuid: string; path: string; winnerUuid: string }> = [];
+		for (const node of this.loroTree.getNodes()) {
+			try {
+				if (node.isDeleted() || node.data.get('isDeleted') === true) continue;
+				const uuid = node.data.get('uuid');
+				const winnerUuid = node.data.get('conflictOf');
+				if (typeof uuid !== 'string' || typeof winnerUuid !== 'string') continue;
+				const path = this.uuidToLastKnownPath.get(uuid);
+				if (path) out.push({ uuid, path, winnerUuid });
+			} catch (e: unknown) { void e; }
+		}
+		return out;
+	}
+
+	/** Deletes a conflict copy from the index and from disk. */
+	public dropConflictCopy(uuid: string): void {
+		const path = this.uuidToLastKnownPath.get(uuid);
+		if (!path) return;
+		this.handleLocalFileDeleted({ path });
+		this.eventBus.emit('CrdtNodeSoftDeleted', { uuid, path });
 	}
 
 	/** Re-binds to a freshly loaded index doc, discarding any unpushed local index changes. */

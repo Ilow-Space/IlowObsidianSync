@@ -71,7 +71,14 @@ class Device {
 				trash: async (f: any) => { files.delete(f.path); this.disk.delete(f.path); },
 				adapter: { exists: async (p: string) => this.disk.has(p) || files.has(p) }
 			},
-			fileManager: { renameFile: async () => {} }
+			fileManager: {
+				renameFile: async (f: any, newPath: string) => {
+					const content = this.disk.get(f.path) ?? '';
+					files.delete(f.path); this.disk.delete(f.path);
+					f.path = newPath; f.name = newPath.split('/').pop();
+					files.set(newPath, f); this.disk.set(newPath, content);
+				},
+				trashFile: async (f: any) => { files.delete(f.path); this.disk.delete(f.path); } }
 		};
 
 		const net = () => { if (!this.online) throw new Error('offline'); };
@@ -109,7 +116,7 @@ class Device {
 	}
 
 	async createFile(path: string, content: string) {
-		this.disk.set(path, content);
+		this.seedLocal(path, content);   // the file really exists in the vault, as it would after the user creates it
 		if (/\.(png|pdf|jpg)$/.test(path)) {
 			this.bus.emit('LocalFileCreated', { path, isFolder: false, content });
 			this.vfs.flushPendingPush();
@@ -334,6 +341,76 @@ describe('E2E: offline hand-off between two users', () => {
 			expect(a.orch.getOrphanDocs()).toEqual([{ documentId: 'ghost-doc', kind: 'text' }]);
 			expect(warns.filter(w => String(w[0]).includes('ghost-doc')).length).toBe(1);
 			expect((await a.orch.verifyVaultIntegrity()).orphans).toEqual([{ documentId: 'ghost-doc', kind: 'text' }]);
+		});
+	});
+
+	describe('one path = one live uuid (deterministic collision rule)', () => {
+		const unexpected = () => errors.filter(e => !String(e[0]).includes('Failed to push local delta'));
+		const live = (d: Device) => d.vfs.getActiveFiles()
+			.map(f => `${f.type}:${f.path}=${f.uuid}`).sort();
+
+		/** Both devices created the same path offline; sync until quiet, in both directions. */
+		const syncBoth = async () => {
+			await a.goOnline(); await settle(150);
+			a.goOffline();
+			await b.goOnline(); await settle(300);
+			await a.goOnline(); await settle(300);
+			for (let i = 0; i < 2; i++) {
+				await b.orch.runFullSync(); await a.orch.runFullSync(); await settle(300);
+			}
+		};
+
+		const LOW = '00000000-0000-4000-8000-000000000001';
+		const HIGH = 'ffffffff-0000-4000-8000-000000000002';
+		/** Makes the next two uuids this process mints come out in the given order: A's first, then B's. */
+		const mint = (forA: string, forB: string) => {
+			const q = [forA, forB];
+			const real = window.crypto.randomUUID.bind(window.crypto);
+			vi.spyOn(window.crypto, 'randomUUID').mockImplementation((() => q.shift() ?? real()) as any);
+		};
+		const orders = [['A lower', LOW, HIGH], ['B lower', HIGH, LOW]] as const;
+
+		it.each(orders)('identical content (%s): one document survives, no conflict copy, both devices agree', async (_n, ua, ub) => {
+			mint(ua, ub);
+			await a.createFile('same.md', 'identical');
+			await b.createFile('same.md', 'identical');
+			expect([a.vfs.getUuidForPath('same.md'), b.vfs.getUuidForPath('same.md')]).toEqual([ua, ub]);
+			await syncBoth();
+
+			expect(live(a)).toEqual(live(b));
+			expect(a.vfs.getActiveFiles().filter(f => f.type === 'file').map(f => f.path)).toEqual(['same.md']);
+			expect(a.vfs.getUuidForPath('same.md')).toBe(LOW);
+			expect([...a.disk.keys()]).toEqual(['same.md']);
+			expect([...b.disk.keys()]).toEqual(['same.md']);
+			expect(unexpected()).toEqual([]);
+		});
+
+		it.each(orders)('different content (%s): lowest uuid keeps the path, the other is the same named conflict copy everywhere, nothing lost', async (_n, ua, ub) => {
+			mint(ua, ub);
+			await a.createFile('same.md', 'from A');
+			await b.createFile('same.md', 'from B');
+			await syncBoth();
+
+			expect(live(a)).toEqual(live(b));
+			const copyPath = `same (conflict ${HIGH.substring(0, 6)}).md`;
+			expect(a.vfs.getUuidForPath('same.md')).toBe(LOW);
+			expect(a.vfs.getUuidForPath(copyPath)).toBe(HIGH);
+			expect(new Set(a.disk.values())).toEqual(new Set(['from A', 'from B']));
+			expect(new Map(a.disk)).toEqual(new Map(b.disk));
+			expect(a.disk.size).toBe(2);
+			expect(unexpected()).toEqual([]);
+		});
+
+		it('duplicate folders merge into one and keep every child', async () => {
+			await a.createFile('dir/from-a.md', 'a');
+			await b.createFile('dir/from-b.md', 'b');
+			await syncBoth();
+
+			expect(live(a)).toEqual(live(b));
+			expect(a.vfs.getActiveFiles().filter(f => f.type === 'folder').map(f => f.path)).toEqual(['dir']);
+			expect(Object.fromEntries(a.disk)).toEqual({ 'dir/from-a.md': 'a', 'dir/from-b.md': 'b' });
+			expect(Object.fromEntries(b.disk)).toEqual({ 'dir/from-a.md': 'a', 'dir/from-b.md': 'b' });
+			expect(unexpected()).toEqual([]);
 		});
 	});
 });

@@ -620,10 +620,13 @@ describe('Comprehensive Sync Suite: Outgoing & Incoming State Machine', () => {
 	(vfsController as any).rebuildCacheAndEmitRemoteDiffs();
 	await waitForDisk();
 
-	expect(appMock.vault.create).toHaveBeenCalledWith('Conflict (Conflict 1).md', expect.anything());
+	// The lowest uuid keeps the path (a random hex uuid sorts before 'remote-...'); the loser is renamed
+	// deterministically, so every device computes the same name and no content is lost.
+	expect(vfsController.getUuidForPath('Conflict.md')).not.toBe('remote-conflict-uuid');
+	expect(appMock.vault.create).toHaveBeenCalledWith('Conflict (conflict remote).md', expect.anything());
 });
 
-it('28b. Path collision with identical contents suppresses conflict file and rebalances UUID', async () => {
+it('28b. Path collision resolves to one live uuid per path; the loser becomes a deterministic conflict copy', async () => {
 	remoteStoreMock.pushUpdate.mockRejectedValue(new Error('Offline'));
 
 	// 1. Setup local file with identical content (empty string to match un-pulled remote node)
@@ -661,11 +664,14 @@ it('28b. Path collision with identical contents suppresses conflict file and reb
 	(vfsController as any).rebuildCacheAndEmitRemoteDiffs();
 	await waitForDisk();
 
-	// Conflict copy is suppressed
+	// No device-local "(Conflict 1)" naming any more
 	expect(appMock.vault.create).not.toHaveBeenCalledWith('SameContent (Conflict 1).md', expect.anything());
 
-	// Remote UUID is adopted
-	expect(vfsController.getUuidForPath('SameContent.md')).toBe('remote-identical-uuid');
+	// One live document per path: the lowest uuid wins on every device, the other is tagged as its conflict copy
+	expect(vfsController.getUuidForPath('SameContent.md')).toBe(localUuid);
+	expect(vfsController.getConflictCopies()).toEqual([
+		{ uuid: 'remote-identical-uuid', path: 'SameContent (conflict remote).md', winnerUuid: localUuid }
+	]);
 });
         it('29. Remote Rename & Edit on same file avoids race conditions', async () => {
             await createLocalFile('Race.md');
