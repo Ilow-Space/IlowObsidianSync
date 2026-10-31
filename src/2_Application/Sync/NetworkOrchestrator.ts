@@ -96,6 +96,9 @@ export class NetworkOrchestrator {
 	) {}
 
 	public initialize(): void {
+		this.vfsController.setDocumentFetcher(async (uuid: string) => {
+			await this.pullDocument(uuid, null, true, undefined, true);
+		});
 		this.eventBus.on('LocalDeltaReadyForPush', (p) => { void this.handleLocalDeltaReadyForPush(p); });
 		this.eventBus.on('LocalFileModified', (p) => { void this.handleLocalFileModified(p); });
 		this.eventBus.on('LocalFileCreated', (p) => { void this.handleLocalFileCreated(p); });
@@ -477,19 +480,12 @@ export class NetworkOrchestrator {
 		let documentId = this.vfsController.getUuidForPath(payload.path);
     
 		if (!documentId) {
-			const filename = payload.path.substring(payload.path.lastIndexOf('/') + 1);
-			const movedMatch = this.vfsController.findMovedFileMatch(filename, payload.path);
-
-			if (movedMatch) {
-				documentId = movedMatch.uuid;
-			} else {
-				this.eventBus.emit('LocalFileCreated', {
-					path: payload.path,
-					isFolder: false,
-					content: payload.content
-				});
-				documentId = this.vfsController.getUuidForPath(payload.path);
-			}
+			this.eventBus.emit('LocalFileCreated', {
+				path: payload.path,
+				isFolder: false,
+				content: payload.content
+			});
+			documentId = this.vfsController.getUuidForPath(payload.path);
 		}
     
 		if (!documentId) return;
@@ -611,9 +607,8 @@ export class NetworkOrchestrator {
 			}
 
 			this.vfsController.flushPendingPush();
-			this.vfsController.processRemoteVfsUpdates();
+			await this.vfsController.processRemoteVfsUpdates();
 
-			this.reconcileVfsDiskPaths();
 			await this.adoptUnindexedDocuments(bulkUpdates);
 
 			if (this.diskReconciler) {
@@ -684,10 +679,6 @@ export class NetworkOrchestrator {
 				await this.diskReconciler.onIdle();
 			}
 
-			for (const file of textFiles) {
-				const doc = await this.crdtEngine.getOrCreateDoc(file.uuid);
-				this.prePullBaselineContents.set(file.uuid, doc.getText('markdown').toString());
-			}
 
 			await this.dropIdenticalConflictCopies();
 
@@ -765,6 +756,44 @@ export class NetworkOrchestrator {
 			.filter(c => pulled(c.uuid) && pulled(c.winnerUuid))
 			.sort((x, y) => (x.uuid < y.uuid ? -1 : 1));
 		for (const copy of copies) {
+			if (!isBinaryPath(copy.path)) {
+				const winnerDoc = await this.crdtEngine.getOrCreateDoc(copy.winnerUuid);
+				const loserDoc = await this.crdtEngine.getOrCreateDoc(copy.uuid);
+				const wText = winnerDoc.getText('markdown').toString();
+				const lText = loserDoc.getText('markdown').toString();
+				const oldVersion = winnerDoc.version();
+
+				if (lText.length > 0 && wText.length === 0) {
+					winnerDoc.getText('markdown').insert(0, lText);
+					winnerDoc.commit();
+				} else if (lText.length > 0 && wText !== lText) {
+					winnerDoc.import(loserDoc.export({ mode: 'snapshot' }));
+					winnerDoc.commit();
+				}
+				const snapshot = winnerDoc.export({ mode: 'snapshot' });
+				await this.crdtEngine.localStore.saveDocumentState(copy.winnerUuid, snapshot);
+
+				const update = new Uint8Array(winnerDoc.export({ mode: 'update', from: oldVersion }));
+				if (update.length > 0) {
+					await this.handleLocalDeltaReadyForPush({
+						documentId: copy.winnerUuid,
+						updateBinary: update,
+						path: copy.path
+					});
+				}
+				const mergedContent = winnerDoc.getText('markdown').toString();
+				const winnerPath = this.vfsController.getPathForUuid(copy.winnerUuid) ?? copy.path;
+				this.eventBus.emit('CrdtTextChanged', {
+					uuid: copy.winnerUuid,
+					path: winnerPath,
+					content: mergedContent
+				});
+				this.crdtEngine.removeDoc(copy.winnerUuid);
+				this.crdtEngine.removeDoc(copy.uuid);
+				this.vfsController.dropConflictCopy(copy.uuid);
+				continue;
+			}
+
 			const key = await contentKey(copy.uuid, copy.path);
 			const winnerPath = this.vfsController.getPathForUuid(copy.winnerUuid) ?? copy.path;
 			const sameAsWinner = key === await contentKey(copy.winnerUuid, winnerPath);
@@ -774,31 +803,7 @@ export class NetworkOrchestrator {
 		}
 	}
 
-	private reconcileVfsDiskPaths(): void {
-		if (!this.diskReconciler) return;
-		const reconcilerWithApp = this.diskReconciler as unknown as { app?: { vault?: { getFiles?: () => Array<{ path: string; name: string }> } } };
-		const app = reconcilerWithApp.app;
-		if (!app?.vault?.getFiles) return;
 
-		const activeFiles = this.vfsController.getActiveFiles().filter(f => f.type !== 'folder');
-		const allVaultFiles = app.vault.getFiles();
-
-		for (const file of activeFiles) {
-			const existsAtTargetPath = allVaultFiles.some(f => f.path === file.path);
-			if (!existsAtTargetPath) {
-				const filename = file.path.substring(file.path.lastIndexOf('/') + 1);
-				const localMatch = allVaultFiles.find(f => f.name === filename);
-
-				if (localMatch && localMatch.path !== file.path) {
-					this.eventBus.emit('CrdtNodeMoved', {
-						uuid: file.uuid,
-						oldPath: localMatch.path,
-						newPath: file.path
-					});
-				}
-			}
-		}
-	}
 
 	private async ingestLocalOfflineNotes(bulkUpdates: Record<string, number>): Promise<void> {
 	    const localPaths = typeof this.noteRepo.listAllNotes === 'function' ? await this.noteRepo.listAllNotes() : [];
@@ -814,16 +819,6 @@ export class NetworkOrchestrator {
 		if (this.vfsController.isFilenameDeletedRemotely(filename, path)) {
 			this.eventBus.emit('CrdtNodeSoftDeleted', { uuid: '', path });
 			return { documentId: null, isRemotelyDeleted: true };
-		}
-
-		const movedMatch = this.vfsController.findMovedFileMatch(filename, path);
-		if (movedMatch) {
-			this.eventBus.emit('CrdtNodeMoved', {
-				uuid: movedMatch.uuid,
-				oldPath: path,
-				newPath: movedMatch.path
-			});
-			return { documentId: movedMatch.uuid, isRemotelyDeleted: false };
 		}
 
 		return { documentId: null, isRemotelyDeleted: false };
@@ -938,7 +933,12 @@ export class NetworkOrchestrator {
 				return true;
 			}
 
+			let shouldProcessVfs = false;
 			await this.orchestratorMutex.runExclusive(async () => {
+				if (documentId === 'shard-index') {
+					this.vfsController.prepareForRemoteVfsUpdate();
+				}
+
 				const currentLastId = this.fileLastSyncIds.get(documentId) || 0;
 				let imported = false;
 				let failedCount = 0;
@@ -964,7 +964,7 @@ export class NetworkOrchestrator {
 						const decryptedBytes = await this.crypto.decrypt(details.encryptedState, this.activeKey);
 						const result = await this.crdtEngine.applyUpdates(documentId, [decryptedBytes]);
 						failedCount += result.failedCount;
-						imported = true;
+						if (result.failedCount === 0) imported = true;
 					}
 
 					this.fileLastSyncIds.set(documentId, details.maxCompactedId);
@@ -996,7 +996,7 @@ export class NetworkOrchestrator {
 				// getActiveFiles() reads), which only refreshes when told to.
 				if (imported) {
 					if (documentId === 'shard-index') {
-						this.vfsController.processRemoteVfsUpdates();
+						shouldProcessVfs = true;
 					} else if (path) {
 						const doc = await this.crdtEngine.getOrCreateDoc(documentId);
 						const content = doc.getText('markdown').toString();
@@ -1009,6 +1009,10 @@ export class NetworkOrchestrator {
 				this.pendingDocs.delete(documentId);
 				this.clearConnectionErrorIfSettled();
 			});
+
+			if (shouldProcessVfs) {
+				await this.vfsController.processRemoteVfsUpdates();
+			}
 
 			return true;
 		} finally {

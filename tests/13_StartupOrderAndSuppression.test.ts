@@ -103,6 +103,7 @@ describe('Startup Order & Echo Loop Prevention', () => {
         expect(ObsidianDiskReconciler.suppressedPaths.has('FolderB/Doc.md')).toBe(true);
 
         // Simulate Obsidian firing the native event 500ms late
+        await new Promise((r) => setTimeout(r, 500));
         const isSuppressedAt500ms = ObsidianDiskReconciler.suppressedPaths.has('FolderA/Doc.md');
         expect(isSuppressedAt500ms, 'The path unsuppressed too early, exposing it to the VaultEventWatcher!').toBe(true);
     });

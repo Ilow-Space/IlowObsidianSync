@@ -105,8 +105,11 @@ export default class IlowSyncPlugin extends Plugin {
 		// Register file open hook
 		this.registerEvent(
 			this.app.workspace.on('file-open', async (file: TFile | null) => {
-				if (file && file.extension === 'md' && this.networkOrchestrator) {
-					await this.networkOrchestrator.pullDocument(file.path);
+				if (file && file.extension === 'md' && this.networkOrchestrator && this.vfsController) {
+					const uuid = this.vfsController.getUuidForPath(file.path);
+					if (uuid) {
+						await this.networkOrchestrator.pullDocument(uuid, file.path);
+					}
 				}
 			})
 		);
@@ -221,11 +224,6 @@ export default class IlowSyncPlugin extends Plugin {
 			void secretStorage?.setSecret('ilow-master-key', exportedKey)?.catch(() => {});
 
 			await this.initializeSyncOrchestrator();
-
-			if (this.networkOrchestrator) {
-				this.networkOrchestrator.setCryptoKey(this.derivedKey);
-				void this.runBackgroundBootstrap().catch(console.error);
-			}
 		} catch (err) {
 			console.error('Error deriving master key:', err);
 			throw err;
@@ -267,6 +265,10 @@ export default class IlowSyncPlugin extends Plugin {
 
 			await this.networkOrchestrator.runFullSync();
 
+			if (this.vaultEventWatcher) {
+				await this.vaultEventWatcher.start();
+			}
+
 			this.updateStatusBar('synced', 'Fully synced');
 		} catch (err) {
 			this.updateStatusBar('error', 'Bootstrap failed');
@@ -284,6 +286,9 @@ export default class IlowSyncPlugin extends Plugin {
 		if (this.networkOrchestrator) {
 			this.networkOrchestrator.setCryptoKey(null);
 			this.networkOrchestrator.stopAll();
+		}
+		if (this.vaultEventWatcher) {
+			this.vaultEventWatcher.destroy();
 		}
 		this.updateStatusBar('offline', 'Disconnected');
 
@@ -360,6 +365,8 @@ export default class IlowSyncPlugin extends Plugin {
 				this.diskReconciler
 			);
 
+			this.vaultEventWatcher.setOrchestrator(this.networkOrchestrator);
+
 			const orchestrator = this.networkOrchestrator;
 			this.peerTreeCheck = new PeerTreeCheck(
 				this.remoteStore, this.cryptoService, this.noteRepo,
@@ -368,7 +375,6 @@ export default class IlowSyncPlugin extends Plugin {
 
 			await this.vfsController.initialize();
 			this.diskReconciler.initialize();
-			this.vaultEventWatcher.initialize();
 			this.networkOrchestrator.initialize();
 			this.networkOrchestrator.connectWebSocket(socketUrl);
 

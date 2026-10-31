@@ -1,4 +1,4 @@
-﻿import { defineConfig } from 'vite';
+import { defineConfig } from 'vite';
 import path from 'path';
 import { readFileSync } from 'fs';
 
@@ -28,7 +28,8 @@ export default defineConfig(({ mode }) => {
       environment: 'jsdom',
       setupFiles: ['./tests/setup.ts'],
       globals: true,
-      pool: 'forks'
+      pool: 'forks',
+      exclude: ['**/node_modules/**', '**/dist/**', '**/.claude/**']
     },
 
     build: {

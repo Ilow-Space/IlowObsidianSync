@@ -1,4 +1,4 @@
-﻿
+
 import { App, TAbstractFile, TFile, TFolder } from 'obsidian';
 import { SyncEventBus } from './SyncEventBus';
 import { ObsidianDiskReconciler } from './ObsidianDiskReconciler';
@@ -14,6 +14,7 @@ export class VaultEventWatcher {
 	private knownDiskFiles = new Map<string, string>();
 	/** Paths already warned about for reading empty -- avoids re-warning on every poll cycle for a file that is genuinely, persistently empty on disk. */
 	private warnedEmptyPaths = new Set<string>();
+	private isRunning = false;
 
 	constructor(
 		private app: App,
@@ -33,6 +34,18 @@ export class VaultEventWatcher {
 		return false;
 	}
 
+	private isEcho(path: string, content: string): boolean {
+		const reconciled = ObsidianDiskReconciler.lastReconciledContent.get(path);
+		if (!reconciled) return false;
+		if (Date.now() - reconciled.timestamp > 1000) {
+			ObsidianDiskReconciler.lastReconciledContent.delete(path);
+			return false;
+		}
+		const normContent = isBinaryPath(path) ? content : content.replace(/\r\n/g, '\n');
+		const normReconciled = isBinaryPath(path) ? reconciled.content : reconciled.content.replace(/\r\n/g, '\n');
+		return normContent === normReconciled;
+	}
+
 	private async readTFileContent(file: TFile): Promise<string> {
 		if (isBinaryPath(file.path)) {
 			for (let i = 0; i < 3; i++) {
@@ -43,12 +56,6 @@ export class VaultEventWatcher {
 							this.warnedEmptyPaths.delete(file.path);
 							return uint8ArrayToBase64(new Uint8Array(arrayBuffer));
 						}
-						// A create event can fire before a large paste has finished
-						// flushing to disk. That is not an exception -- adapter.exists
-						// and readBinary both succeed, just with 0 bytes -- so it must
-						// feed back into this loop's own retries rather than returning
-						// immediately, or a slow disk turns into a permanently empty
-						// upload with no error anywhere.
 					}
 				} catch {
 					// fall through to the shared backoff below
@@ -144,6 +151,26 @@ export class VaultEventWatcher {
 	}
 
 	public initialize(): void {
+		// No-op or preliminary setup. Listeners and polling start in start() after initial sync.
+	}
+
+	public async start(): Promise<void> {
+		if (this.isRunning) return;
+		this.isRunning = true;
+
+		// Seed known files from current disk state so already-existing files are not re-emitted as brand new creations
+		try {
+			const diskPaths = await this.listAllDiskPaths();
+			for (const p of diskPaths) {
+				const content = await this.readFileContent(p);
+				if (content !== null) {
+					this.knownDiskFiles.set(p, content);
+				}
+			}
+		} catch {
+			// Ignore seeding errors
+		}
+
 		const onCreate = this.app.vault.on('create', (file: TAbstractFile) => {
 			if (this.shouldIgnore(file.path)) return;
 
@@ -151,6 +178,10 @@ export class VaultEventWatcher {
 			if (file instanceof TFile) {
 				void this.readTFileContent(file).then((content) => {
 					if (this.shouldIgnore(file.path)) return;
+					if (this.isEcho(file.path, content)) {
+						this.knownDiskFiles.set(file.path, content);
+						return;
+					}
 					this.knownDiskFiles.set(file.path, content);
 
 					this.eventBus.emit('LocalFileCreated', {
@@ -209,6 +240,10 @@ export class VaultEventWatcher {
 			if (file instanceof TFile) {
 				void this.readTFileContent(file).then((content) => {
 					if (this.shouldIgnore(file.path)) return;
+					if (this.isEcho(file.path, content)) {
+						this.knownDiskFiles.set(file.path, content);
+						return;
+					}
 					this.knownDiskFiles.set(file.path, content);
 
 					this.eventBus.emit('LocalFileModified', {
@@ -226,14 +261,13 @@ export class VaultEventWatcher {
 			{ eventName: 'modify', ref: onModify as unknown as (...data: unknown[]) => unknown }
 		);
 
-		this.pollVaultFiles().catch(() => {});
-
 		this.pollTimer = window.setInterval(() => {
 			this.pollVaultFiles().catch(() => {});
 		}, 2000);
 	}
 
 	public async pollVaultFiles(): Promise<void> {
+		if (!this.isRunning) return;
 		if (this.orchestrator && (this.orchestrator as unknown as { isSyncingFull?: boolean }).isSyncingFull) return;
 
 		try {
@@ -264,6 +298,11 @@ export class VaultEventWatcher {
 				const content = await this.readFileContent(path);
 				if (content === null) continue;
 
+				if (this.isEcho(path, content)) {
+					this.knownDiskFiles.set(path, content);
+					continue;
+				}
+
 				if (prevContent === undefined) {
 					this.knownDiskFiles.set(path, content);
 					this.eventBus.emit('LocalFileCreated', { path, isFolder: false, content });
@@ -279,6 +318,7 @@ export class VaultEventWatcher {
 	}
 
 	public destroy(): void {
+		this.isRunning = false;
 		if (this.pollTimer) {
 			window.clearInterval(this.pollTimer);
 			this.pollTimer = null;
@@ -290,4 +330,3 @@ export class VaultEventWatcher {
 		this.knownDiskFiles.clear();
 	}
 }
-

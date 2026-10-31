@@ -1,9 +1,10 @@
-﻿
+
 import { LoroDoc, LoroTree, LoroTreeNode } from 'loro-crdt';
 import { SyncEventBus } from './SyncEventBus';
 import { LoroSyncEngine } from '@infrastructure/Crdt/LoroSyncEngine';
 import { PluginSettings } from '@presentation/Plugin';
 import { isAllowedConfigPath } from '@domain/Utils/ConfigPathFilter';
+import { isBinaryPath } from '@domain/Utils/BinaryUtils';
 
 export class LoroVfsController {
 	public treeDoc!: LoroDoc;
@@ -23,6 +24,11 @@ export class LoroVfsController {
 	private changeTimeout: number | null = null;
 	private pushTimeout: number | null = null;
 	private pendingFrontier: ReturnType<LoroDoc['version']> | null = null;
+	private documentFetcher?: (uuid: string) => Promise<void>;
+
+	public setDocumentFetcher(fetcher: (uuid: string) => Promise<void>): void {
+		this.documentFetcher = fetcher;
+	}
 
 	constructor(
 		private syncEngine: LoroSyncEngine,
@@ -60,7 +66,7 @@ export class LoroVfsController {
 		this.loroTree = this.treeDoc.getTree('vault-tree');
 
 		this.rebuildCache();
-		this.resolvePathCollisions();
+		await this.resolvePathCollisions();
 
 		this.eventBus.on('LocalFileCreated', this.boundCreated);
 		this.eventBus.on('LocalFileRenamed', this.boundRenamed);
@@ -74,7 +80,7 @@ export class LoroVfsController {
 
 			this.changeTimeout = window.setTimeout(() => {
 				this.treeDoc.commit();
-				this.rebuildCacheAndEmitRemoteDiffs();
+				void this.rebuildCacheAndEmitRemoteDiffs();
 			}, 10);
 		});
 	}
@@ -226,9 +232,6 @@ export class LoroVfsController {
 		if (!isAllowedConfigPath(payload.path, this.configDir, this.settings)) return;
 		if (this.pathToUuid.has(payload.path)) return;
 
-		const filename = payload.path.substring(payload.path.lastIndexOf('/') + 1);
-		if (this.findMovedFileMatch(filename, payload.path)) return;
-
 		this.insertNode(window.crypto.randomUUID() as string, payload.path, payload.isFolder);
 		this.scheduleLocalPush();
 	}
@@ -284,7 +287,7 @@ export class LoroVfsController {
 		if (this.uuidToNodeId.has(uuid) || this.isTombstoned(uuid)) return false;
 		if (!isAllowedConfigPath(path, this.configDir, this.settings)) return false;
 		this.insertNode(uuid, path, false);
-		this.resolvePathCollisions();
+		void this.resolvePathCollisions();
 		this.scheduleLocalPush();
 		return true;
 	}
@@ -483,21 +486,21 @@ export class LoroVfsController {
 		return { dirPath, name };
 	}
 	
-	public processRemoteVfsUpdates(): void {
+	public async processRemoteVfsUpdates(): Promise<void> {
 		if (this.changeTimeout) {
 			window.clearTimeout(this.changeTimeout);
 			this.changeTimeout = null;
 		}
 		this.treeDoc.commit();
-		this.rebuildCacheAndEmitRemoteDiffs();
+		await this.rebuildCacheAndEmitRemoteDiffs();
 	}
 
-	private rebuildCacheAndEmitRemoteDiffs(): void {
+	private async rebuildCacheAndEmitRemoteDiffs(): Promise<void> {
 		const oldUuidToLastKnown = this.snapshotBeforeRemoteUpdate || new Map(this.uuidToLastKnownPath);
 		this.snapshotBeforeRemoteUpdate = null;
 
 		this.rebuildCache();
-		this.resolvePathCollisions();
+		await this.resolvePathCollisions();
 
 		const nodes = this.loroTree.getNodes();
 		const nodeMap = new Map<string, LoroTreeNode>();
@@ -555,18 +558,6 @@ export class LoroVfsController {
 		return false;
 	}
 
-	public findMovedFileMatch(filename: string, oldPath: string): { uuid: string; path: string } | null {
-		const activeFiles = this.getActiveFiles();
-		for (const file of activeFiles) {
-			if (file.type === 'file') {
-				const fileFilename = file.path.substring(file.path.lastIndexOf('/') + 1);
-				if (fileFilename === filename && file.path !== oldPath) {
-					return { uuid: file.uuid, path: file.path };
-				}
-			}
-		}
-		return null;
-	}
 
 	public getBlobHashForUuid(uuid: string): string | null {
 		const nodeId = this.uuidToNodeId.get(uuid);
@@ -601,7 +592,7 @@ export class LoroVfsController {
 	 *    tagged `conflictOf`, so no content is lost. Identical copies are dropped later by the
 	 *    orchestrator once the content of both documents is known.
 	 */
-	private resolvePathCollisions(): void {
+	private async resolvePathCollisions(): Promise<void> {
 		let mutated = false;
 		for (let pass = 0; pass < 3; pass++) {
 			const collisions = this.findPathCollisions();
@@ -609,7 +600,7 @@ export class LoroVfsController {
 			if (!mutated) this.captureFrontierIfNeeded();
 			for (const group of collisions) {
 				const [winner, ...losers] = this.mergeSameDocumentNodes(group);
-				for (const loser of losers) this.demoteLoser(winner, loser);
+				for (const loser of losers) await this.demoteLoser(winner, loser);
 			}
 			mutated = true;
 			this.treeDoc.commit();
@@ -677,20 +668,105 @@ export class LoroVfsController {
 		}
 	}
 
-	private demoteLoser(winner: LoroTreeNode, loser: LoroTreeNode): void {
+	private demoteFolderLoser(winner: LoroTreeNode, loser: LoroTreeNode): boolean {
+		if (loser.data.get('type') !== 'folder' || winner.data.get('type') !== 'folder') return false;
+		for (const child of loser.children() ?? []) this.loroTree.move(child.id, winner.id);
+		loser.data.set('isDeleted', true);
+		this.loroTree.delete(loser.id);
+		return true;
+	}
+
+	private async demoteTextLoser(winnerUuid: string, loserUuid: string, path: string, loser: LoroTreeNode): Promise<void> {
+		if (this.documentFetcher) {
+			try { await this.documentFetcher(winnerUuid); } catch (e: unknown) { void e; }
+			try { await this.documentFetcher(loserUuid); } catch (e: unknown) { void e; }
+		}
+
+		const winnerDoc = await this.syncEngine.getOrCreateDoc(winnerUuid);
+		const loserDoc = await this.syncEngine.getOrCreateDoc(loserUuid);
+
+		const wText = winnerDoc.getText('markdown').toString();
+		const lText = loserDoc.getText('markdown').toString();
+
+		let mergedContent = wText;
+		const oldVersion = winnerDoc.version();
+
+		if (lText.length > 0 && wText.length === 0) {
+			winnerDoc.getText('markdown').insert(0, lText);
+			winnerDoc.commit();
+			mergedContent = lText;
+		} else if (lText.length > 0 && wText !== lText) {
+			winnerDoc.import(loserDoc.export({ mode: 'snapshot' }));
+			winnerDoc.commit();
+			mergedContent = winnerDoc.getText('markdown').toString();
+		}
+
+		const snapshot = winnerDoc.export({ mode: 'snapshot' });
+		await this.syncEngine.localStore.saveDocumentState(winnerUuid, snapshot);
+
+		const update = new Uint8Array(winnerDoc.export({ mode: 'update', from: oldVersion }));
+		if (update.length > 0) {
+			this.eventBus.emit('LocalDeltaReadyForPush', {
+				documentId: winnerUuid,
+				updateBinary: update,
+				path
+			});
+		}
+
+		if (mergedContent.length > 0) {
+			this.eventBus.emit('CrdtTextChanged', {
+				uuid: winnerUuid,
+				path,
+				content: mergedContent
+			});
+		}
+
+		loser.data.set('isDeleted', true);
+		try { this.loroTree.delete(loser.id); } catch (e: unknown) { void e; }
+		this.eventBus.emit('CrdtNodeSoftDeleted', { uuid: loserUuid, path: '' });
+
+		this.syncEngine.removeDoc(winnerUuid);
+		this.syncEngine.removeDoc(loserUuid);
+	}
+
+	private demoteBinaryLoser(winner: LoroTreeNode, loser: LoroTreeNode, path: string, winnerUuid: string, loserUuid: string): void {
+		const winnerHash = winner.data.get('blob_hash');
+		const loserHash = loser.data.get('blob_hash');
+		const emptyHash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+		const isLoserEmpty = !loserHash || loserHash === '' || loserHash === emptyHash;
+		const isIdentical = Boolean(winnerHash && loserHash && winnerHash === loserHash);
+
+		if (isLoserEmpty || isIdentical) {
+			loser.data.set('isDeleted', true);
+			try { this.loroTree.delete(loser.id); } catch (e: unknown) { void e; }
+			this.eventBus.emit('CrdtNodeSoftDeleted', { uuid: loserUuid, path: '' });
+			return;
+		}
+
+		const name = String(loser.data.get('filename'));
+		const dot = name.lastIndexOf('.');
+		const base = dot > 0 ? name.substring(0, dot) : name;
+		const ext = dot > 0 ? name.substring(dot) : '';
+		loser.data.set('filename', `${base} (conflict ${loserUuid.substring(0, 6)})${ext}`);
+		loser.data.set('conflictOf', winnerUuid);
+	}
+
+	private async demoteLoser(winner: LoroTreeNode, loser: LoroTreeNode): Promise<void> {
 		try {
-			if (loser.data.get('type') === 'folder' && winner.data.get('type') === 'folder') {
-				for (const child of loser.children() ?? []) this.loroTree.move(child.id, winner.id);
-				loser.data.set('isDeleted', true);
-				this.loroTree.delete(loser.id);
-				return;
+			if (this.demoteFolderLoser(winner, loser)) return;
+
+			const nodeMap = new Map<string, LoroTreeNode>();
+			for (const n of this.loroTree.getNodes()) nodeMap.set(this.getNodeIdStr(n.id), n);
+			const path = this.resolvePathForNode(winner, nodeMap) || String(winner.data.get('filename'));
+			const winnerUuid = String(winner.data.get('uuid'));
+			const loserUuid = String(loser.data.get('uuid'));
+
+			if (!isBinaryPath(path)) {
+				await this.demoteTextLoser(winnerUuid, loserUuid, path, loser);
+			} else {
+				this.demoteBinaryLoser(winner, loser, path, winnerUuid, loserUuid);
 			}
-			const name = String(loser.data.get('filename'));
-			const dot = name.lastIndexOf('.');
-			const base = dot > 0 ? name.substring(0, dot) : name;
-			const ext = dot > 0 ? name.substring(dot) : '';
-			loser.data.set('filename', `${base} (conflict ${String(loser.data.get('uuid')).substring(0, 6)})${ext}`);
-			loser.data.set('conflictOf', String(winner.data.get('uuid')));
 		} catch (e: unknown) {
 			void e;
 		}

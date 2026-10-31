@@ -153,7 +153,7 @@ class Device {
 	goOffline() { this.online = false; }
 
 	stop() {
-		this.orch.stopAll(); this.vfs.destroy(); this.engine.destroy(); this.bus.destroy();
+		this.orch.stopAll(); this.vfs.destroy(); this.engine.destroy(); this.bus.destroy(); this.reconciler.destroy();
 	}
 }
 
@@ -168,12 +168,22 @@ describe('E2E: offline hand-off between two users', () => {
 		errors = []; warns = [];
 		vi.spyOn(console, 'error').mockImplementation((...x) => { errors.push(x); });
 		vi.spyOn(console, 'warn').mockImplementation((...x) => { warns.push(x); });
+		ObsidianDiskReconciler.suppressedPaths.clear();
+		ObsidianDiskReconciler.suppressionDepth.clear();
+		ObsidianDiskReconciler.lastReconciledContent.clear();
 		server = new FakeVaultServer();
 		a = new Device(server); b = new Device(server);
 		await a.start(); await b.start();   // both registered, both offline
 	});
 
-	afterEach(() => { a.stop(); b.stop(); vi.restoreAllMocks(); });
+	afterEach(() => {
+		a.stop();
+		b.stop();
+		ObsidianDiskReconciler.suppressedPaths.clear();
+		ObsidianDiskReconciler.suppressionDepth.clear();
+		ObsidianDiskReconciler.lastReconciledContent.clear();
+		vi.restoreAllMocks();
+	});
 
 	it('B pulls every file A created, although A is offline again; verify agrees; console clean', async () => {
 		await a.goOnline();
@@ -403,19 +413,22 @@ describe('E2E: offline hand-off between two users', () => {
 			expect(unexpected()).toEqual([]);
 		});
 
-		it.each(orders)('different content (%s): lowest uuid keeps the path, the other is the same named conflict copy everywhere, nothing lost', async (_n, ua, ub) => {
+		it.each(orders)('different content (%s): converges to 1 file with pure CRDT merge, no conflict copy', async (_n, ua, ub) => {
 			mint(ua, ub);
 			await a.createFile('same.md', 'from A');
 			await b.createFile('same.md', 'from B');
 			await syncBoth();
 
 			expect(live(a)).toEqual(live(b));
-			const copyPath = `same (conflict ${HIGH.substring(0, 6)}).md`;
+			expect(a.vfs.getActiveFiles().filter(f => f.type === 'file').map(f => f.path)).toEqual(['same.md']);
 			expect(a.vfs.getUuidForPath('same.md')).toBe(LOW);
-			expect(a.vfs.getUuidForPath(copyPath)).toBe(HIGH);
-			expect(new Set(a.disk.values())).toEqual(new Set(['from A', 'from B']));
+			expect([...a.disk.keys()]).toEqual(['same.md']);
+			expect([...b.disk.keys()]).toEqual(['same.md']);
+			expect(a.disk.size).toBe(1);
 			expect(new Map(a.disk)).toEqual(new Map(b.disk));
-			expect(a.disk.size).toBe(2);
+			const merged = a.disk.get('same.md')!;
+			expect(merged).toContain('from A');
+			expect(merged).toContain('from B');
 			expect(unexpected()).toEqual([]);
 		});
 

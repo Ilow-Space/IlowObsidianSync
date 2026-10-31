@@ -15,6 +15,11 @@ export class ObsidianDiskReconciler {
 	private movesInFlight = new Map<string, Promise<void>>();
 	public static suppressedPaths = new Set<string>();
 	private static suppressionDepth = new Map<string, number>();
+	public static lastReconciledContent = new Map<string, { content: string; timestamp: number }>();
+
+	public get lastReconciledContent() {
+		return ObsidianDiskReconciler.lastReconciledContent;
+	}
 
 	constructor(
 		private app: App,
@@ -44,7 +49,7 @@ export class ObsidianDiskReconciler {
 	 * reconciliation 20ms), and the short one expiring must not unguard the long
 	 * one -- that is how a remote write echoed back as a local edit.
 	 */
-	public static unsuppressPath(path: string, delayMs = 20): void {
+	public static unsuppressPath(path: string, delayMs = 1000): void {
 		const setTimer = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
 		setTimer(() => {
 			const depth = (ObsidianDiskReconciler.suppressionDepth.get(path) || 1) - 1;
@@ -89,20 +94,6 @@ export class ObsidianDiskReconciler {
 				}
 			}
 		}
-	}
-
-	private resolveConflictPath(targetPath: string): string {
-		let counter = 1;
-		const extIdx = targetPath.lastIndexOf('.');
-		const base = extIdx > 0 ? targetPath.substring(0, extIdx) : targetPath;
-		const ext = extIdx > 0 ? targetPath.substring(extIdx) : '';
-		let resolvedPath = targetPath;
-	    
-		while (this.app.vault.getAbstractFileByPath(resolvedPath)) {
-			resolvedPath = `${base} (Conflict ${counter})${ext}`;
-			counter++;
-		}
-		return resolvedPath;
 	}
 
 	private getPathsToSuppress(oldPath: string, newPath: string): string[] {
@@ -159,6 +150,7 @@ export class ObsidianDiskReconciler {
 				await this.app.vault.create(targetPath, content || '');
 			}
 		}
+		ObsidianDiskReconciler.lastReconciledContent.set(targetPath, { content: content || '', timestamp: Date.now() });
 	}
 
 	private async modifyPhysicalFile(file: TFile, content: string): Promise<void> {
@@ -169,6 +161,7 @@ export class ObsidianDiskReconciler {
 		} else {
 			await this.app.vault.modify(file, content);
 		}
+		ObsidianDiskReconciler.lastReconciledContent.set(file.path, { content: content || '', timestamp: Date.now() });
 	}
 
 	/**
@@ -203,13 +196,14 @@ export class ObsidianDiskReconciler {
 				// Writing '' here blanked the user's config (e.g. appearance.json -> "Unexpected end of JSON input").
 				if (payload.content !== undefined) {
 					await this.app.vault.adapter.write(payload.path, payload.content);
+					ObsidianDiskReconciler.lastReconciledContent.set(payload.path, { content: payload.content, timestamp: Date.now() });
 					this.triggerHotReload(payload.path);
 				}
 			}
 		} catch (e) {
 			console.error('[ObsidianDiskReconciler] Failed to create config file/folder:', e);
 		} finally {
-			ObsidianDiskReconciler.unsuppressPath(payload.path, 20);
+			ObsidianDiskReconciler.unsuppressPath(payload.path, 1000);
 		}
 	}
 
@@ -238,9 +232,8 @@ export class ObsidianDiskReconciler {
 						return;
 					}
 
-					let targetPath = payload.path;
-					let existing = this.app.vault.getAbstractFileByPath(targetPath);
-					let isConflict = false;
+					const targetPath = payload.path;
+					const existing = this.app.vault.getAbstractFileByPath(targetPath);
 
 					if (existing) {
 						if (payload.isFolder && existing instanceof TFolder) return;
@@ -249,36 +242,26 @@ export class ObsidianDiskReconciler {
 							// payload.content is never populated for remote nodes; the document itself is the truth.
 							const expected = payload.content ?? await this.crdtTextOf(payload.uuid);
 							if (this.serverWins || normalizeEol(diskContent) === normalizeEol(expected)) {
-							    this.eventBus.emit('RebalancePathUuid', { remoteUuid: payload.uuid, path: targetPath });
-							    return;
+								this.eventBus.emit('RebalancePathUuid', { remoteUuid: payload.uuid, path: targetPath });
+								return;
+							}
+							if (!isBinaryPath(targetPath)) {
+								return;
 							}
 						}
-
-						isConflict = true;
-						targetPath = this.resolveConflictPath(targetPath);
 					}
 
 					ObsidianDiskReconciler.suppressPath(targetPath);
 					try {
 						if (payload.isFolder) {
 							await this.ensureFolderExists(targetPath);
-						} else {
-							await this.createPhysicalFile(targetPath, payload.content || '');
-						}
-
-						if (isConflict) {
-							const setTimer = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
-							setTimer(() => {
-								this.eventBus.emit('LocalFileRenamed', {
-									oldPath: payload.path,
-									newPath: targetPath
-								});
-							}, 50);
+						} else if (payload.content !== undefined) {
+							await this.createPhysicalFile(targetPath, payload.content);
 						}
 					} catch (e) {
 						console.error('[ObsidianDiskReconciler] Failed to create file/folder:', e);
 					} finally {
-						ObsidianDiskReconciler.unsuppressPath(targetPath, 20);
+						ObsidianDiskReconciler.unsuppressPath(targetPath, 1000);
 					}
 				});
 			} finally {
@@ -305,13 +288,14 @@ export class ObsidianDiskReconciler {
 				const content = doc.getText('markdown').toString();
 				this.syncEngine.removeDoc(payload.uuid);
 				await this.app.vault.adapter.write(payload.newPath, content || '');
+				ObsidianDiskReconciler.lastReconciledContent.set(payload.newPath, { content: content || '', timestamp: Date.now() });
 			}
 			this.triggerHotReload(payload.newPath);
 		} catch (e) {
 			console.error('[ObsidianDiskReconciler] Failed to move config file:', e);
 		} finally {
-			ObsidianDiskReconciler.unsuppressPath(payload.oldPath, 20);
-			ObsidianDiskReconciler.unsuppressPath(payload.newPath, 20);
+			ObsidianDiskReconciler.unsuppressPath(payload.oldPath, 1000);
+			ObsidianDiskReconciler.unsuppressPath(payload.newPath, 1000);
 		}
 	}
 
@@ -325,22 +309,18 @@ export class ObsidianDiskReconciler {
 		const content = doc.getText('markdown').toString();
 		this.syncEngine.removeDoc(payload.uuid);
 
-		if (targetExists) {
-			targetPath = this.resolveConflictPath(targetPath);
-		}
-
 		ObsidianDiskReconciler.suppressPath(targetPath);
 		try {
 			await this.createPhysicalFile(targetPath, content || '');
 		} catch (e) {
 			console.error('[ObsidianDiskReconciler] Failed to rehydrate missing moved file:', e);
 		} finally {
-			ObsidianDiskReconciler.unsuppressPath(targetPath, 20);
+			ObsidianDiskReconciler.unsuppressPath(targetPath, 1000);
 		}
 	}
 
 	private async resolveTargetConflict(payload: { uuid: string; oldPath: string; newPath: string }, targetExists: unknown): Promise<{ targetPath: string; rebalanced: boolean }> {
-		let targetPath = payload.newPath;
+		const targetPath = payload.newPath;
 		if (targetExists && (targetExists as { path?: string }).path !== payload.oldPath) {
 			if ((targetExists as { stat?: { size?: number } }).stat?.size === 0) {
 				try {
@@ -356,19 +336,10 @@ export class ObsidianDiskReconciler {
 				const incomingContent = doc.getText('markdown').toString();
 				const diskContent = targetExists instanceof TFile ? await this.readPhysicalFileContent(targetExists) : null;
 
-				if (diskContent === incomingContent) {
+				if (diskContent === incomingContent || !isBinaryPath(targetPath)) {
 					this.eventBus.emit('RebalancePathUuid', { remoteUuid: payload.uuid, path: targetPath });
 					return { targetPath, rebalanced: true };
 				}
-
-				targetPath = this.resolveConflictPath(targetPath);
-				const setTimer = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
-				setTimer(() => {
-					this.eventBus.emit('LocalFileRenamed', {
-						oldPath: payload.newPath,
-						newPath: targetPath
-					});
-				}, 50);
 			}
 		}
 		return { targetPath, rebalanced: false };
@@ -417,15 +388,12 @@ export class ObsidianDiskReconciler {
 							if (crdtContent && file instanceof TFile) {
 								ObsidianDiskReconciler.suppressPath(targetPath);
 								await this.modifyPhysicalFile(file, crdtContent);
-								ObsidianDiskReconciler.unsuppressPath(targetPath, 20);
+								ObsidianDiskReconciler.unsuppressPath(targetPath, 1000);
 							}
 						} catch (e) {
 							console.error('[ObsidianDiskReconciler] Failed to rename file:', e);
 						} finally {
-							const setTimer = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
-							setTimer(() => {
-								for (const p of pathsToSuppress) ObsidianDiskReconciler.unsuppressPath(p, 20);
-							}, 20);
+							for (const p of pathsToSuppress) ObsidianDiskReconciler.unsuppressPath(p, 1000);
 						}
 					});
 				});
@@ -450,7 +418,7 @@ export class ObsidianDiskReconciler {
 						} catch (e) {
 							console.error('[ObsidianDiskReconciler] Failed to delete config file:', e);
 						} finally {
-							ObsidianDiskReconciler.unsuppressPath(payload.path, 20);
+							ObsidianDiskReconciler.unsuppressPath(payload.path, 1000);
 						}
 						return;
 					}
@@ -465,7 +433,7 @@ export class ObsidianDiskReconciler {
 						// Already gone from disk is the outcome we wanted; Obsidian's cache just lagged.
 						if ((e as { code?: string })?.code !== 'ENOENT') console.error('[ObsidianDiskReconciler] Failed to trash file:', e);
 					} finally {
-						ObsidianDiskReconciler.unsuppressPath(payload.path, 20);
+						ObsidianDiskReconciler.unsuppressPath(payload.path, 1000);
 					}
 				});
 			} finally {
@@ -502,20 +470,21 @@ export class ObsidianDiskReconciler {
 									}
 								}
 								await this.app.vault.adapter.write(payload.path, payload.content);
+								ObsidianDiskReconciler.lastReconciledContent.set(payload.path, { content: payload.content, timestamp: Date.now() });
 								this.triggerHotReload(payload.path);
 							}
 						} catch (e) {
 							console.error('[ObsidianDiskReconciler] Failed to write config file:', e);
 						} finally {
-							ObsidianDiskReconciler.unsuppressPath(payload.path, 20);
+							ObsidianDiskReconciler.unsuppressPath(payload.path, 1000);
 						}
 					} else {
 						try {
-							await this.writeNonConfigFile(file, payload);
+							await this.writeNonConfigFile(file instanceof TFile ? file : null, payload);
 						} catch (e) {
 							console.error('[ObsidianDiskReconciler] Failed to write binary/text content:', e);
 						} finally {
-							ObsidianDiskReconciler.unsuppressPath(payload.path, 20);
+							ObsidianDiskReconciler.unsuppressPath(payload.path, 1000);
 						}
 					}
 				});
@@ -531,6 +500,9 @@ export class ObsidianDiskReconciler {
 		const normPayload = isBinaryPath(payload.path) ? payload.content : payload.content.replace(/\r\n/g, '\n');
 
 		if (normDisk !== normPayload) {
+			if (!this.serverWins && !isBinaryPath(payload.path) && normDisk && normPayload.trim().length > 0 && normDisk.includes(normPayload.trim())) {
+				return;
+			}
 			ObsidianDiskReconciler.suppressPath(payload.path);
 			if (file && file instanceof TFile) {
 				await this.modifyPhysicalFile(file, payload.content);
@@ -569,5 +541,8 @@ export class ObsidianDiskReconciler {
 
 	public destroy(): void {
 		this.fileLocks.clear();
+		ObsidianDiskReconciler.suppressedPaths.clear();
+		ObsidianDiskReconciler.suppressionDepth.clear();
+		ObsidianDiskReconciler.lastReconciledContent.clear();
 	}
 }

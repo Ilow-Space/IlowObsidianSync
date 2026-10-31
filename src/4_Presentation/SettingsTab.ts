@@ -204,23 +204,29 @@ export class SettingsTab extends PluginSettingTab {
 						}
 					},
 					{
-						name: 'Force Sync & Compact',
-						desc: 'Manually trigger an absolute sync, and compact database history to save database storage space.',
+						name: 'Manual Sync',
+						desc: 'Manually trigger an immediate synchronization with the remote server.',
 						render: (setting) => {
 							setting.addButton((btn) =>
-								btn.setButtonText('Compact Now')
+								btn.setButtonText('Sync Now')
+									.setCta()
 									.onClick(async () => {
-										const file = this.app.workspace.getActiveFile();
-										if (!file) {
-											new Notice('No active file to compact');
+										const orchestrator = this.plugin.getSyncOrchestrator();
+										if (!orchestrator || !this.plugin.isKeyDerived) {
+											new Notice('Please derive your Master Key first.');
 											return;
 										}
+										btn.setDisabled(true);
+										btn.setButtonText('Syncing...');
 										try {
-											await this.plugin.getSyncOrchestrator()?.forceSyncAndCompact(file.path);
-											new Notice(`Successfully compacted: ${file.path}`);
+											await orchestrator.runFullSync();
+											new Notice('Sync completed successfully.');
 										} catch (err: unknown) {
 											const msg = err instanceof Error ? err.message : String(err);
-											new Notice(`Compaction failed: ${msg}`);
+											new Notice(`Sync failed: ${msg}`);
+										} finally {
+											btn.setDisabled(false);
+											btn.setButtonText('Sync Now');
 										}
 									})
 							);
@@ -322,19 +328,19 @@ export class SettingsTab extends PluginSettingTab {
 				heading: 'Maintenance & Danger Zone',
 				items: [
 					{
-						name: 'Hard Reset Local State',
+						name: 'Reset Local Cache',
 						desc: 'Wipe local IndexedDB database entirely and trigger a clean re-download of all file snapshots and updates from the remote server.',
 						render: (setting) => {
 							setting.addButton((btn) =>
 								btn
-									.setButtonText('Hard Reset Local State')
+									.setButtonText('Reset Local Cache')
 									.setDestructive()
 									.onClick(() => {
 										new ConfirmationModal(
 											this.app,
-											'Hard Reset Local State',
-											'Are you sure you want to hard reset local state? This will wipe your local CRDT database cache and re-download all documents from the server.',
-											'Hard Reset Local State',
+											'Reset Local Cache',
+											'Are you sure you want to reset local cache? This will wipe your local CRDT database cache and re-download all documents from the server.',
+											'Reset Local Cache',
 											async () => {
 												try {
 													if (this.plugin.getSyncOrchestrator()) {
@@ -346,7 +352,7 @@ export class SettingsTab extends PluginSettingTab {
 														req.onerror = () => reject(req.error || new Error('Failed to delete database'));
 														req.onblocked = () => resolve();
 													});
-													new Notice('Local state hard reset successful! Initiating fresh re-sync...');
+													new Notice('Local cache reset successful! Initiating fresh re-sync...');
 
 													if (this.plugin.isKeyDerived && this.plugin.getSyncOrchestrator()) {
 														await this.plugin.getVfsController()?.initialize();
@@ -355,153 +361,12 @@ export class SettingsTab extends PluginSettingTab {
 													}
 												} catch (err: unknown) {
 													const msg = err instanceof Error ? err.message : String(err);
-													new Notice(`Hard reset failed: ${msg}`);
+													new Notice(`Reset local cache failed: ${msg}`);
 												}
 											}
 										).open();
 									})
 							);
-						}
-					},
-					{
-						name: 'Force pull from server',
-						desc: 'Makes this vault match the server: discards the local sync cache and overwrites local notes and attachments with the server version. Nothing is uploaded. Notes that exist only on this device are kept. Copy your vault first if it holds edits you care about.',
-						render: (setting) => {
-							setting.addButton((btn) =>
-								btn
-									.setButtonText('Force pull')
-									.setDestructive()
-									.onClick(() => {
-										new ConfirmationModal(
-											this.app,
-											'Force pull from server',
-											'Local versions of every note and attachment that exists on the server will be overwritten with the server version. Notes that exist only on this device are kept. Continue?',
-											'Force pull',
-											async () => {
-												const orchestrator = this.plugin.getSyncOrchestrator();
-												if (!orchestrator || !this.plugin.isKeyDerived) {
-													new Notice('Unlock the vault first.');
-													return;
-												}
-												try {
-													new Notice('Force pull started...');
-													const { localOnly } = await orchestrator.forcePullServerState();
-													new Notice(`Force pull complete.${localOnly.length ? ` ${localOnly.length} local-only note(s) kept; the next sync will upload them.` : ''}`);
-												} catch (err: unknown) {
-													new Notice(`Force pull failed: ${err instanceof Error ? err.message : String(err)}`);
-												}
-											}
-										).open();
-									})
-							);
-						}
-					},
-					{
-						name: 'Check against other devices',
-						desc: 'Asks every other online device for the files that are really on its disk (hashes, not names) and compares them one-to-one with this device. On a mismatch both sides re-sync toward the server and the check repeats, up to 3 rounds. Hidden and config files are ignored.',
-						render: (setting) => {
-							setting.addButton((btn) =>
-								btn.setButtonText('Check now').onClick(async () => {
-									const peerCheck = this.plugin.getPeerTreeCheck();
-									if (!peerCheck || !this.plugin.isKeyDerived) {
-										new Notice('Unlock the vault first.');
-										return;
-									}
-									btn.setDisabled(true).setButtonText('Checking...');
-									try {
-										const r = await peerCheck.check();
-										if (r.status === 'no-peers') new Notice('No other online device answered.');
-										else if (r.status === 'match') new Notice(`Trees match 1:1 on every online device (round ${r.rounds}).`);
-										else {
-											const sample = r.peers.flatMap(p => [...p.onlyHere, ...p.onlyThere, ...p.differ]).slice(0, 5).join(', ');
-											new Notice(`Still different after ${r.rounds} rounds on ${r.peers.length} device(s): ${sample}. Run Force pull on the wrong device.`, 15000);
-										}
-									} catch (err: unknown) {
-										new Notice(`Peer check failed: ${err instanceof Error ? err.message : String(err)}`);
-									} finally {
-										btn.setDisabled(false).setButtonText('Check now');
-									}
-								})
-							);
-						}
-					},
-					{
-						name: 'Verify vault integrity',
-						desc: 'Rebuilds every note from exactly what the server holds and reports any that differ. The status light only means the local queue drained, so this is the check to run after a long offline period or a lossy connection.',
-						render: (setting) => {
-							setting
-								.addButton((button) =>
-									button
-										.setButtonText('Verify')
-										.onClick(async () => {
-											const orchestrator = this.plugin.getSyncOrchestrator();
-											if (!orchestrator || !this.plugin.isKeyDerived) {
-												new Notice('Connect and unlock the vault before verifying.');
-												return;
-											}
-
-											button.setDisabled(true);
-											button.setButtonText('Verifying...');
-											try {
-												const report = await orchestrator.verifyVaultIntegrity();
-												if (report.diverged.length === 0 && report.unreachable.length === 0) {
-													new Notice(`All ${report.checked} document(s) match the server.`);
-												} else {
-													const preview = report.diverged.slice(0, 5).join('\n');
-													console.warn('[Ilow Sync] Documents out of sync:', report);
-													new Notice(
-														`${report.diverged.length} document(s) differ from the server` +
-														(report.unreachable.length > 0 ? `, ${report.unreachable.length} unreachable` : '') +
-														(preview ? `:\n${preview}` : '') +
-														'\nSee the developer console for the full list.',
-														10000
-													);
-												}
-											} catch (err: unknown) {
-												const msg = err instanceof Error ? err.message : String(err);
-												new Notice(`Verification failed: ${msg}`);
-											} finally {
-												button.setDisabled(false);
-												button.setButtonText('Verify');
-											}
-										})
-								)
-								.addButton((button) =>
-									button
-										.setButtonText('Push Diverged Files')
-										.setCta()
-										.onClick(async () => {
-											const orchestrator = this.plugin.getSyncOrchestrator();
-											if (!orchestrator || !this.plugin.isKeyDerived) {
-												new Notice('Connect and unlock the vault before repairing.');
-												return;
-											}
-
-											button.setDisabled(true);
-											button.setButtonText('Pushing...');
-											try {
-												const report = await orchestrator.verifyVaultIntegrity(true);
-												const pushedCount = report.pushed?.length ?? 0;
-												if (report.diverged.length === 0) {
-													new Notice('No diverged files found. Vault is completely up to date!');
-												} else if (pushedCount === report.diverged.length) {
-													new Notice(`Successfully pushed ${pushedCount} diverged file(s) to the server!`);
-												} else {
-													new Notice(
-														`Pushed ${pushedCount} of ${report.diverged.length} diverged file(s). ` +
-														`${report.diverged.length - pushedCount} failed and were queued for retry -- see the developer console.`,
-														10000
-													);
-												}
-											} catch (err: unknown) {
-												const msg = err instanceof Error ? err.message : String(err);
-												new Notice(`Pushing diverged files failed: ${msg}`);
-											} finally {
-												button.setDisabled(false);
-												button.setButtonText('Push Diverged Files');
-											}
-										})
-								);
 						}
 					},
 					{
